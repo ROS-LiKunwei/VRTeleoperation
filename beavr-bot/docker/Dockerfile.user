@@ -1,0 +1,23 @@
+FROM python:3.10-slim
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PATH=/app/.venv/bin:$PATH
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential git curl \
+    libgl1 \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+RUN useradd --create-home --shell /bin/bash app_user
+
+WORKDIR /app
+RUN chown -R app_user:app_user /app
+
+USER app_user
+
+COPY requirements.txt requirements.txt
+RUN python -m pip install --upgrade pip && pip install --user -r requirements.txt
+
+COPY . .
+
+CMD ["/bin/bash"]

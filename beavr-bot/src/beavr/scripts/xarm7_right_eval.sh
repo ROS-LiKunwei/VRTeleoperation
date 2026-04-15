@@ -1,0 +1,15 @@
+python src/beavr/scripts/control_robot.py \
+  --robot.type=multi_robot_adapter \
+  --control.type=record \
+  --control.fps=30 \
+  --control.warmup_time_s=10 \
+  --control.episode_time_s=45 \
+  --control.reset_time_s=45 \
+  --control.num_episodes=10 \
+  --control.single_task="Move the right xarm7 to the target position" \
+  --teleop.robot_name=leap,xarm7 \
+  --teleop.operate=false \
+  --control.resume=false \
+  --control.policy.path=arclabmit/lx7r_act_pickup_model \
+  --control.repo_id=arclabmit/eval_lx7r_act_pickup_model \
+  --control.resume=true

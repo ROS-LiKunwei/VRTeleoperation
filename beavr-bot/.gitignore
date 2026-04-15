@@ -1,0 +1,99 @@
+# VS Code config
+.vscode
+
+# Package Installation
+holo_bot.egg-info
+
+# Cache Folders
+*__pycache__*
+
+# Debugging scripts
+debuggers/
+
+# Calibration Files and Images
+# calibration_files/
+
+# Notebooks
+notebooks/*
+
+# Data
+extracted_data/*
+
+urdf/*
+# *.png
+# *.npy
+# *.h5
+
+*.mp4
+
+# Logs
+logs/pose_log*
+logs/*.json
+logs/*.txt
+
+*ik*.json
+*log*.json
+
+xarm_ros/*
+
+# Docker
+docker/docker_build_private.sh
+
+# VR
+VR/Bimanual-Robot-Unity/Assets/Oculus/LipSync/Plugins/MacOSX/OVRLipSync.bundle
+VR/Bimanual-Robot-Unity/Assets/Oculus/LipSync/Plugins/iOS/libOVRLipSync.dylib
+
+# Python
+dist/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Pytest
+.pytest_cache/
+
+# Pyright
+.pyright*
+
+# Pycharm
+.idea/
+
+# Egg
+*.egg-info/
+
+# Outputs
+outputs/
+
+# Data
+data/

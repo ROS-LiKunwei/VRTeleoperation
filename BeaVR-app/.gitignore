@@ -1,0 +1,73 @@
+### Unity ###
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Unity project settings
+[Ll]ibrary/
+[Tt]emp/
+[Bb]uild/
+[Bb]uilds/
+[Ll]ogs/
+[Oo]bj/
+[Mm]emoryCaptures/
+UserSettings/
+sysinfo.txt
+
+# Asset pipeline cache
+/[Aa]sset[Ss]tore/
+Assets/AssetStoreTools*
+
+# Auto-generated VS/JetBrains files
+.vs/
+.vscode/
+.idea/
+*.csproj
+*.unityproj
+*.sln
+*.suo
+*.tmp
+*.user
+*.userprefs
+*.pidb
+*.booproj
+*.svd
+*.pdb
+*.mdb
+*.opendb
+*.VC.db
+
+# Unity build output
+*.apk
+*.aab
+*.xcodeproj
+*.xcworkspace
+*.xcuserstate
+*.ipa
+*.exe
+*.dll
+*.so
+*.dylib
+*.bundle
+
+# Unity packages
+*.unitypackage
+
+# Crash reports
+*.stacktrace
+
+### C# / .NET ###
+[Bb]in/
+[Oo]bj/
+*.exe
+*.dll
+*.app
+*.log
+*.cache
+*.dbmdl
+
+### Other ###
+# Ignore everything from Git LFS mess
+*.psd
+*.mp4
+*.mov

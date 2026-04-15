@@ -1,0 +1,14 @@
+name: beavr
+channels:
+  - defaults
+  - conda-forge
+dependencies:
+  - python=3.10.13
+  - pip>=23.3.1
+  - ffmpeg
+  - cmake>=3.29.0.1
+  - jupyterlab
+  - ipykernel
+
+  - pip:
+      - -e .

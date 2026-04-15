@@ -1,0 +1,24 @@
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PATH=/app/.venv/bin:$PATH
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 python3-pip python3-venv \
+    build-essential git curl \
+    libgl1 \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+RUN useradd --create-home --shell /bin/bash app_user
+
+WORKDIR /app
+RUN chown -R app_user:app_user /app
+
+USER app_user
+
+COPY requirements.txt requirements.txt
+RUN python3 -m pip install --upgrade pip && pip3 install --user -r requirements.txt
+
+COPY . .
+
+CMD ["/bin/bash"]
