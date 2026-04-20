@@ -222,15 +222,15 @@ class CompositeRobotConfig:
         }
 
 
-def load_robot_config(robot_name: str, laterality: Laterality) -> Any:
+def load_robot_config(robot_name: str, laterality: Laterality, simulation_mode: bool = False) -> Any:
     """
     根据机器人名称（可多个）和侧别(laterality)加载机器人配置.
-
     同时支持单机器人以及用逗号分隔的多机器人.
 
     Args:
         robot_name: Single robot name or comma-separated list (e.g., "leap,xarm7")
         laterality: Laterality enum for robot configuration
+        simulation_mode: Whether to run in simulation mode
 
     Returns:
         Single robot config or CompositeRobotConfig for multiple robots
@@ -244,13 +244,13 @@ def load_robot_config(robot_name: str, laterality: Laterality) -> Any:
 
     if len(robot_names) == 1:
         # Single robot - use existing logic
-        return _load_single_robot(robot_names[0], laterality)
+        return _load_single_robot(robot_names[0], laterality, simulation_mode)
     else:
         # Multiple robots - create composite config
-        return _load_multiple_robots(robot_names, laterality)
+        return _load_multiple_robots(robot_names, laterality, simulation_mode)
 
 
-def _load_single_robot(robot_name: str, laterality: Laterality) -> Any:
+def _load_single_robot(robot_name: str, laterality: Laterality, simulation_mode: bool = False) -> Any:
     """Load configuration for a single robot."""
     logger.info(f"📦 Loading single robot config: {robot_name}")
 
@@ -262,31 +262,37 @@ def _load_single_robot(robot_name: str, laterality: Laterality) -> Any:
             f"Could not find config module for robot '{robot_name}'. Available configs in {_CONFIGS_PKG}/"
         ) from exc
 
-    # Retrieve and instantiate the registered robot config
-    cfg_cls = TeleopRobotConfig.get_choice_class(robot_name)
+    # 检索并实例化已注册的机器人配置
+    cfg_cls = TeleopRobotConfig.get_choice_class(robot_name) # 直接去花名册里查：“名字叫 xarm7 的是谁注册的？” 花名册直接返回 XArm7Config 这个类，然后系统就可以愉快地去实例化它了。
 
     # Build kwargs dynamically to ensure compatibility with robot config __init__ signature
     cfg_kwargs = {}
     if "laterality" in getattr(cfg_cls, "__dataclass_fields__", {}):
+        """
+            __dataclass_fields__: 这是 Python 中 @dataclass 装饰器自动给类生成的一份**“说明书”**（字典形式），里面罗列了这个类所有定义好的变量名字
+            getattr(..., {})：安全地获取这本说明书。万一这个类不是用 @dataclass 写的，拿不到说明书，就返回一个空字典 {}，防止程序报错崩溃。
+        """
         cfg_kwargs["laterality"] = laterality
+    if "simulation_mode" in getattr(cfg_cls, "__dataclass_fields__", {}):
+        cfg_kwargs["simulation_mode"] = simulation_mode
 
     robot_config = cfg_cls(**cfg_kwargs)
 
-    logger.info(f"✅ Loaded robot configuration: {robot_name} with laterality: {laterality.value}")
+    logger.info(f"✅ Loaded robot configuration: {robot_name} with laterality: {laterality.value}, simulation_mode: {simulation_mode}")
     return robot_config
 
 
-def _load_multiple_robots(robot_names: List[str], laterality: Laterality) -> CompositeRobotConfig:
-    """Load and combine configurations for multiple robots."""
+def _load_multiple_robots(robot_names: List[str], laterality: Laterality, simulation_mode: bool = False) -> CompositeRobotConfig:
+    """为多个机器人加载并合并配置"""
     logger.info(f"📦 Loading composite robot config: {','.join(robot_names)}")
 
     individual_configs = []
 
     for robot_name in robot_names:
         # Load individual robot config
-        robot_config = _load_single_robot(robot_name, laterality)
+        robot_config = _load_single_robot(robot_name, laterality, simulation_mode)
         individual_configs.append(robot_config)
-        logger.info(f"  ✅ Loaded {robot_name} config with laterality: {laterality.value}")
+        logger.info(f"  ✅ Loaded {robot_name} config with laterality: {laterality.value}, simulation_mode: {simulation_mode}")
 
     # Create composite config
     composite_name = ",".join(robot_names)

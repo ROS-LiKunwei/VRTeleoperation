@@ -73,7 +73,7 @@ public class FieldInputManager : MonoBehaviour
     {
         yield return new WaitForSeconds(delay);
         
-        var detector = FindObjectOfType<GestureDetectorXR>();
+        var detector = FindFirstObjectByType<GestureDetectorXR>();
         if (detector != null)
         {
             if (detector.AreAllConnectionsEstablished())

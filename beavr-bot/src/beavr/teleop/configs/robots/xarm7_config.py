@@ -156,7 +156,8 @@ class XArm7OperatorCfg:
             logging_config=self.logging_config,
         )
 
-
+# 这是一个装饰器（Decorator）。当 Python 程序刚启动，加载到 xarm7_config.py 这个文件时，这个装饰器就像是 XArm7Config 这个类主动举手喊了一句：“报告 TeleopRobotConfig 长官，我来报到了！我的代号是 xarm7，以后有人找 xarm7 的配置，直接把我的图纸（Class）给他！”
+# 系统在后台默默把 {"xarm7": XArm7Config} 记在了字典里。
 @dataclass
 @TeleopRobotConfig.register_subclass(robots.ROBOT_NAME_XARM7)
 class XArm7Config:

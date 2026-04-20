@@ -1,0 +1,5 @@
+/home/likunwei/dataCollection/BeaVR-app/BeaVR-Unity/.utmp/Debug/2m2p436s/arm64-v8a/CMakeFiles/edit_cache.dir
+/home/likunwei/dataCollection/BeaVR-app/BeaVR-Unity/.utmp/Debug/2m2p436s/arm64-v8a/CMakeFiles/rebuild_cache.dir
+/home/likunwei/dataCollection/BeaVR-app/BeaVR-Unity/.utmp/Debug/2m2p436s/arm64-v8a/FramePacing/CMakeFiles/swappywrapper.dir
+/home/likunwei/dataCollection/BeaVR-app/BeaVR-Unity/.utmp/Debug/2m2p436s/arm64-v8a/FramePacing/CMakeFiles/edit_cache.dir
+/home/likunwei/dataCollection/BeaVR-app/BeaVR-Unity/.utmp/Debug/2m2p436s/arm64-v8a/FramePacing/CMakeFiles/rebuild_cache.dir

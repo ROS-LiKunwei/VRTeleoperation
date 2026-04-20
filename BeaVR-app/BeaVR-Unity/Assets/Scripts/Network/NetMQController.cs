@@ -7,11 +7,12 @@ using System.Collections.Generic;
 using System.IO;
 
 /// <summary>
-/// Central controller for all NetMQ socket operations.
-/// Manages initialization, socket creation, and cleanup.
+/// ZMQ通信控制器，管理所有NetMQ套接字操作。
+/// 负责初始化、套接字创建和清理。
 /// </summary>
 public class NetMQController : MonoBehaviour
 {
+    // 单例实例
     private static NetMQController _instance;
     public static NetMQController Instance 
     {
@@ -27,25 +28,29 @@ public class NetMQController : MonoBehaviour
         }
     }
 
-    // Socket references
+    // sokets引用
     private Dictionary<string, PushSocket> sockets = new Dictionary<string, PushSocket>();
     private Dictionary<string, bool> socketConnectionStatus = new Dictionary<string, bool>();
     
-    // Network settings from JSON
+    // 从JSON加载的网络设置
     private string ipAddress;
     private string rightKeypointPort;
     private string leftKeypointPort;
     private string resolutionPort;
     private string pausePort;
     
-    // Initialization flags
+    // 初始化标志
     private bool netMQInitialized = false;
     
-    // Add this at class level
+    // 日志时间控制
     private float lastLogTime = 0f;
     
+    // 套接字失败计数
     private Dictionary<string, int> socketFailCounts = new Dictionary<string, int>();
     
+    /// <summary>
+    /// 初始化NetMQController
+    /// </summary>
     private void Awake()
     {
         if (_instance != null && _instance != this)
@@ -57,47 +62,48 @@ public class NetMQController : MonoBehaviour
         _instance = this;
         DontDestroyOnLoad(gameObject);
         
-        // Initialize NetMQ early
+        // 早期初始化NetMQ
         InitializeNetMQ();
         
-        // Load network configuration
+        // 加载网络配置
         LoadNetworkConfig();
     }
     
     /// <summary>
-    /// Load network configuration from JSON file
+    /// 从JSON文件加载网络配置
     /// </summary>
     private void LoadNetworkConfig()
     {
         try
         {
-            // Load JSON from Resources folder
+            // 从Resources文件夹加载JSON文件
             TextAsset configFile = Resources.Load<TextAsset>("Configurations/Network");
             if (configFile == null)
             {
-                Debug.LogError("NetMQController: Failed to load Network.json");
+                Debug.LogError("NetMQController: 加载Network.json失败");
                 return;
             }
             
-            // Parse JSON
+            // 解析JSON
             var configJson = JsonUtility.FromJson<NetworkSettings>(configFile.text);
             
-            // Store configuration values (ports only). IP will come from PlayerPrefs.
+            // 存储配置值（包括IP地址）
+            ipAddress = configJson.IPAddress;
             rightKeypointPort = configJson.rightkeyptPortNum;
             leftKeypointPort = configJson.leftkeyptPortNum;
             resolutionPort = configJson.resolutionPortNum;
             pausePort = configJson.PausePortNum;
             
-            Debug.Log("NetMQController: Network ports loaded from JSON");
+            Debug.Log($"NetMQController: 从JSON加载网络配置 - IP: {ipAddress}");
         }
         catch (Exception e)
         {
-            Debug.LogError($"NetMQController: Error loading network config - {e.Message}");
+            Debug.LogError($"NetMQController: 加载网络配置错误 - {e.Message}");
         }
     }
     
     /// <summary>
-    /// Initialize the NetMQ system
+    /// 初始化NetMQ系统
     /// </summary>
     public void InitializeNetMQ()
     {
@@ -105,108 +111,161 @@ public class NetMQController : MonoBehaviour
         {
             if (!netMQInitialized)
             {
-                Debug.Log("NetMQController: Initializing NetMQ...");
+                Debug.Log("NetMQController: 初始化NetMQ...");
                 
-                // Use the recommended approach instead of the obsolete ManualTerminationTakeOver
-                // This ensures NetMQ is properly initialized for the current thread context
+                // 使用推荐的方法替代过时的ManualTerminationTakeOver
+                // 这确保NetMQ为当前线程上下文正确初始化
                 AsyncIO.ForceDotNet.Force();
                 
-                // Mark as initialized
+                // 标记为已初始化
                 netMQInitialized = true;
-                Debug.Log("NetMQController: NetMQ initialized successfully");
+                Debug.Log("NetMQController: NetMQ初始化成功");
             }
         }
         catch (Exception e)
         {
-            Debug.LogError($"NetMQController: Error initializing NetMQ - {e.GetType().Name}: {e.Message}");
+            Debug.LogError($"NetMQController: 初始化NetMQ错误 - {e.GetType().Name}: {e.Message}");
+            // 即使初始化失败，也不抛出异常，允许应用继续运行
+            netMQInitialized = false;
         }
     }
     
     /// <summary>
-    /// Create a socket with the given name and address
+    /// 创建具有给定名称和地址的sockets
     /// </summary>
+    /// <param name="socketName">套接字名称</param>
+    /// <param name="address">套接字地址</param>
+    /// <returns>如果创建成功则返回true，否则返回false</returns>
     public bool CreateSocket(string socketName, string address)
     {
         try
         {
             if (sockets.ContainsKey(socketName))
             {
-                // Socket with this name already exists
-                Debug.LogWarning($"NetMQController: Socket '{socketName}' already exists");
+                // 具有此名称的套接字已存在
+                Debug.LogWarning($"NetMQController: 套接字 '{socketName}' 已存在");
                 return true;
             }
             
-            // Create new socket
-            Debug.Log($"NetMQController: Creating socket '{socketName}' at {address}");
+            // 检查NetMQ是否已初始化
+            if (!netMQInitialized)
+            {
+                Debug.LogWarning($"NetMQController: NetMQ未初始化，正在尝试初始化...");
+                InitializeNetMQ();
+                if (!netMQInitialized)
+                {
+                    Debug.LogError($"NetMQController: NetMQ初始化失败，无法创建套接字 '{socketName}'");
+                    socketConnectionStatus[socketName] = false;
+                    return false;
+                }
+            }
+            
+            // 验证地址格式
+            if (string.IsNullOrEmpty(address) || address == "tcp://:")
+            {
+                Debug.LogError($"NetMQController: 无效的地址格式: {address}");
+                socketConnectionStatus[socketName] = false;
+                return false;
+            }
+            
+            // 创建新套接字
+            Debug.Log($"NetMQController: 创建套接字 '{socketName}' 在 {address}");
             PushSocket socket = new PushSocket();
+            socket.Options.SendHighWatermark = 1000;
+            socket.Options.Linger = TimeSpan.FromMilliseconds(100);
             socket.Connect(address);
             
-            // Store socket
+            // 存储套接字
             sockets[socketName] = socket;
             socketConnectionStatus[socketName] = true;
             
-            Debug.Log($"NetMQController: Socket '{socketName}' created and connected to {address}");
+            Debug.Log($"NetMQController: 套接字 '{socketName}' 创建并连接到 {address}");
             return true;
         }
         catch (Exception e)
         {
-            Debug.LogError($"NetMQController: Error creating socket '{socketName}' - {e.GetType().Name}: {e.Message}");
+            Debug.LogError($"NetMQController: 创建套接字 '{socketName}' 错误 - {e.GetType().Name}: {e.Message}");
             socketConnectionStatus[socketName] = false;
+            // 确保不会存储空套接字
+            if (sockets.ContainsKey(socketName))
+            {
+                sockets.Remove(socketName);
+            }
             return false;
         }
     }
     
     /// <summary>
-    /// Create standard sockets based on network configuration
+    /// 根据网络配置创建标准套接字
     /// </summary>
     public void CreateStandardSockets()
     {
         try
         {
-            Debug.Log("NetMQController: Creating standard sockets...");
+            Debug.Log("NetMQController: 创建标准套接字...");
             
-            // Prefer IP from PlayerPrefs (set by GUI)
-            string prefsIP = PlayerPrefs.GetString(SaveAndReturnIP.PlayerPrefsKey, string.Empty);
-            if (!string.IsNullOrEmpty(prefsIP))
-            {
-                ipAddress = prefsIP;
-            }
-
-            // Check if IP is unavailable, skip socket creation
+            // 优先使用JSON配置中的IP地址，如果没有则使用PlayerPrefs中的IP
             if (string.IsNullOrEmpty(ipAddress) || ipAddress == "undefined")
             {
-                Debug.LogWarning("NetMQController: IP Address is undefined. Connection must be established manually.");
+                string prefsIP = PlayerPrefs.GetString("ServerIP", string.Empty);
+                if (!string.IsNullOrEmpty(prefsIP))
+                {
+                    ipAddress = prefsIP;
+                    Debug.Log($"NetMQController: 使用PlayerPrefs中的IP地址: {ipAddress}");
+                }
+            }
+            else
+            {
+                Debug.Log($"NetMQController: 使用JSON配置中的IP地址: {ipAddress}");
+            }
+
+            // 检查IP是否不可用，跳过套接字创建
+            if (string.IsNullOrEmpty(ipAddress) || ipAddress == "undefined")
+            {
+                Debug.LogWarning("NetMQController: IP地址未定义。必须手动建立连接。");
                 return;
             }
             
-            // Create right hand socket
+            // 检查端口配置
+            if (string.IsNullOrEmpty(rightKeypointPort) || string.IsNullOrEmpty(leftKeypointPort) ||
+                string.IsNullOrEmpty(resolutionPort) || string.IsNullOrEmpty(pausePort))
+            {
+                Debug.LogError("NetMQController: 端口配置不完整");
+                return;
+            }
+            
+            // 创建右手套接字
             string rightHandAddress = $"tcp://{ipAddress}:{rightKeypointPort}";
             CreateSocket("RightHand", rightHandAddress);
             
-            // Create left hand socket
+            // 创建左手套接字
             string leftHandAddress = $"tcp://{ipAddress}:{leftKeypointPort}";
             CreateSocket("LeftHand", leftHandAddress);
             
-            // Create resolution socket
+            // 创建分辨率套接字
             string resolutionAddress = $"tcp://{ipAddress}:{resolutionPort}";
             CreateSocket("Resolution", resolutionAddress);
             
-            // Create pause socket
+            // 创建暂停套接字
             string pauseAddress = $"tcp://{ipAddress}:{pausePort}";
             CreateSocket("Pause", pauseAddress);
             
-            // Log socket status
+            // 记录套接字状态
             LogSocketStatus();
         }
         catch (Exception e)
         {
-            Debug.LogError($"NetMQController: Error creating standard sockets - {e.Message}");
+            Debug.LogError($"NetMQController: 创建标准套接字错误 - {e.Message}");
+            // 即使出现错误，也不抛出异常，允许应用继续运行
         }
     }
     
     /// <summary>
-    /// Send a message through a named socket with timeout protection
+    /// 通过命名套接字发送消息，带有超时保护
     /// </summary>
+    /// <param name="socketName">套接字名称</param>
+    /// <param name="message">要发送的消息</param>
+    /// <returns>如果发送成功则返回true，否则返回false</returns>
     public bool SendMessage(string socketName, string message)
     {
         try
@@ -222,42 +281,42 @@ public class NetMQController : MonoBehaviour
                 return false;
             }
 
-            // Add timeout protection
+            // 添加超时保护
             bool sent = socket.TrySendFrame(TimeSpan.FromMilliseconds(10), message);
             
             if (!sent)
             {
-                // If send times out, mark this socket as potentially disconnected
+                // 如果发送超时，将此套接字标记为可能断开连接
                 socketFailCounts[socketName] = socketFailCounts.GetValueOrDefault(socketName, 0) + 1;
                 
-                // If we've failed multiple times, try to reconnect this socket
+                // 如果多次失败，尝试重新连接此套接字
                 if (socketFailCounts[socketName] > 5)
                 {
-                    Debug.LogWarning($"Socket {socketName} has failed multiple times. Attempting reconnection...");
+                    Debug.LogWarning($"套接字 {socketName} 多次失败。尝试重新连接...");
                     ReconnectSocket(socketName);
                     socketFailCounts[socketName] = 0;
                 }
                 return false;
             }
             
-            // Reset fail count on success
+            // 成功时重置失败计数
             socketFailCounts[socketName] = 0;
             
-            // Occasional logging
+            // 偶尔记录日志
             if (Time.time - lastLogTime > 1.0f)
             {
                 lastLogTime = Time.time;
-                Debug.Log($"NetMQController: Sent message to '{socketName}'");
+                Debug.Log($"NetMQController: 发送消息到 '{socketName}'");
             }
 
             return true;
         }
         catch (Exception e)
         {
-            Debug.LogError($"NetMQController: Error sending message to '{socketName}' - {e.Message}");
+            Debug.LogError($"NetMQController: 发送消息到 '{socketName}' 错误 - {e.Message}");
             socketFailCounts[socketName] = socketFailCounts.GetValueOrDefault(socketName, 0) + 1;
             
-            // If exception keeps happening, try to reconnect
+            // 如果异常持续发生，尝试重新连接
             if (socketFailCounts[socketName] > 3)
             {
                 ReconnectSocket(socketName);
@@ -268,7 +327,7 @@ public class NetMQController : MonoBehaviour
     }
     
     /// <summary>
-    /// Close all sockets
+    /// 关闭所有套接字
     /// </summary>
     public void CloseAllSockets()
     {
@@ -282,15 +341,16 @@ public class NetMQController : MonoBehaviour
     }
     
     /// <summary>
-    /// Close and dispose a specific socket
+    /// 关闭并释放特定套接字
     /// </summary>
+    /// <param name="socketName">套接字名称</param>
     public void CloseSocket(string socketName)
     {
         try
         {
             if (!sockets.ContainsKey(socketName))
             {
-                Debug.LogWarning($"NetMQController: Socket '{socketName}' does not exist");
+                Debug.LogWarning($"NetMQController: 套接字 '{socketName}' 不存在");
                 return;
             }
             
@@ -300,7 +360,7 @@ public class NetMQController : MonoBehaviour
             {
                 socket.Close();
                 socket.Dispose();
-                Debug.Log($"NetMQController: Socket '{socketName}' closed and disposed");
+                Debug.Log($"NetMQController: 套接字 '{socketName}' 已关闭并释放");
             }
             
             sockets.Remove(socketName);
@@ -308,27 +368,27 @@ public class NetMQController : MonoBehaviour
         }
         catch (Exception e)
         {
-            Debug.LogError($"NetMQController: Error closing socket '{socketName}' - {e.GetType().Name}: {e.Message}");
+            Debug.LogError($"NetMQController: 关闭套接字 '{socketName}' 错误 - {e.GetType().Name}: {e.Message}");
         }
     }
     
     /// <summary>
-    /// Log the status of all sockets
+    /// 记录所有套接字的状态
     /// </summary>
     public void LogSocketStatus()
     {
-        Debug.Log("===== NETMQ SOCKET STATUS =====");
-        Debug.Log($"IP Address: {ipAddress}");
+        Debug.Log("===== NETMQ 套接字状态 =====");
+        Debug.Log($"IP地址: {ipAddress}");
         
         if (sockets.Count == 0)
         {
-            Debug.Log("No sockets created");
+            Debug.Log("未创建套接字");
         }
         else
         {
             foreach (var socketName in sockets.Keys)
             {
-                Debug.Log($"Socket: {socketName} - Connected: {socketConnectionStatus[socketName]}");
+                Debug.Log($"套接字: {socketName} - 已连接: {socketConnectionStatus[socketName]}");
             }
         }
         
@@ -336,7 +396,7 @@ public class NetMQController : MonoBehaviour
     }
     
     /// <summary>
-    /// Perform cleanup when the application quits
+    /// 应用程序退出时执行清理
     /// </summary>
     private void OnApplicationQuit()
     {
@@ -344,52 +404,53 @@ public class NetMQController : MonoBehaviour
     }
     
     /// <summary>
-    /// Cleanup NetMQ resources
+    /// 清理NetMQ资源
     /// </summary>
     public void CleanupNetMQ()
     {
         try
         {
-            // Close all sockets first
+            // 先关闭所有套接字
             CloseAllSockets();
             
-            // Then clean up NetMQ
+            // 然后清理NetMQ
             if (netMQInitialized)
             {
-                Debug.Log("NetMQController: Cleaning up NetMQ...");
+                Debug.Log("NetMQController: 清理NetMQ...");
                 NetMQConfig.Cleanup(false);
                 netMQInitialized = false;
-                Debug.Log("NetMQController: NetMQ cleaned up");
+                Debug.Log("NetMQController: NetMQ已清理");
             }
         }
         catch (Exception e)
         {
-            Debug.LogError($"NetMQController: Error cleaning up NetMQ - {e.GetType().Name}: {e.Message}");
+            Debug.LogError($"NetMQController: 清理NetMQ错误 - {e.GetType().Name}: {e.Message}");
         }
     }
     
     /// <summary>
-    /// Perform diagnostic tests by sending test messages
+    /// 通过发送测试消息执行诊断测试
     /// </summary>
+    /// <returns>如果所有测试成功则返回true，否则返回false</returns>
     public bool PerformDiagnosticTests()
     {
-        Debug.Log("NetMQController: Starting diagnostic tests...");
+        Debug.Log("NetMQController: 开始诊断测试...");
         bool allSuccessful = true;
         
-        // If sockets are empty, likely IP was undefined
+        // 如果套接字为空，可能是IP未定义
         if (sockets.Count == 0)
         {
-            Debug.LogWarning("NetMQController: No sockets available for diagnostic tests");
+            Debug.LogWarning("NetMQController: 没有可用的套接字进行诊断测试");
             return false;
         }
         
-        // Test each socket
+        // 测试每个套接字
         foreach (var socketName in sockets.Keys)
         {
             string testMsg = $"DIAGNOSTIC_TEST_{socketName}_{DateTime.Now:HH:mm:ss.fff}";
             bool success = SendMessage(socketName, testMsg);
             
-            Debug.Log($"NetMQController: Diagnostic test for '{socketName}' - Success: {success}");
+            Debug.Log($"NetMQController: 诊断测试 '{socketName}' - 成功: {success}");
             
             if (!success)
             {
@@ -397,66 +458,81 @@ public class NetMQController : MonoBehaviour
             }
         }
         
-        Debug.Log($"NetMQController: Diagnostic tests completed - Overall success: {allSuccessful}");
+        Debug.Log($"NetMQController: 诊断测试完成 - 整体成功: {allSuccessful}");
         return allSuccessful;
     }
     
     /// <summary>
-    /// Check if NetMQ is initialized
+    /// 检查NetMQ是否已初始化
     /// </summary>
+    /// <returns>如果已初始化则返回true，否则返回false</returns>
     public bool IsInitialized()
     {
         return netMQInitialized;
     }
 
     /// <summary>
-    /// Connect to all sockets using provided configuration
+    /// 使用提供的配置连接到所有套接字
     /// </summary>
+    /// <param name="ipAddress">IP地址</param>
+    /// <param name="rightHandAddress">右手数据地址</param>
+    /// <param name="leftHandAddress">左手数据地址</param>
+    /// <param name="resolutionAddress">分辨率控制地址</param>
+    /// <param name="pauseAddress">暂停控制地址</param>
     public void Connect(string ipAddress, string rightHandAddress, string leftHandAddress, 
                        string resolutionAddress, string pauseAddress)
     {
-        // Store the IP address
-        this.ipAddress = ipAddress;
-        
-        // Close any existing sockets
-        CloseAllSockets();
-        
-        // Initialize NetMQ if needed
-        if (!netMQInitialized)
+        try
         {
-            InitializeNetMQ();
+            // 存储IP地址
+            this.ipAddress = ipAddress;
+            
+            // 关闭任何现有的套接字
+            CloseAllSockets();
+            
+            // 如果需要，初始化NetMQ
+            if (!netMQInitialized)
+            {
+                InitializeNetMQ();
+            }
+            
+            // 使用提供的完整地址创建套接字
+            if (!string.IsNullOrEmpty(rightHandAddress) && rightHandAddress != "tcp://:")
+                CreateSocket("RightHand", rightHandAddress);
+            
+            if (!string.IsNullOrEmpty(leftHandAddress) && leftHandAddress != "tcp://:")
+                CreateSocket("LeftHand", leftHandAddress);
+            
+            if (!string.IsNullOrEmpty(resolutionAddress) && resolutionAddress != "tcp://:")
+                CreateSocket("Resolution", resolutionAddress);
+            
+            if (!string.IsNullOrEmpty(pauseAddress) && pauseAddress != "tcp://:")
+                CreateSocket("Pause", pauseAddress);
+            
+            // 记录套接字状态
+            LogSocketStatus();
+            
+            // 测试连接
+            PerformDiagnosticTests();
         }
-        
-        // Create sockets with full addresses provided
-        if (!string.IsNullOrEmpty(rightHandAddress) && rightHandAddress != "tcp://:")
-            CreateSocket("RightHand", rightHandAddress);
-        
-        if (!string.IsNullOrEmpty(leftHandAddress) && leftHandAddress != "tcp://:")
-            CreateSocket("LeftHand", leftHandAddress);
-        
-        if (!string.IsNullOrEmpty(resolutionAddress) && resolutionAddress != "tcp://:")
-            CreateSocket("Resolution", resolutionAddress);
-        
-        if (!string.IsNullOrEmpty(pauseAddress) && pauseAddress != "tcp://:")
-            CreateSocket("Pause", pauseAddress);
-        
-        // Log socket status
-        LogSocketStatus();
-        
-        // Test connections
-        PerformDiagnosticTests();
+        catch (Exception e)
+        {
+            Debug.LogError($"NetMQController: 连接错误 - {e.Message}");
+            // 即使出现错误，也不抛出异常，允许应用继续运行
+        }
     }
 
     /// <summary>
-    /// Check if all required sockets are connected
+    /// 检查所有必需的套接字是否已连接
     /// </summary>
+    /// <returns>如果所有必需的套接字已连接则返回true，否则返回false</returns>
     public bool AreSocketsConnected()
     {
-        // If IP is undefined, we're not connected
+        // 如果IP未定义，我们未连接
         if (string.IsNullOrEmpty(ipAddress) || ipAddress == "undefined")
             return false;
         
-        // Check if we have the minimum required sockets
+        // 检查我们是否有最低要求的套接字
         bool hasRightHand = sockets.ContainsKey("RightHand") && sockets["RightHand"] != null;
         bool hasLeftHand = sockets.ContainsKey("LeftHand") && sockets["LeftHand"] != null;
         
@@ -464,22 +540,23 @@ public class NetMQController : MonoBehaviour
     }
 
     /// <summary>
-    /// Attempt to reconnect a specific socket
+    /// 尝试重新连接特定套接字
     /// </summary>
+    /// <param name="socketName">套接字名称</param>
     private void ReconnectSocket(string socketName)
     {
         try
         {
-            Debug.Log($"Attempting to reconnect socket: {socketName}");
+            Debug.Log($"尝试重新连接套接字: {socketName}");
             
-            // Close the existing socket
+            // 关闭现有的套接字
             if (sockets.ContainsKey(socketName) && sockets[socketName] != null)
             {
                 sockets[socketName].Close();
                 sockets[socketName].Dispose();
             }
             
-            // Determine the address based on socket type
+            // 根据套接字类型确定地址
             string address = "";
             switch (socketName)
             {
@@ -496,25 +573,25 @@ public class NetMQController : MonoBehaviour
                     address = $"tcp://{ipAddress}:{pausePort}";
                     break;
                 default:
-                    Debug.LogError($"Unknown socket type: {socketName}");
+                    Debug.LogError($"未知的套接字类型: {socketName}");
                     return;
             }
             
-            // Create new socket
+            // 创建新套接字
             var socket = new PushSocket();
             socket.Options.SendHighWatermark = 1000;
             socket.Options.Linger = TimeSpan.FromMilliseconds(100);
             socket.Connect(address);
             
-            // Replace in dictionary
+            // 替换字典中的套接字
             sockets[socketName] = socket;
             
-            Debug.Log($"Socket {socketName} reconnected to {address}");
+            Debug.Log($"套接字 {socketName} 已重新连接到 {address}");
         }
         catch (Exception e)
         {
-            Debug.LogError($"Error reconnecting socket {socketName}: {e.Message}");
-            // Mark as broken but don't throw
+            Debug.LogError($"重新连接套接字 {socketName} 错误: {e.Message}");
+            // 标记为损坏但不抛出异常
             if (sockets.ContainsKey(socketName))
             {
                 sockets[socketName] = null;
@@ -524,7 +601,7 @@ public class NetMQController : MonoBehaviour
 }
 
 /// <summary>
-/// Class to deserialize network settings from JSON
+/// 用于从JSON反序列化网络设置的类
 /// </summary>
 [Serializable]
 public class NetworkSettings

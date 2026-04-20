@@ -9,13 +9,17 @@ using UnityEngine.XR.Hands;
 using UnityEngine.XR.Management;
 using Unity.XR.CoreUtils;
 
+/// <summary>
+/// PICO4手势探测器，使用XR手部追踪系统采集手部关节数据。
+/// 支持左手和右手的手势识别，包括捏合手势检测。
+/// </summary>
 public class GestureDetectorXR : MonoBehaviour
 {
-	// XR / Hands (no XROrigin; using world space or OVRHand)
+	// XR / 手部追踪（使用XRHandSubsystem）
 	private XRHandSubsystem _handSubsystem;
 
-	// Throttled telemetry logging for keypoints
-	[Header("Debug Logging")]
+	// 关键点的节流遥测日志
+	[Header("调试日志")]
 	public bool EnableKeypointLogging = false;
 	[Range(0.25f, 10f)] public float KeypointLogIntervalSeconds = 1.0f;
 	private float _lastKeypointLogTime = 0f;
@@ -23,32 +27,28 @@ public class GestureDetectorXR : MonoBehaviour
 	private int _lastLeftTrackedCount = -1;
 	private string _lastModeLogged = "";
 
-	// OVR Hands (optional; assign in inspector). If set, we use OVR pinch flags instead of distance checks
-	public OVRHand leftHand;
-	public OVRHand rightHand;
-
-	// UI and helpers (kept to match original behavior)
+	// UI和辅助工具（保持与原始行为匹配）
 	public GameObject MenuButton;
 	public GameObject ResolutionButton;
 	public GameObject HighResolutionButton;
 	public GameObject LowResolutionButton;
-	// WristTracker visual removed
+	// WristTracker视觉已移除
 	public RawImage StreamBorder;
 
 	public HighResolutionButtonController HighResolutionButtonController;
 	public LowResolutionButtonController LowResolutionButtonController;
 
-	// Networking
+	// 网络
 	private NetworkManager netConfig;
 	private bool connectionAttemptInProgress = false;
 
-	// Modes
+	// 模式
 	bool StreamRelativeData = true;
 	bool StreamAbsoluteData = false;
 	bool StreamResolution = false;
 	private bool ShouldContinueArmTeleop = false;
 
-	// Joint order definition (26 joints)
+	// 关节顺序定义（26个关节）
 	static readonly XRHandJointID[] k_JointOrder = new XRHandJointID[]
 	{
 		XRHandJointID.Wrist,
@@ -79,20 +79,26 @@ public class GestureDetectorXR : MonoBehaviour
 		XRHandJointID.LittleTip
 	};
 
+    /// <summary>
+    /// 初始化手势探测器
+    /// </summary>
     void Start()
     {
-		// Network config
+		// 网络配置
 		GameObject netConfGameObject = GameObject.Find("NetworkConfigsLoader");
 		if (netConfGameObject != null)
 			netConfig = netConfGameObject.GetComponent<NetworkManager>();
 
-		// Acquire XR Hands subsystem
+		// 获取XR手部子系统
 		TryResolveHandSubsystem();
 
-		// Give OpenXR a moment and run NetMQController init
+		// 给OpenXR一点时间并运行NetMQController初始化
 		StartCoroutine(InitializeNetMQAfterDelay());
 	}
 
+	/// <summary>
+	/// 延迟初始化NetMQ控制器
+	/// </summary>
 	IEnumerator InitializeNetMQAfterDelay()
 	{
 		yield return new WaitForSeconds(2f);
@@ -100,6 +106,9 @@ public class GestureDetectorXR : MonoBehaviour
 		NetMQController.Instance.PerformDiagnosticTests();
 	}
 
+	/// <summary>
+	/// 尝试解析手部子系统
+	/// </summary>
 	void TryResolveHandSubsystem()
 	{
 		if (_handSubsystem != null)
@@ -110,11 +119,16 @@ public class GestureDetectorXR : MonoBehaviour
 			_handSubsystem = loader.GetLoadedSubsystem<XRHandSubsystem>();
 			if (_handSubsystem == null)
 			{
-				Debug.LogWarning("XRHandSubsystem not found. Ensure XR Hands package/feature is enabled.");
+				Debug.LogWarning("未找到XRHandSubsystem。请确保XR Hands包/功能已启用。");
 			}
 		}
 	}
 
+	/// <summary>
+	/// 序列化Vector3列表为字符串
+	/// </summary>
+	/// <param name="gestureData">手势数据列表</param>
+	/// <returns>序列化的字符串</returns>
 	public static string SerializeVector3List(List<Vector3> gestureData)
 	{
 		string vectorString = "";
@@ -127,9 +141,12 @@ public class GestureDetectorXR : MonoBehaviour
 		return vectorString;
 	}
 
+    /// <summary>
+    /// 每帧更新手势探测器
+    /// </summary>
     void Update()
     {
-		// Reacquire subsystem if needed (domain reloads, etc.)
+		// 如果需要，重新获取子系统（域重新加载等）
 		if (_handSubsystem == null)
 			TryResolveHandSubsystem();
 
@@ -141,11 +158,11 @@ public class GestureDetectorXR : MonoBehaviour
 			bool hasIP = !string.IsNullOrEmpty(ipAddress) && ipAddress != "undefined";
 			if (!hasIP)
 			{
-				// No IP configured: keep menu visible so user can configure/connect
+				// 未配置IP：保持菜单可见，以便用户可以配置/连接
 				ToggleMenuButton(true);
 				return;
 			}
-			// With an IP configured, avoid flicker: only toggle visibility after attempt result
+			// 配置了IP：避免闪烁：仅在尝试结果后切换可见性
 			if (!connectionAttemptInProgress)
 			{
 				connectionAttemptInProgress = true;
@@ -156,14 +173,14 @@ public class GestureDetectorXR : MonoBehaviour
 
 		connectionAttemptInProgress = false;
 
-		// Process gestures (left hand pinches)
+		// 处理手势（左手捏合）
 		StreamPauser();
 
-		// Send auxiliary channels
+		// 发送辅助通道
 		SendResolutionThroughController();
 		SendPauseStatusThroughController();
 
-		// Send hand data
+		// 发送手部数据
 		if (StreamAbsoluteData)
 		{
 			SendHandDataThroughController("absolute");
@@ -181,6 +198,9 @@ public class GestureDetectorXR : MonoBehaviour
 		}
 	}
 
+	/// <summary>
+	/// 尝试连接到网络
+	/// </summary>
 	IEnumerator AttemptConnection()
 	{
 		NetMQController.Instance.Connect(
@@ -199,36 +219,29 @@ public class GestureDetectorXR : MonoBehaviour
 		connectionAttemptInProgress = false;
 	}
 
-	// Gesture toggling using XR Hands (left hand only, to match original)
+	/// <summary>
+	/// 使用XR手部进行手势切换（仅左手，以匹配原始）
+	/// </summary>
 	void StreamPauser()
 	{
 		bool pinchIndex = false;
 		bool pinchMiddle = false;
 		bool pinchRing = false;
 
-		// Prefer OVR pinch detection if available
-		if (leftHand != null)
-		{
-			if (!leftHand.IsTracked)
-				return;
-			pinchIndex = leftHand.GetFingerIsPinching(OVRHand.HandFinger.Index);
-			pinchMiddle = leftHand.GetFingerIsPinching(OVRHand.HandFinger.Middle);
-			pinchRing = leftHand.GetFingerIsPinching(OVRHand.HandFinger.Ring);
-		}
-		else
-		{
-			if (_handSubsystem == null)
-				return;
-			var left = _handSubsystem.leftHand;
-			if (!left.isTracked)
-				return;
-			pinchIndex = IsPinching(left, XRHandJointID.IndexTip);
-			pinchMiddle = IsPinching(left, XRHandJointID.MiddleTip);
-			pinchRing = IsPinching(left, XRHandJointID.RingTip);
-		}
+		if (_handSubsystem == null)
+			return;
+
+		var left = _handSubsystem.leftHand;
+		if (!left.isTracked)
+			return;
+
+		pinchIndex = IsPinching(left, XRHandJointID.IndexTip);
+		pinchMiddle = IsPinching(left, XRHandJointID.MiddleTip);
+		pinchRing = IsPinching(left, XRHandJointID.RingTip);
 
 		if (pinchMiddle)
 		{
+			// 中指捏合：绝对数据模式
 			StreamRelativeData = false;
 			StreamAbsoluteData = true;
 			if (StreamBorder != null) StreamBorder.color = Color.blue;
@@ -238,6 +251,7 @@ public class GestureDetectorXR : MonoBehaviour
 
 		if (pinchIndex)
 		{
+			// 食指捏合：相对数据模式
 			StreamRelativeData = true;
 			StreamAbsoluteData = false;
 			if (StreamBorder != null) StreamBorder.color = Color.green;
@@ -247,6 +261,7 @@ public class GestureDetectorXR : MonoBehaviour
 
 		if (pinchRing)
 		{
+			// 无名指捏合：停止遥操作
 			StreamRelativeData = false;
 			StreamAbsoluteData = false;
 			if (StreamBorder != null) StreamBorder.color = Color.red;
@@ -255,6 +270,13 @@ public class GestureDetectorXR : MonoBehaviour
 		}
 	}
 
+	/// <summary>
+	/// 检测手指是否捏合
+	/// </summary>
+	/// <param name="hand">手部对象</param>
+	/// <param name="fingerTip">手指尖关节ID</param>
+	/// <param name="thresholdMeters">距离阈值（米）</param>
+	/// <returns>如果捏合则返回true，否则返回false</returns>
 	bool IsPinching(XRHand hand, XRHandJointID fingerTip, float thresholdMeters = 0.02f)
 	{
 		var thumb = hand.GetJoint(XRHandJointID.ThumbTip);
@@ -266,12 +288,21 @@ public class GestureDetectorXR : MonoBehaviour
 		return Vector3.Distance(tp, fp) < thresholdMeters;
 	}
 
+	/// <summary>
+	/// 转换到世界坐标
+	/// </summary>
+	/// <param name="pos">本地坐标</param>
+	/// <returns>世界坐标</returns>
 	Vector3 ToWorldPosition(Vector3 pos)
 	{
-		// Using OVR Camera Rig: world space is fine
+		// 使用XR手部追踪：世界空间位置
 		return pos;
 	}
 
+	/// <summary>
+	/// 通过控制器发送手部数据
+	/// </summary>
+	/// <param name="typeMarker">数据类型标记（"relative"或"absolute"）</param>
 	void SendHandDataThroughController(string typeMarker)
 	{
 		try
@@ -279,21 +310,21 @@ public class GestureDetectorXR : MonoBehaviour
 			if (_handSubsystem == null)
 				return;
 
-			// Right hand
+			// 右手
 			List<Vector3> rightHandGestureData = new List<Vector3>();
 			CollectHandJointPositions(_handSubsystem.rightHand, rightHandGestureData);
 			string rightHandDataString = SerializeVector3List(rightHandGestureData);
 			rightHandDataString = typeMarker + ":" + rightHandDataString;
 			NetMQController.Instance.SendMessage("RightHand", rightHandDataString);
 
-			// Left hand
+			// 左手
 			List<Vector3> leftHandGestureData = new List<Vector3>();
 			CollectHandJointPositions(_handSubsystem.leftHand, leftHandGestureData);
 			string leftHandDataString = SerializeVector3List(leftHandGestureData);
 			leftHandDataString = typeMarker + ":" + leftHandDataString;
 			NetMQController.Instance.SendMessage("LeftHand", leftHandDataString);
 
-			// Throttled on-device log so you can verify what we're sending via adb
+			// 节流的设备日志，以便您可以通过adb验证我们发送的内容
 			if (EnableKeypointLogging)
 			{
 				int rTotal = rightHandGestureData.Count;
@@ -305,11 +336,11 @@ public class GestureDetectorXR : MonoBehaviour
 				bool intervalElapsed = Time.time - _lastKeypointLogTime > Mathf.Max(0.1f, KeypointLogIntervalSeconds);
 				if (countsChanged || modeChanged || intervalElapsed)
 				{
-					int sampleIndex = Mathf.Min(10, Mathf.Max(0, rTotal - 1)); // prefer IndexTip if available
+					int sampleIndex = Mathf.Min(10, Mathf.Max(0, rTotal - 1)); // 如果可用，优先使用IndexTip
 					Vector3 rSample = rTotal > 0 ? rightHandGestureData[sampleIndex] : Vector3.zero;
 					Vector3 lSample = lTotal > 0 ? leftHandGestureData[sampleIndex] : Vector3.zero;
 					Debug.Log(
-						$"GestureDetectorXR: sent {typeMarker} | RH joints={rTotal} tracked={rTracked} sample={FormatVec(rSample)} | LH joints={lTotal} tracked={lTracked} sample={FormatVec(lSample)}");
+						$"GestureDetectorXR: 发送 {typeMarker} | 右手 关节={rTotal} 追踪={rTracked} 示例={FormatVec(rSample)} | 左手 关节={lTotal} 追踪={lTracked} 示例={FormatVec(lSample)}");
 					_lastKeypointLogTime = Time.time;
 					_lastRightTrackedCount = rTracked;
 					_lastLeftTrackedCount = lTracked;
@@ -319,10 +350,15 @@ public class GestureDetectorXR : MonoBehaviour
 		}
 		catch (Exception e)
 		{
-			Debug.LogError("Error sending hand data (XR): " + e.Message);
+			Debug.LogError("发送手部数据错误 (XR): " + e.Message);
 		}
 	}
 
+	/// <summary>
+	/// 采集手部关节位置
+	/// </summary>
+	/// <param name="hand">手部对象</param>
+	/// <param name="outPositions">输出位置列表</param>
 	void CollectHandJointPositions(XRHand hand, List<Vector3> outPositions)
 	{
 		outPositions.Clear();
@@ -340,6 +376,11 @@ public class GestureDetectorXR : MonoBehaviour
 		}
 	}
 
+	/// <summary>
+	/// 计算非零关节数量
+	/// </summary>
+	/// <param name="positions">位置列表</param>
+	/// <returns>非零关节数量</returns>
 	int CountNonZeroJoints(List<Vector3> positions)
 	{
 		int count = 0;
@@ -350,11 +391,19 @@ public class GestureDetectorXR : MonoBehaviour
 		return count;
 	}
 
+	/// <summary>
+	/// 格式化Vector3为字符串
+	/// </summary>
+	/// <param name="v">Vector3对象</param>
+	/// <returns>格式化的字符串</returns>
 	string FormatVec(Vector3 v)
 	{
 		return $"({v.x:F3},{v.y:F3},{v.z:F3})";
 	}
 
+	/// <summary>
+	/// 通过控制器发送分辨率状态
+	/// </summary>
 	void SendResolutionThroughController()
 	{
 		try
@@ -372,10 +421,13 @@ public class GestureDetectorXR : MonoBehaviour
 		}
 		catch (Exception e)
 		{
-			Debug.LogError("Error sending resolution data: " + e.Message);
+			Debug.LogError("发送分辨率数据错误: " + e.Message);
 		}
 	}
 
+	/// <summary>
+	/// 通过控制器发送暂停状态
+	/// </summary>
 	void SendPauseStatusThroughController()
 	{
 		try
@@ -385,10 +437,14 @@ public class GestureDetectorXR : MonoBehaviour
 		}
 		catch (Exception e)
 		{
-			Debug.LogError("Error sending pause status: " + e.Message);
+			Debug.LogError("发送暂停状态错误: " + e.Message);
 		}
 	}
 
+	/// <summary>
+	/// 切换菜单按钮可见性
+	/// </summary>
+	/// <param name="toggle">是否显示</param>
 	public void ToggleMenuButton(bool toggle)
 	{
 		try
@@ -398,10 +454,14 @@ public class GestureDetectorXR : MonoBehaviour
 		}
 		catch (Exception e)
 		{
-			Debug.LogError("Error in ToggleMenuButton: " + e.Message);
+			Debug.LogError("ToggleMenuButton错误: " + e.Message);
 		}
 	}
 
+	/// <summary>
+	/// 切换分辨率按钮可见性
+	/// </summary>
+	/// <param name="toggle">是否显示</param>
 	public void ToggleResolutionButton(bool toggle)
 	{
 		try
@@ -411,20 +471,32 @@ public class GestureDetectorXR : MonoBehaviour
 		}
 		catch (Exception e)
 		{
-			Debug.LogError("Error in ToggleResolutionButton: " + e.Message);
+			Debug.LogError("ToggleResolutionButton错误: " + e.Message);
 		}
 	}
 
+	/// <summary>
+	/// 切换高分辨率按钮
+	/// </summary>
+	/// <param name="toggle">是否激活</param>
 	public void ToggleHighResolutionButton(bool toggle)
 	{
-		Debug.Log("HighResolutionButton toggle (XR): " + toggle);
+		Debug.Log("HighResolutionButton切换 (XR): " + toggle);
 	}
 
+	/// <summary>
+	/// 切换低分辨率按钮
+	/// </summary>
+	/// <param name="toggle">是否激活</param>
 	public void ToggleLowResolutionButton(bool toggle)
 	{
-		Debug.Log("LowResolutionButton toggle (XR): " + toggle);
+		Debug.Log("LowResolutionButton切换 (XR): " + toggle);
 	}
 
+	/// <summary>
+	/// 激活流传输
+	/// </summary>
+	/// <param name="mode">数据模式（"relative"或"absolute"）</param>
 	public void ActivateStreaming(string mode = "relative")
 	{
 		try
@@ -448,16 +520,23 @@ public class GestureDetectorXR : MonoBehaviour
 		}
 		catch (Exception e)
 		{
-			Debug.LogError("Error in ActivateStreaming: " + e.Message);
+			Debug.LogError("ActivateStreaming错误: " + e.Message);
 		}
 	}
 
-	// Exposed helpers for keep-alive
+	// 公开的辅助工具用于保持活动连接
+	/// <summary>
+	/// 检查所有连接是否已建立
+	/// </summary>
+	/// <returns>如果所有连接已建立则返回true，否则返回false</returns>
 	public bool AreAllConnectionsEstablished()
 	{
 		return NetMQController.Instance != null && NetMQController.Instance.AreSocketsConnected();
 	}
 
+	/// <summary>
+	/// 发送保持活动ping
+	/// </summary>
 	public void SendKeepAlivePing()
 	{
 		try
@@ -466,14 +545,20 @@ public class GestureDetectorXR : MonoBehaviour
 		}
 		catch (Exception e)
 		{
-			Debug.LogError("Keep-alive ping failed: " + e.Message);
+			Debug.LogError("保持活动ping失败: " + e.Message);
 		}
 	}
 
+	/// <summary>
+	/// 应用程序退出时调用
+	/// </summary>
 	void OnApplicationQuit()
 	{
 	}
 
+	/// <summary>
+	/// 销毁时调用
+	/// </summary>
 	void OnDestroy()
 	{
 	}

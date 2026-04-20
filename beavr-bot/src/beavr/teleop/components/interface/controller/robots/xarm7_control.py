@@ -5,10 +5,19 @@ from enum import Enum
 
 import numpy as np
 from scipy.spatial.transform import Rotation
-from xarm import XArmAPI
 
 from beavr.teleop.common.math.orientation import quat_positive, quat_to_axis_angle
 from beavr.teleop.configs.constants import robots
+
+# Only import XArmAPI if not in simulation mode
+XArmAPI = None
+import importlib
+
+try:
+    xarm_module = importlib.import_module('xarm')
+    XArmAPI = xarm_module.XArmAPI
+except ImportError:
+    pass
 
 
 class RobotControlMode(Enum):
@@ -17,19 +26,13 @@ class RobotControlMode(Enum):
 
 
 # Wrapper for XArm
-class Robot(XArmAPI):
+# TODO: 改动不再支持XArm实机连接
+class Robot:
     def __init__(self, ip="192.168.1.197", is_radian=True, simulation_mode=False):
-        super(Robot, self).__init__(
-            port=ip,
-            is_radian=is_radian,
-            is_tool_coord=False,
-            enable_report=True,
-            report_type="rich",
-        )
-        if simulation_mode and not self.is_simulation_robot:
-            self.set_simulation_robot(on_off=True)
+        self.simulation_mode = simulation_mode
         self.ip = ip
-
+        self.is_radian = is_radian
+        
         # Add these attributes to the Robot class
         self._max_step_distance = 50.0  # Maximum allowed movement in mm
         self._last_command_time = 0  # Fix for the attribute error
@@ -45,32 +48,87 @@ class Robot(XArmAPI):
         self._last_position = None
         self._metrics_print_interval = 5.0  # Print metrics every 5 seconds
         self._last_metrics_print = time.time()
+        
+        # Simulation mode attributes
+        if simulation_mode:
+            self.mode = 1  # Servo control mode
+            self.state = 2  # READY state
+            self.is_simulation_robot = True
+            # Simulated joint positions
+            self._joint_positions = np.array(robots.ROBOT_HOME_JS, dtype=np.float32)
+            # Simulated cartesian position
+            self._cartesian_position = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        else:
+            # Use real XArmAPI if available
+            if XArmAPI is not None:
+                self._robot = XArmAPI(
+                    port=ip,
+                    is_radian=is_radian,
+                    is_tool_coord=False,
+                    enable_report=True,
+                    report_type="rich",
+                )
+                if not self._robot.is_simulation_robot:
+                    self._robot.set_simulation_robot(on_off=False)
+                self.mode = self._robot.mode
+                self.state = self._robot.state
+                self.is_simulation_robot = self._robot.is_simulation_robot
+            else:
+                raise ImportError("XArmAPI not available. Please install xarm-python-sdk.")
 
     def clear(self):
-        self.clean_error()
-        self.clean_warn()
-        # self.motion_enable(enable=False)
-        self.motion_enable(enable=True)
+        if self.simulation_mode:
+            return
+        self._robot.clean_error()
+        self._robot.clean_warn()
+        self._robot.motion_enable(enable=True)
+
+    def set_mode(self, mode):
+        if self.simulation_mode:
+            self.mode = mode
+            return
+        self._robot.set_mode(mode)
+        self.mode = self._robot.mode
+
+    def set_state(self, state):
+        if self.simulation_mode:
+            self.state = state
+            return
+        self._robot.set_state(state)
+        self.state = self._robot.state
 
     def set_mode_and_state(self, mode, state=0):
         """Set mode correctly and verify state change to READY"""
+        if self.simulation_mode:
+            self.mode = mode
+            self.state = 2  # Simulate transition to READY
+            return True
+        
         # First set the mode
-        self.set_mode(mode)
+        self._robot.set_mode(mode)
         time.sleep(0.2)
 
         # Then set state to STANDBY (0), which should transition to READY (2)
-        self.set_state(state)
+        self._robot.set_state(state)
         time.sleep(0.3)  # Wait for transition to READY
 
         # Check if we're in the expected mode and READY state
+        self.mode = self._robot.mode
+        self.state = self._robot.state
         return self.mode == mode and self.state == 2
 
     def reset(self):
         """Reset arm to home position with proper mode setting"""
+        if self.simulation_mode:
+            print("Resetting arm to home...")
+            self._joint_positions = np.array(robots.ROBOT_HOME_JS, dtype=np.float32)
+            self._cartesian_position = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
+            return 0
+        
         # Clean errors
-        self.clean_error()
-        self.clean_warn()
-        self.motion_enable(enable=True)
+        self._robot.clean_error()
+        self._robot.clean_warn()
+        self._robot.motion_enable(enable=True)
 
         print("Resetting arm to home...")
         # Set to position control mode
@@ -78,7 +136,7 @@ class Robot(XArmAPI):
         time.sleep(0.5)  # Longer wait between mode setting and movement
 
         # Move to home position
-        status = self.set_servo_angle(
+        status = self._robot.set_servo_angle(
             angle=robots.ROBOT_HOME_JS,
             wait=True,
             is_radian=True,
@@ -95,12 +153,21 @@ class Robot(XArmAPI):
         return status
 
     def get_arm_pose(self):
-        status, home_pose = self.get_position_aa()
+        if self.simulation_mode:
+            # Return a mock affine matrix
+            rotation = np.eye(3)
+            translation = np.array(self._cartesian_position[:3]) / robots.XARM_SCALE_FACTOR
+            return np.block([[rotation, translation[:, np.newaxis]], [0, 0, 0, 1]])
+        
+        status, home_pose = self._robot.get_position_aa()
         home_affine = self.robot_pose_aa_to_affine(home_pose)
         return home_affine
 
     def get_arm_position(self):
-        code, joint_state = self.get_servo_angle(is_radian=True, is_real=True)
+        if self.simulation_mode:
+            return self._joint_positions
+        
+        code, joint_state = self._robot.get_servo_angle(is_radian=True, is_real=True)
         if code != 0:
             print("\033[93m" + f"Warning: Failed to get joint states, error code: {code}" + "\033[0m")
             return None
@@ -124,7 +191,10 @@ class Robot(XArmAPI):
             numpy.ndarray: Array of joint velocities [joint1_velocity, ..., joint7_velocity] in radians/second
             or None if failed to get joint states
         """
-        status, states = self.get_joint_states()
+        if self.simulation_mode:
+            return np.zeros(7, dtype=np.float32)
+        
+        status, states = self._robot.get_joint_states()
         if status != 0:
             print("\033[93m" + f"Warning: Failed to get joint states, error code: {status}" + "\033[0m")
             return None
@@ -140,7 +210,10 @@ class Robot(XArmAPI):
             numpy.ndarray: Array of joint torques [joint1_torque, ..., joint7_torque] in Nm
             or None if failed to get joint torques
         """
-        status, torques = self.get_joints_torque()
+        if self.simulation_mode:
+            return np.zeros(7, dtype=np.float32)
+        
+        status, torques = self._robot.get_joints_torque()
         if status != 0:
             print("\033[93m" + f"Warning: Failed to get joint torques, error code: {status}" + "\033[0m")
             return None
@@ -154,8 +227,34 @@ class Robot(XArmAPI):
         Output Format:
         [x, y, z] (mm), [roll, pitch, yaw] (radians/degrees)
         """
-        status, home_pose = self.get_position_aa()
+        if self.simulation_mode:
+            return self._cartesian_position
+        
+        status, home_pose = self._robot.get_position_aa()
         return home_pose
+
+    def get_position_aa(self):
+        """
+        Returns the position in axis-angle format
+        """
+        if self.simulation_mode:
+            return 0, self._cartesian_position
+        
+        return self._robot.get_position_aa()
+
+    def set_servo_angle(self, angle, wait=True, is_radian=True, mvacc=80, speed=10):
+        if self.simulation_mode:
+            self._joint_positions = np.array(angle, dtype=np.float32)
+            return 0
+        
+        return self._robot.set_servo_angle(angle=angle, wait=wait, is_radian=is_radian, mvacc=mvacc, speed=speed)
+
+    def set_servo_cartesian_aa(self, pose, wait=False, relative=False, mvacc=5, speed=1, is_radian=True):
+        if self.simulation_mode:
+            self._cartesian_position = np.array(pose, dtype=np.float32)
+            return 0
+        
+        return self._robot.set_servo_cartesian_aa(pose=pose, wait=wait, relative=relative, mvacc=mvacc, speed=speed, is_radian=is_radian)
 
     def move_arm_joint(self, joint_angles):
         """
@@ -167,19 +266,30 @@ class Robot(XArmAPI):
         Returns:
             int: Status code (0 for success)
         """
-        status = self.set_servo_angle(angle=joint_angles, wait=True, is_radian=True, mvacc=80, speed=10)
+        if self.simulation_mode:
+            self._joint_positions = np.array(joint_angles, dtype=np.float32)
+            return 0
+        
+        status = self._robot.set_servo_angle(angle=joint_angles, wait=True, is_radian=True, mvacc=80, speed=10)
         if status != 0:
             print("\033[93m" + f"Warning: Failed to move robot, error code: {status}" + "\033[0m")
         return status
 
     def _ensure_correct_mode(self, desired_mode, desired_state=0):
         """Minimal mode checking - only changes if needed"""
+        if self.simulation_mode:
+            self.mode = desired_mode
+            self.state = desired_state
+            return True
+        
         if self.mode != desired_mode or self.state != desired_state:
             print(
                 f"Mode correction: current={self.mode},{self.state}, desired={desired_mode},{desired_state}"
             )
-            self.set_mode(desired_mode)
-            self.set_state(desired_state)
+            self._robot.set_mode(desired_mode)
+            self._robot.set_state(desired_state)
+            self.mode = self._robot.mode
+            self.state = self._robot.state
             time.sleep(0.1)
         return True
 
@@ -355,6 +465,11 @@ class Robot(XArmAPI):
         """
         Move the arm to home position using joint angles
         """
+        if self.simulation_mode:
+            self._joint_positions = np.array(robots.ROBOT_HOME_JS, dtype=np.float32)
+            self._cartesian_position = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
+            return 0
+        
         try:
             # Convert ROBOT_HOME_JS to numpy array
             home_joints = np.array(robots.ROBOT_HOME_JS, dtype=np.float32)
@@ -363,7 +478,7 @@ class Robot(XArmAPI):
             self.set_mode_and_state(0, 0)
 
             # Move to home position
-            status = self.set_servo_angle(angle=home_joints, wait=True, is_radian=True, mvacc=5, speed=1)
+            status = self._robot.set_servo_angle(angle=home_joints, wait=True, is_radian=True, mvacc=5, speed=1)
             return status
         except Exception as e:
             print(f"Error in home_arm: {e}")
@@ -454,6 +569,46 @@ class Robot(XArmAPI):
                 print("  Warning: High maximum latency detected - some commands delayed significantly")
             if max_delta > 0.05:
                 print("  Warning: Large position jumps detected - may cause jerky motion")
+
+    def motion_enable(self, enable=True):
+        if self.simulation_mode:
+            return
+        self._robot.motion_enable(enable=enable)
+
+    def clean_error(self):
+        if self.simulation_mode:
+            return
+        self._robot.clean_error()
+
+    def clean_warn(self):
+        if self.simulation_mode:
+            return
+        self._robot.clean_warn()
+
+    def get_joint_states(self):
+        if self.simulation_mode:
+            return 0, [self._joint_positions.tolist(), np.zeros(7).tolist(), np.zeros(7).tolist()]
+        return self._robot.get_joint_states()
+
+    def get_joints_torque(self):
+        if self.simulation_mode:
+            return 0, np.zeros(7).tolist()
+        return self._robot.get_joints_torque()
+
+    def set_tcp_maxacc(self, acc):
+        if self.simulation_mode:
+            return
+        self._robot.set_tcp_maxacc(acc)
+
+    def set_joint_maxacc(self, acc):
+        if self.simulation_mode:
+            return
+        self._robot.set_joint_maxacc(acc)
+
+    def set_tcp_jerk(self, jerk):
+        if self.simulation_mode:
+            return
+        self._robot.set_tcp_jerk(jerk)
 
 
 class DexArmControl:

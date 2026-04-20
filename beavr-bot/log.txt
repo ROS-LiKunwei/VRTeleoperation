@@ -1,0 +1,106 @@
+(beavr-bot) likunwei@likunwei:~/dataCollection/beavr-bot$ python -m beavr.teleop.main --robot_name=leap,xarm7 --teleop.flags.sim_env=True
+pybullet build time: Jan 29 2025 23:16:28
+[INFO] 10:08:00 MainProcess __main__: 🚀 Starting Beavr Teleop System
+[INFO] 10:08:00 MainProcess __main__: 📡 Network host: 10.0.0.51
+[INFO] 10:08:00 MainProcess __main__: 🎮 Operation mode: ENABLED
+[INFO] 10:08:00 MainProcess __main__: 🎯 Simulation mode: ENABLED
+[INFO] 10:08:00 MainProcess __main__: 🤖 Robot: leap,xarm7
+[INFO] 10:08:00 MainProcess beavr.teleop.components.initializers: 🔧 Initializing TeleOperator with structured configuration
+[INFO] 10:08:00 MainProcess __main__: 🔄 Starting 7 teleop processes...
+[DEBUG] 10:08:00 MainProcess __main__:   ✅ Started process: Process-1
+[INFO] 10:08:00 Process-1 beavr.teleop.components.component: ***************************************************************
+[DEBUG] 10:08:00 MainProcess __main__:   ✅ Started process: Process-2
+[INFO] 10:08:00 Process-1 beavr.teleop.components.component:      Starting vr detector component
+[INFO] 10:08:00 Process-1 beavr.teleop.components.component: ***************************************************************
+[DEBUG] 10:08:00 MainProcess __main__:   ✅ Started process: Process-3
+[INFO] 10:08:00 Process-2 beavr.teleop.components.component: ***************************************************************
+[INFO] 10:08:00 Process-2 beavr.teleop.components.component:      Starting right_hand_keypoint_transform component
+[INFO] 10:08:00 Process-2 beavr.teleop.components.component: ***************************************************************
+[DEBUG] 10:08:00 MainProcess __main__:   ✅ Started process: Process-4
+[INFO] 10:08:00 Process-3 beavr.teleop.components.component: ***************************************************************
+[INFO] 10:08:00 Process-3 beavr.teleop.components.component:      Starting hand 2D plotter component
+[INFO] 10:08:00 Process-3 beavr.teleop.components.component: ***************************************************************
+[ERROR] 10:08:00 Process-1 beavr.teleop.components.initializers: Error starting component: Cannot assign requested address (addr='tcp://10.0.0.51:8087')
+Process Process-1:
+[DEBUG] 10:08:00 MainProcess __main__:   ✅ Started process: Process-5
+[DEBUG] 10:08:00 MainProcess __main__:   ✅ Started process: Process-6
+[INFO] 10:08:00 Process-4 beavr.teleop.components.interface.robots.leap_robot: Movement thread started
+[DEBUG] 10:08:00 Process-3 matplotlib.pyplot: Loaded backend Agg version v2.2.
+[INFO] 10:08:00 Process-4 beavr.teleop.components.interface.robots.leap_robot: LeapHandRobot 'leap_right' initialized with command frequency: 30Hz
+[INFO] 10:08:00 Process-4 beavr.teleop.components.interface.robots.leap_robot:   Publishing state dictionary on tcp://10.0.0.51:10014 with topic 'leap_right'
+Traceback (most recent call last):
+  File "/home/likunwei/.local/share/uv/python/cpython-3.10.20-linux-x86_64-gnu/lib/python3.10/multiprocessing/process.py", line 314, in _bootstrap
+    self.run()
+  File "/home/likunwei/.local/share/uv/python/cpython-3.10.20-linux-x86_64-gnu/lib/python3.10/multiprocessing/process.py", line 108, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/likunwei/dataCollection/beavr-bot/src/beavr/teleop/components/initializers.py", line 79, in _start_component
+    component = instantiate_from_target(configs)
+  File "/home/likunwei/dataCollection/beavr-bot/src/beavr/teleop/common/factory/instantiator.py", line 62, in instantiate_from_target
+    return [instantiate_from_target(c) for c in cfg]
+  File "/home/likunwei/dataCollection/beavr-bot/src/beavr/teleop/common/factory/instantiator.py", line 62, in <listcomp>
+    return [instantiate_from_target(c) for c in cfg]
+  File "/home/likunwei/dataCollection/beavr-bot/src/beavr/teleop/common/factory/instantiator.py", line 58, in instantiate_from_target
+    return cfg.build()
+  File "/home/likunwei/dataCollection/beavr-bot/src/beavr/teleop/configs/robots/shared_components.py", line 200, in build
+    return OculusVRHandDetector(**kwargs)
+  File "/home/likunwei/dataCollection/beavr-bot/src/beavr/teleop/components/detector/vr/oculus.py", line 63, in __init__
+    self._initialize_sockets()
+  File "/home/likunwei/dataCollection/beavr-bot/src/beavr/teleop/components/detector/vr/oculus.py", line 91, in _initialize_sockets
+    self.sockets[socket_key] = create_pull_socket(self.host, port)
+  File "/home/likunwei/dataCollection/beavr-bot/src/beavr/teleop/common/network/utils.py", line 80, in create_pull_socket
+    socket.bind(addr)
+  File "/home/likunwei/dataCollection/beavr-bot/.venv/lib/python3.10/site-packages/zmq/sugar/socket.py", line 320, in bind
+    super().bind(addr)
+  File "zmq/backend/cython/_zmq.py", line 1009, in zmq.backend.cython._zmq.Socket.bind
+  File "zmq/backend/cython/_zmq.py", line 190, in zmq.backend.cython._zmq._check_rc
+zmq.error.ZMQError: Cannot assign requested address (addr='tcp://10.0.0.51:8087')
+[DEBUG] 10:08:00 MainProcess __main__:   ✅ Started process: Process-7
+[INFO] 10:08:00 MainProcess __main__: ✨ All processes started. Press Ctrl+C to stop.
+[INFO] 10:08:00 Process-6 beavr.teleop.components.component: ***************************************************************
+[INFO] 10:08:00 Process-6 beavr.teleop.components.component:      Starting leap hand operator with PyBullet IK component
+[INFO] 10:08:00 Process-6 beavr.teleop.components.component: ***************************************************************
+b3Warning[examples/Importers/ImportURDFDemo/BulletUrdfImporter.cpp,126]:
+No inertial data for link, using mass=1, localinertiadiagonal = 1,1,1, identity local inertial frameb3Warning[examples/Importers/ImportURDFDemo/BulletUrdfImporter.cpp,126]:
+leap_hand_baseb3Warning[examples/Importers/ImportURDFDemo/BulletUrdfImporter.cpp,126]:
+No inertial data for link, using mass=1, localinertiadiagonal = 1,1,1, identity local inertial frameb3Warning[examples/Importers/ImportURDFDemo/BulletUrdfImporter.cpp,126]:
+thumb_tip_headb3Warning[examples/Importers/ImportURDFDemo/BulletUrdfImporter.cpp,126]:
+No inertial data for link, using mass=1, localinertiadiagonal = 1,1,1, identity local inertial frameb3Warning[examples/Importers/ImportURDFDemo/BulletUrdfImporter.cpp,126]:
+index_tip_headb3Warning[examples/Importers/ImportURDFDemo/BulletUrdfImporter.cpp,126]:
+No inertial data for link, using mass=1, localinertiadiagonal = 1,1,1, identity local inertial frameb3Warning[examples/Importers/ImportURDFDemo/BulletUrdfImporter.cpp,126]:
+middle_tip_headb3Warning[examples/Importers/ImportURDFDemo/BulletUrdfImporter.cpp,126]:
+No inertial data for link, using mass=1, localinertiadiagonal = 1,1,1, identity local inertial frameb3Warning[examples/Importers/ImportURDFDemo/BulletUrdfImporter.cpp,126]:
+ring_tip_head[INFO] 10:08:00 Process-7 beavr.teleop.components.component: ***************************************************************
+[INFO] 10:08:00 Process-7 beavr.teleop.components.component:      Starting xarm7_right_operator component
+[INFO] 10:08:00 Process-7 beavr.teleop.components.component: ***************************************************************
+[INFO] 10:08:00 Process-7 beavr.teleop.common.network.handshake: Started handshake server for 'xarm7_right_operator_handshake' on *:8220
+[INFO] 10:08:00 Process-7 beavr.teleop.components.operator.robots.xarm7_operator: Handshake server started for xarm7_right_operator on port 8220
+[INFO] 10:08:00 Process-7 beavr.teleop.components.component: ***************************************************************
+[INFO] 10:08:00 Process-7 beavr.teleop.components.component:      Starting None control component
+[INFO] 10:08:00 Process-7 beavr.teleop.components.component: ***************************************************************
+[INFO] 10:08:00 Process-7 beavr.teleop.components.operator.operator_base: Start controlling the robot hand using the Oculus Headset.
+
+[INFO] 10:08:00 Process-7 beavr.teleop.components.operator.robots.xarm7_operator: ****** xarm7_right_operator: RESETTING TELEOP ******
+SDK_VERSION: 1.17.0
+[INFO] 10:08:00 Process-6 beavr.teleop.components.component: ***************************************************************
+[INFO] 10:08:00 Process-6 beavr.teleop.components.component:      Starting None control component
+[INFO] 10:08:00 Process-6 beavr.teleop.components.component: ***************************************************************
+[INFO] 10:08:00 Process-6 beavr.teleop.components.operator.operator_base: Start controlling the robot hand using the Oculus Headset.
+
+[WARNING] 10:08:00 Process-6 beavr.teleop.components.operator.robots.leap_operator: Warning: No keypoints received from subscriber
+[WARNING] 10:08:00 Process-6 beavr.teleop.components.operator.robots.leap_operator: Warning: No keypoints received from subscriber
+[WARNING] 10:08:00 Process-6 beavr.teleop.components.operator.robots.leap_operator: Warning: No keypoints received from subscriber
+[WARNING] 10:08:00 Process-6 beavr.teleop.components.operator.robots.leap_operator: Warning: No keypoints received from subscriber
+[WARNING] 10:08:00 Process-6 beavr.teleop.components.operator.robots.leap_operator: Warning: No keypoints received from subscriber
+[WARNING] 10:08:00 Process-6 beavr.teleop.components.operator.robots.leap_operator: Warning: No keypoints received from subscriber
+[WARNING] 10:08:00 Process-6 beavr.teleop.components.operator.robots.leap_operator: Warning: No keypoints received from subscriber
+[WARNING] 10:08:00 Process-6 beavr.teleop.components.operator.robots.leap_operator: Warning: No keypoints received from subscriber
+[WARNING] 10:08:00 Process-6 beavr.teleop.components.operator.robots.leap_operator: Warning: No keypoints received from subscriber
+^C[INFO] 10:08:00 Process-6 beavr.teleop.components.operator.operator_base: Cleaning up LeapHandOperator...
+Process Process-3:
+Process Process-2:
+Process Process-4:
+[INFO] 10:08:00 MainProcess __main__: 
+🛑 Shutdown requested...
+[INFO] 10:08:00 Process-7 beavr.teleop.components.operator.operator_base: Cleaning up XArm7RightOperator...
+Process Process-5:
+[INFO] 10:08:00 MainProcess __main__: 🏁 Teleop shutdown complete

@@ -7,12 +7,13 @@ numbers.  Override any field as usual when you instantiate the dataclass.
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict
+from typing import Any, Dict, Union
 
 from beavr.teleop.components.detector.vr.keypoint_transform import (
     TransformHandPositionCoords,
 )
 from beavr.teleop.components.detector.vr.oculus import OculusVRHandDetector
+from beavr.teleop.components.detector.vr.pico4 import PICO4VRHandDetector
 from beavr.teleop.components.visualizer.visualizer_2d import Hand2DVisualizer
 from beavr.teleop.configs.constants import network, ports, robots
 
@@ -41,22 +42,33 @@ class SharedComponentRegistry:
         oculus_pub_port: int = ports.KEYPOINT_STREAM_PORT,
         button_port: int = ports.RESOLUTION_BUTTON_PORT,
         teleop_reset_port: int = ports.TELEOP_RESET_PORT,
-    ) -> "UnifiedOculusVRHandDetectorCfg":
+        detector_type: str = "oculus",
+    ) -> Union["UnifiedOculusVRHandDetectorCfg", "UnifiedPICO4VRHandDetectorCfg"]:
         """Get or create detector config for specified hand side."""
 
         if hand_side not in cls._instances["detector"]:
             # Configure for single hand mode
             hand_config = robots.LEFT if hand_side == robots.LEFT else robots.RIGHT
 
-            cls._instances["detector"][hand_side] = UnifiedOculusVRHandDetectorCfg(
-                host=host,
-                oculus_pub_port=oculus_pub_port,
-                button_port=button_port,
-                teleop_reset_port=teleop_reset_port,
-                hand_config=hand_config,
-                hand_side=hand_side,
-            )
-            logger.debug(f"📡 Created shared detector config for {hand_side} hand")
+            if detector_type == "pico4":
+                cls._instances["detector"][hand_side] = UnifiedPICO4VRHandDetectorCfg(
+                    host=host,
+                    pico4_pub_port=oculus_pub_port,
+                    button_port=button_port,
+                    teleop_reset_port=teleop_reset_port,
+                    hand_config=hand_config,
+                    hand_side=hand_side,
+                )
+            else:
+                cls._instances["detector"][hand_side] = UnifiedOculusVRHandDetectorCfg(
+                    host=host,
+                    oculus_pub_port=oculus_pub_port,
+                    button_port=button_port,
+                    teleop_reset_port=teleop_reset_port,
+                    hand_config=hand_config,
+                    hand_side=hand_side,
+                )
+            logger.debug(f"📡 Created shared {detector_type} detector config for {hand_side} hand")
 
         return cls._instances["detector"][hand_side]
 
@@ -67,19 +79,30 @@ class SharedComponentRegistry:
         oculus_pub_port: int = ports.KEYPOINT_STREAM_PORT,
         button_port: int = ports.RESOLUTION_BUTTON_PORT,
         teleop_reset_port: int = ports.TELEOP_RESET_PORT,
-    ) -> "UnifiedOculusVRHandDetectorCfg":
+        detector_type: str = "oculus",
+    ) -> Union["UnifiedOculusVRHandDetectorCfg", "UnifiedPICO4VRHandDetectorCfg"]:
         """Get or create a bimanual detector config."""
         key = "bimanual"
         if key not in cls._instances["detector"]:
-            cls._instances["detector"][key] = UnifiedOculusVRHandDetectorCfg(
-                host=host,
-                oculus_pub_port=oculus_pub_port,
-                button_port=button_port,
-                teleop_reset_port=teleop_reset_port,
-                hand_config=robots.BIMANUAL,
-                hand_side="bimanual",  # For identification purposes
-            )
-            logger.debug("📡 Created shared bimanual detector config")
+            if detector_type == "pico4":
+                cls._instances["detector"][key] = UnifiedPICO4VRHandDetectorCfg(
+                    host=host,
+                    pico4_pub_port=oculus_pub_port,
+                    button_port=button_port,
+                    teleop_reset_port=teleop_reset_port,
+                    hand_config=robots.BIMANUAL,
+                    hand_side="bimanual",
+                )
+            else:
+                cls._instances["detector"][key] = UnifiedOculusVRHandDetectorCfg(
+                    host=host,
+                    oculus_pub_port=oculus_pub_port,
+                    button_port=button_port,
+                    teleop_reset_port=teleop_reset_port,
+                    hand_config=robots.BIMANUAL,
+                    hand_side="bimanual",
+                )
+            logger.debug(f"📡 Created shared bimanual {detector_type} detector config")
         return cls._instances["detector"][key]
 
     @classmethod
@@ -243,7 +266,7 @@ class OculusVRHandDetectorCfg:
             button_port=self.button_port,
             teleop_reset_port=self.teleop_reset_port,
             hand_config=hand_config,
-            oculus_hand_port=self.oculus_hand_port,  # Legacy support
+            # oculus_hand_port=self.oculus_hand_port,  # Legacy support
         )
 
 
@@ -303,3 +326,50 @@ class Hand2DVisualizerCfg:
             oculus_feedback_port=self.oculus_feedback_port,
             display_plot=self.display_plot,
         )
+
+
+@dataclass
+class UnifiedPICO4VRHandDetectorCfg:
+    """PICO4 VR手部追踪探测器的配置,支持任何手部配置。"""
+
+    host: str = network.HOST_ADDRESS
+    pico4_pub_port: int = ports.KEYPOINT_STREAM_PORT
+    button_port: int = ports.RESOLUTION_BUTTON_PORT
+    teleop_reset_port: int = ports.TELEOP_RESET_PORT
+    hand_config: str = robots.RIGHT
+    hand_side: str = robots.RIGHT  # 用于标识目的
+
+    def __post_init__(self):
+        """验证端口配置。"""
+        all_ports = [self.pico4_pub_port, self.button_port, self.teleop_reset_port]
+        if len(set(all_ports)) != len(all_ports):
+            logger.error("Duplicate ports found in UnifiedPICO4VRHandDetector configuration!")
+            raise ValueError("Duplicate ports in configuration")
+
+        # 验证端口范围
+        for port_name, port_value in [
+            ("pico4_pub_port", self.pico4_pub_port),
+            ("button_port", self.button_port),
+            ("teleop_reset_port", self.teleop_reset_port),
+        ]:
+            if not (1 <= port_value <= 65535):
+                raise ValueError(f"{port_name} out of valid range (1-65535): {port_value}")
+
+    def build(self):
+        # 根据手部配置配置端口
+        kwargs = {
+            "host": self.host,
+            "pico4_pub_port": self.pico4_pub_port,
+            "button_port": self.button_port,
+            "teleop_reset_port": self.teleop_reset_port,
+            "hand_config": self.hand_config,
+        }
+
+        # 根据配置设置适当的手部端口
+        if self.hand_config in [robots.RIGHT, robots.BIMANUAL]:
+            kwargs["right_hand_port"] = network.RIGHT_HAND_PICO4_PORT
+
+        if self.hand_config in [robots.LEFT, robots.BIMANUAL]:
+            kwargs["left_hand_port"] = network.LEFT_HAND_PICO4_PORT
+
+        return PICO4VRHandDetector(**kwargs)

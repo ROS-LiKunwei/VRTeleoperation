@@ -1,4 +1,4 @@
-Library: C:\MIT\BeaVR-app\BeaVR-Unity\Temp\BurstOutput\tempburstlibs\arm64-v8a\lib_burst_generated
+Library: /home/likunwei/dataCollection/BeaVR-app/BeaVR-Unity/Temp/BurstOutput/tempburstlibs/arm64-v8a/lib_burst_generated
 --platform=Android
 --minimum-os-version=
 --backend=burst-llvm-19
@@ -8,11 +8,12 @@ Library: C:\MIT\BeaVR-app\BeaVR-Unity\Temp\BurstOutput\tempburstlibs\arm64-v8a\l
 --dump=Function
 --float-precision=Standard
 --target-framework=NetFramework
---generate-link-xml=Temp\burst.link.xml
---temp-folder=C:\MIT\BeaVR-app\BeaVR-Unity\Temp\Burst
---key-folder=C:/Program Files/Unity/Hub/Editor/6000.2.2f1/Editor/Data/PlaybackEngines/AndroidPlayer
---decode-folder=C:\MIT\BeaVR-app\BeaVR-Unity\Library\Burst
---output=C:\MIT\BeaVR-app\BeaVR-Unity\Temp\BurstOutput\tempburstlibs\arm64-v8a\lib_burst_generated
+--generate-link-xml=Temp/burst.link.xml
+--temp-folder=/home/likunwei/dataCollection/BeaVR-app/BeaVR-Unity/Temp/Burst
+--debug=Full
+--key-folder=/home/likunwei/Unity/Hub/Editor/6000.2.2f1/Editor/Data/PlaybackEngines/AndroidPlayer
+--decode-folder=/home/likunwei/dataCollection/BeaVR-app/BeaVR-Unity/Library/Burst
+--output=/home/likunwei/dataCollection/BeaVR-app/BeaVR-Unity/Temp/BurstOutput/tempburstlibs/arm64-v8a/lib_burst_generated
 --pdb-search-paths=Temp/ManagedSymbols/
 
 --method=UnityEngine.XR.Hands.Gestures.XRHandOrientationUtility, Unity.XR.Hands, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null::GetHandAxisDirection(Unity.Mathematics.float3&, Unity.Mathematics, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null|UnityEngine.XR.Hands.Gestures.XRHandAxis, Unity.XR.Hands, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null|Unity.Mathematics.quaternion&, Unity.Mathematics, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null|System.Single, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089)--0ef4d50576f0f00022da4f79ae773f01
@@ -124,11 +125,12 @@ Library: C:\MIT\BeaVR-app\BeaVR-Unity\Temp\BurstOutput\tempburstlibs\arm64-v8a\l
 --dump=Function
 --float-precision=Standard
 --target-framework=NetFramework
---generate-link-xml=Temp\burst.link.xml
---temp-folder=C:\MIT\BeaVR-app\BeaVR-Unity\Temp\Burst
---key-folder=C:/Program Files/Unity/Hub/Editor/6000.2.2f1/Editor/Data/PlaybackEngines/AndroidPlayer
---decode-folder=C:\MIT\BeaVR-app\BeaVR-Unity\Library\Burst
---output=C:\MIT\BeaVR-app\BeaVR-Unity\Temp\BurstOutput\tempburstlibs\arm64-v8a\lib_burst_generated
+--generate-link-xml=Temp/burst.link.xml
+--temp-folder=/home/likunwei/dataCollection/BeaVR-app/BeaVR-Unity/Temp/Burst
+--debug=Full
+--key-folder=/home/likunwei/Unity/Hub/Editor/6000.2.2f1/Editor/Data/PlaybackEngines/AndroidPlayer
+--decode-folder=/home/likunwei/dataCollection/BeaVR-app/BeaVR-Unity/Library/Burst
+--output=/home/likunwei/dataCollection/BeaVR-app/BeaVR-Unity/Temp/BurstOutput/tempburstlibs/arm64-v8a/lib_burst_generated
 --pdb-search-paths=Temp/ManagedSymbols/
 
 --method=Unity.Jobs.IJobExtensions+JobStruct`1[[UnityEngine.XR.Interaction.Toolkit.AffordanceSystem.Jobs.Float4TweenJob, Unity.XR.Interaction.Toolkit, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null]], UnityEngine.CoreModule, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null::Execute(UnityEngine.XR.Interaction.Toolkit.AffordanceSystem.Jobs.Float4TweenJob&, Unity.XR.Interaction.Toolkit, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null|System.IntPtr, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089|System.IntPtr, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089|Unity.Jobs.LowLevel.Unsafe.JobRanges&, UnityEngine.CoreModule, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null|System.Int32, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089)--34aec427743d7d01c0cb7a219c9fbe32

@@ -127,6 +127,7 @@ class LeapHandRobotCfg:
 class LeapHandConfig:
     robot_name: str = robots.ROBOT_NAME_LEAP
     laterality: Laterality = Laterality.RIGHT
+    simulation_mode: bool = False
 
     # Configuration components - will be populated based on laterality
     detector: list = field(default_factory=list)
@@ -151,6 +152,8 @@ class LeapHandConfig:
 
     def _configure_for_laterality(self):
         """Configure all components based on the laterality setting - explicit and simple."""
+        # Use the simulation_mode parameter passed to the config
+        simulation_mode = self.simulation_mode
 
         # Create detector configurations
         self.detector = []
@@ -158,6 +161,7 @@ class LeapHandConfig:
             self.detector.append(
                 SharedComponentRegistry.get_bimanual_detector_config(
                     host=network.HOST_ADDRESS,
+                    detector_type="pico4",
                 )
             )
         else:
@@ -166,6 +170,7 @@ class LeapHandConfig:
                     SharedComponentRegistry.get_detector_config(
                         host=network.HOST_ADDRESS,
                         hand_side=robots.RIGHT,
+                        detector_type="pico4",
                     )
                 )
             elif self.laterality == Laterality.LEFT:
@@ -173,6 +178,7 @@ class LeapHandConfig:
                     SharedComponentRegistry.get_detector_config(
                         host=network.HOST_ADDRESS,
                         hand_side=robots.LEFT,
+                        detector_type="pico4",
                     )
                 )
 
@@ -230,7 +236,7 @@ class LeapHandConfig:
                     joint_angle_publish_port=ports.JOINT_PUBLISHER_PORT,
                     reset_subscribe_port=ports.TELEOP_RESET_PUBLISH_PORT,
                     state_publish_port=ports.LEAP_STATE_PUBLISH_PORT_RIGHT,
-                    simulation_mode=False,
+                    simulation_mode=simulation_mode,
                     hand_side=robots.RIGHT,
                     recorder_config={
                         "robot_identifier": getattr(robots, "ROBOT_IDENTIFIER_RIGHT_LEAP_HAND", "right_leap"),
@@ -250,7 +256,7 @@ class LeapHandConfig:
                     joint_angle_publish_port=ports.JOINT_PUBLISHER_PORT_LEFT,
                     reset_subscribe_port=ports.TELEOP_RESET_PUBLISH_PORT,
                     state_publish_port=ports.LEAP_STATE_PUBLISH_PORT_LEFT,  # ✅ FIX: Use separate port for left hand
-                    simulation_mode=False,
+                    simulation_mode=simulation_mode,
                     hand_side=robots.LEFT,
                     recorder_config={
                         "robot_identifier": getattr(robots, "ROBOT_IDENTIFIER_LEFT_LEAP_HAND", "left_leap"),

@@ -21,7 +21,7 @@ public class NetworkKeepAlive : MonoBehaviour
         }
         
         // Prefer component lookup; fallback to legacy object name if present
-        gestureDetector = FindObjectOfType<GestureDetectorXR>();
+        gestureDetector = FindFirstObjectByType<GestureDetectorXR>();
         if (gestureDetector == null)
         {
             GameObject detector = GameObject.Find("GestureDetector");

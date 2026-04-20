@@ -28,6 +28,8 @@ TagManager:
   - QDSUITextInputField
   - SamplesInfoPanel
   - QDSUIToggleCheckboxRadio
+  - Camera0
+  - Camera1
   layers:
   - Default
   - TransparentFX

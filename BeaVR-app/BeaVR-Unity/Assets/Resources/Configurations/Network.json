@@ -1,8 +1,8 @@
-﻿{
-  "IPAddress": "undefined",
+{
+  "IPAddress": "192.168.1.133",
   "rightkeyptPortNum": "8087",
   "leftkeyptPortNum": "8110",
-  "camPortNum": "10505",
+  "camPortNum": "10005",
   "graphPortNum": "15001",
   "resolutionPortNum": "8095",
   "PausePortNum": "8100",

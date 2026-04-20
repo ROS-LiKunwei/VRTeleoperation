@@ -9,9 +9,6 @@ from beavr.teleop.common.network.subscriber import ZMQSubscriber
 from beavr.teleop.common.network.utils import cleanup_zmq_resources
 from beavr.teleop.common.ops import Ops
 from beavr.teleop.components.detector.detector_types import SessionCommand
-from beavr.teleop.components.interface.controller.robots.xarm7_control import (
-    DexArmControl,
-)
 from beavr.teleop.components.interface.interface_base import RobotWrapper
 from beavr.teleop.components.interface.interface_types import (
     CartesianState,
@@ -19,6 +16,81 @@ from beavr.teleop.components.interface.interface_types import (
 )
 from beavr.teleop.components.operator.operator_types import CartesianTarget
 from beavr.teleop.configs.constants import robots
+
+# Only import DexArmControl if not in simulation mode
+DexArmControl = None
+
+class MockDexArmControl:
+    def __init__(self, ip="192.168.1.197", simulation_mode=False):
+        self.simulation_mode = simulation_mode
+        # Simulated joint positions
+        self._joint_positions = np.array(robots.ROBOT_HOME_JS, dtype=np.float32)
+        # Simulated cartesian position
+        self._cartesian_position = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        
+    def _init_xarm_control(self):
+        return 0
+    
+    def get_arm_states(self):
+        return {
+            "joint_position": self._joint_positions,
+            "joint_velocity": np.zeros(7, dtype=np.float32),
+            "joint_torque": np.zeros(7, dtype=np.float32),
+            "timestamp": time.time(),
+        }
+    
+    def get_arm_position(self):
+        return self._joint_positions
+    
+    def get_arm_velocity(self):
+        return np.zeros(7, dtype=np.float32)
+    
+    def get_arm_torque(self):
+        return np.zeros(7, dtype=np.float32)
+    
+    def get_arm_cartesian_coords(self):
+        return self._cartesian_position
+    
+    def get_cartesian_state(self):
+        return {
+            "cartesian_position": self._cartesian_position,
+            "timestamp": time.time(),
+        }
+    
+    def get_arm_pose(self):
+        # Return a mock affine matrix
+        rotation = np.eye(3)
+        translation = np.array(self._cartesian_position[:3]) / robots.XARM_SCALE_FACTOR
+        return np.block([[rotation, translation[:, np.newaxis]], [0, 0, 0, 1]])
+    
+    def move_arm_joint(self, joint_angles):
+        self._joint_positions = np.array(joint_angles, dtype=np.float32)
+        return 0
+    
+    def move_arm_cartesian(self, cartesian_pos, duration=3):
+        # Update simulated cartesian position
+        if len(cartesian_pos) == 7:
+            # Convert from quaternion to axis-angle
+            pos_m = np.asarray(cartesian_pos[0:3], dtype=np.float32)
+            # Update position (ignoring orientation for simplicity)
+            self._cartesian_position[:3] = pos_m * robots.XARM_SCALE_FACTOR
+        return 0
+    
+    def arm_control(self, cartesian_pos):
+        return self.move_arm_cartesian(cartesian_pos)
+    
+    def home_arm(self):
+        self._joint_positions = np.array(robots.ROBOT_HOME_JS, dtype=np.float32)
+        self._cartesian_position = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        return 0
+    
+    @property
+    def robot(self):
+        # Mock robot object
+        class MockRobot:
+            def set_mode_and_state(self, mode, state):
+                return True
+        return MockRobot()
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +144,16 @@ class XArm7Robot(RobotWrapper):
         if not state_publish_port:
             raise ValueError("XArm7Robot requires a 'state_publish_port'")
 
-        self._controller = DexArmControl(ip=robot_ip, simulation_mode=simulation_mode)
+        # Use mock controller in simulation mode
+        if simulation_mode:
+            self._controller = MockDexArmControl(ip=robot_ip, simulation_mode=simulation_mode)
+        else:
+            # Import DexArmControl only when needed for real robot
+            global DexArmControl
+            if DexArmControl is None:
+                from beavr.teleop.components.interface.controller.robots.xarm7_control import DexArmControl
+            self._controller = DexArmControl(ip=robot_ip, simulation_mode=simulation_mode)
+        
         self._is_right_arm = is_right_arm
 
         self._data_frequency = robots.VR_FREQ

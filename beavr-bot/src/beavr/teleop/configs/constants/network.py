@@ -4,7 +4,7 @@
 
 # Host addresses
 # NOTE: Keep this in sync with your active environment config (e.g. configs/environment/dev.yaml)
-HOST_ADDRESS = "10.0.0.51"
+HOST_ADDRESS = "192.168.1.133"
 
 # Robot IP addresses
 LEFT_XARM_IP = "192.168.1.237"
@@ -37,3 +37,7 @@ ARM_LOW_RESOLUTION = 0
 
 LEFT_HAND_PORT = 8110
 RIGHT_HAND_PORT = 8087
+
+# PICO4 VR hand tracking socket ports
+LEFT_HAND_PICO4_PORT = 8110
+RIGHT_HAND_PICO4_PORT = 8087

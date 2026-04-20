@@ -71,8 +71,11 @@ class MainConfig:
         # 转换为枚举类型(enum)供内部使用
         self.laterality_enum = Laterality(self.laterality)
 
+        # Get simulation mode from teleop flags
+        simulation_mode = self.teleop.flags.sim_env
+
         # 使用工具函数加载机器人配置（可多个）
-        self.robot = load_robot_config(self.robot_name, self.laterality_enum)
+        self.robot = load_robot_config(self.robot_name, self.laterality_enum, simulation_mode)
 
     # TODO: 当完全迁移到新的结构化配置后移除这部分
     # 为向后兼容提供便捷的属性委托(attribute delegation)

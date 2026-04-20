@@ -21,6 +21,81 @@ from beavr.teleop.configs.constants import robots
 logger = logging.getLogger(__name__)
 
 
+class MockDexArmControl:
+    """Mock implementation of DexArmControl for simulation mode"""
+    def __init__(self, is_right_arm: bool = True):
+        self._is_right_arm = is_right_arm
+        self._last_successful_position = np.zeros(16, dtype=np.float32)
+        self._command_queue = Queue(maxsize=1)
+        self._movement_thread = threading.Thread(target=self._execute_movement_loop, daemon=True)
+        self._movement_thread.start()
+
+    def move_hand(self, target_joints_radians):
+        """Queue up movement command"""
+        try:
+            # Update queue with latest command, dropping old ones
+            while not self._command_queue.empty():
+                self._command_queue.get_nowait()
+            self._command_queue.put(target_joints_radians)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to queue movement: {e}")
+            return False
+
+    def _execute_movement_loop(self):
+        """Background thread that executes movements"""
+        while True:
+            try:
+                if not self._command_queue.empty():
+                    positions = self._command_queue.get()
+                    # In simulation, we just update the last successful position
+                    self._last_successful_position = positions
+                time.sleep(0.02)  # 50Hz max rate
+            except Exception as e:
+                logger.error(f"Movement error: {e}")
+                time.sleep(0.1)
+
+    def get_hand_position(self):
+        """Returns cached position"""
+        return self._last_successful_position
+
+    def get_hand_state(self):
+        """Returns cached state"""
+        return {
+            "position": self._last_successful_position,
+            "velocity": np.zeros(16),
+            "effort": np.zeros(16),
+        }
+
+    def get_commanded_hand_state(self):
+        """Returns last commanded position"""
+        return {"position": self._last_successful_position}
+
+    def home_hand(self):
+        """Home the hand to zero position"""
+        self.move_hand(np.zeros(16))
+
+    def reset_hand(self):
+        """Reset the hand to home position"""
+        self.home_hand()
+
+    def close(self):
+        """Close the controller"""
+        pass
+
+    def get_hand_velocity(self):
+        """Get hand velocity"""
+        return self.get_hand_state()["velocity"]
+
+    def get_hand_torque(self):
+        """Get hand torque"""
+        return self.get_hand_state()["effort"]
+
+    def get_commanded_hand_joint_position(self):
+        """Get commanded hand joint position"""
+        return self.get_commanded_hand_state()["position"]
+
+
 class LeapHandRobot(RobotWrapper):
     def __init__(
         self,
@@ -58,8 +133,9 @@ class LeapHandRobot(RobotWrapper):
         self.recorder_config = kwargs.get("recorder_config", {})
         self.robot_identifier = self.recorder_config.get("robot_identifier", self.name)
 
+        # Use mock controller in simulation mode
         if simulation_mode:
-            self._controller = None  # Skip hardware initialization in sim mode
+            self._controller = MockDexArmControl(is_right_arm=is_right_arm)
         else:
             self._controller = DexArmControl(is_right_arm=is_right_arm)  # Pass hand side to controller
 

@@ -1,4 +1,4 @@
-﻿using UnityEngine.UI;
+using UnityEngine.UI;
 using System.Collections.Generic;
 using UnityEngine;
 using Unity.XR.CoreUtils;
@@ -19,7 +19,7 @@ class Logger
 	{
 		// Obtain XR camera or fallback to main camera
 		Camera xrCamera = null;
-		var origin = GameObject.FindObjectOfType<XROrigin>();
+		var origin = GameObject.FindFirstObjectByType<XROrigin>();
 		if (origin != null && origin.Camera != null)
 			xrCamera = origin.Camera;
 		if (xrCamera == null)
