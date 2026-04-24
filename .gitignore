@@ -1,0 +1,24 @@
+# 日志文件
+BeaVR-app/pico_logs.txt
+beavr-bot/MUJOCO_LOG.TXT
+beavr-bot/beavr_run.log
+
+# 其他可能的日志文件
+*.log
+*.txt
+
+# IDE 相关文件
+.vscode/
+.idea/
+
+# 虚拟环境
+venv/
+env/
+
+# 构建产物
+build/
+dist/
+
+# 缓存文件
+__pycache__/
+*.pyc
