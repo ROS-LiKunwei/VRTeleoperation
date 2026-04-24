@@ -167,13 +167,6 @@ class PICO4VRHandDetector(Component):
         解析PICO4 Unity应用发送的原始数据格式：
         "<type_marker>:x1,y1,z1|x2,y2,z2|...|x26,y26,z26"
 
-        解析步骤：
-        1. 解码字节流为字符串
-        2. 按冒号分割，获取类型标记和坐标部分
-        3. 按竖线分割坐标部分，获取每个关节的xyz坐标
-        4. 按逗号分割每个坐标，转换为float值
-        5. 验证坐标数量是否为26*3=78
-
         Args:
             data: 原始字节数据，格式为 b"<type_marker>:x,y,z|x,y,z|..."
 
@@ -201,25 +194,19 @@ class PICO4VRHandDetector(Component):
                 return []
 
             coords = coords_part.split("|")
-            if not coords:
-                logger.warning(f"_process_keypoints: 坐标列表为空: {data_str}")
-                return []
-
             for coord in coords:
                 coord = coord.strip()
                 if not coord:
                     continue
                 coord_values = coord.split(",")[:3]
                 if len(coord_values) != 3:
-                    logger.warning(f"_process_keypoints: 坐标格式错误: {coord}")
                     continue
                 try:
                     values.extend(float(val) for val in coord_values)
-                except ValueError as e:
-                    logger.warning(f"_process_keypoints: 坐标值转换错误: {e}, 坐标: {coord}")
+                except ValueError:
                     continue
 
-            expected_count = 26 * 3  # 26个关节，每个3个坐标
+            expected_count = 26 * 3
             actual_count = len(values)
             if actual_count != expected_count:
                 logger.warning(
@@ -345,7 +332,7 @@ class PICO4VRHandDetector(Component):
                     # TODO: 我们真的只需要发布一次！
                     # 我们可以将所有信息存储在单个模式表中
                     # 发布InputFrame对象给下游的keypoint_transform.py
-                    # InputFrame包含：时间戳、手侧、关键点序列、相对/绝对模式、方向帧向量
+                    # InputFrame包含：时间戳、手侧、关键点序列、相对/绝对模式、方向帧向量、帧索引
                     self.publisher_manager.publish(
                         host=self.host,
                         port=self.pico4_pub_port,

@@ -81,6 +81,7 @@ dependencies = [
     "xarm-python-sdk",
     "dynamixel-sdk",
     "flatbuffers>=25.9.23,<26.0.0",
+    "mujoco>=3.0.0",
 ]
 
 [project.optional-dependencies]

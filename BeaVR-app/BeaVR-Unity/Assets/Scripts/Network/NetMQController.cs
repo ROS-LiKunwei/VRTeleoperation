@@ -42,9 +42,6 @@ public class NetMQController : MonoBehaviour
     // 初始化标志
     private bool netMQInitialized = false;
     
-    // 日志时间控制
-    private float lastLogTime = 0f;
-    
     // 套接字失败计数
     private Dictionary<string, int> socketFailCounts = new Dictionary<string, int>();
 

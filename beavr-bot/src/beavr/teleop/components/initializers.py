@@ -49,9 +49,12 @@ class TeleOperator(ProcessInstantiator):
 
         logger.info("🔧 Initializing TeleOperator with structured configuration")
 
-        # 仿真模式下，先启动环境进程（如模拟器/场景等）
+        # 启动仿真环境（如果配置中有environment组件）
         if self.teleop_config.flags.sim_env:
             self._init_sim_environment()
+        elif hasattr(self.robot_config, "environment") and self.robot_config.environment:
+            self._init_sim_environment()
+            logger.info("🌐 Auto-starting simulation environment from robot config")
         # 启动手部/关键点检测器
         self._init_detector()
         # 启动关键点变换链路（坐标系/尺度/滤波等）

@@ -34,6 +34,7 @@ from beavr.teleop.components.operator.robots.sysmo32_operator import Sysmo32Oper
 from beavr.teleop.configs.constants import network, ports, robots
 from beavr.teleop.configs.robots import TeleopRobotConfig
 from beavr.teleop.configs.robots.shared_components import SharedComponentRegistry
+from beavr.teleop.configs.robots.sysmo_mujoco_config import MuJoCoSimConfig
 
 logger = logging.getLogger(__name__)
 
@@ -152,6 +153,7 @@ class Sysmo32Config:
     visualizers: list = field(default_factory=list)
     robots: list = field(default_factory=list)
     operators: list = field(default_factory=list)
+    environment: list = field(default_factory=list)
 
     def __post_init__(self):
         log_laterality_configuration(self.laterality, ROBOT_NAME_SYSMO32)
@@ -305,6 +307,18 @@ class Sysmo32Config:
                 )
             )
 
+        # Environment配置（MuJoCo仿真）
+        self.environment = [
+            MuJoCoSimConfig(
+                host=network.HOST_ADDRESS,
+                urdf_path="configs/robots/sysmo32.urdf",
+                right_endeff_subscribe_port=ports.XARM_ENDEFF_SUBSCRIBE_PORT + SYSMO32_RIGHT_PORT_OFFSET,
+                left_endeff_subscribe_port=ports.XARM_ENDEFF_SUBSCRIBE_PORT + SYSMO32_LEFT_PORT_OFFSET,
+                render=True,
+                simulation_mode=True,
+            )
+        ]
+
     def build(self):
         return {
             "robot_name": self.robot_name,
@@ -313,4 +327,5 @@ class Sysmo32Config:
             "visualizers": [item.build() for item in self.visualizers],
             "robots": [item.build() for item in self.robots],
             "operators": [item.build() for item in self.operators],
+            "environment": [item.build() for item in self.environment],
         }
