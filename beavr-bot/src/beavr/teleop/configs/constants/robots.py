@@ -34,9 +34,9 @@ OCULUS_JOINTS = {
     # Middle: 11 Metacarpal, 12 Proximal, 13 Intermediate, 14 Distal, 15 Tip
     # Ring: 16 Metacarpal, 17 Proximal, 18 Intermediate, 19 Distal, 20 Tip
     # Little: 21 Metacarpal, 22 Proximal, 23 Intermediate, 24 Distal, 25 Tip
-    "metacarpals": [2, 6, 11, 16, 21],
+    "metacarpals": [2, 6, 11, 16, 21], # 掌骨:连接手腕和手指根部的那根骨头
     # Knuckles = first finger joints at the hand (proximal joints for non-thumb)
-    "knuckles": [7, 12, 17, 22],  # index, middle, ring, little
+    "knuckles": [7, 12, 17, 22],  # 指关节 index, middle, ring, little
     # Per-finger chains (4 joints) used with wrist stacked in code -> 5 points total
     "thumb": [2, 3, 4, 5],
     "index": [7, 8, 9, 10],

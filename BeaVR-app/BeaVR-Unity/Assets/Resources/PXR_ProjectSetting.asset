@@ -29,7 +29,7 @@ MonoBehaviour:
   bodyTracking: 0
   adaptiveResolution: 0
   stageMode: 0
-  videoSeeThrough: 0
+  videoSeeThrough: 1
   spatialAnchor: 0
   sceneCapture: 0
   sharedAnchor: 0
@@ -47,7 +47,7 @@ MonoBehaviour:
   mrSafeguard: 0
   enableRecommendMSAA: 0
   recommendSubsamping: 0
-  recommendMSAA: 0
+  recommendMSAA: 1
   validationFFREnabled: 0
   validationETFREnabled: 0
   portalInited: 1

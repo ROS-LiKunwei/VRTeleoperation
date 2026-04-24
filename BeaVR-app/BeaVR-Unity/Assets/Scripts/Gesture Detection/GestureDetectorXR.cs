@@ -27,6 +27,32 @@ public class GestureDetectorXR : MonoBehaviour
 	private int _lastLeftTrackedCount = -1;
 	private string _lastModeLogged = "";
 
+	// PICO手部发送频率统计
+	[Header("PICO发送频率统计")]
+	public bool EnableSendFrequencyLogging = true;
+	private int _rightHandSendCount = 0;
+	private int _leftHandSendCount = 0;
+	private float _lastRightSendFreqLogTime = 0f;
+	private float _lastLeftSendFreqLogTime = 0f;
+	private float _rightSendFrequency = 0f;
+	private float _leftSendFrequency = 0f;
+	private const float FREQ_CALC_INTERVAL = 1.0f;
+
+	// PICO手腕部数据打印
+	[Header("PICO手腕部数据打印")]
+	public bool EnableWristDataLogging = true;
+	private float _lastWristLogTime = 0f;
+	private const float WRIST_LOG_INTERVAL = 2.0f;
+
+	// PICO 26个坐标系数据打印
+    [Header("PICO 26个坐标系数据打印")]
+    public bool EnableFullJointLogging = true;
+    private float _lastFullJointLogTime = 0f;
+    private const float FULL_JOINT_LOG_INTERVAL = 5.0f;
+    
+    // 帧索引，用于匹配三个环节的数据
+    private int _frameIndex = 0;
+
 	// UI和辅助工具（保持与原始行为匹配）
 	public GameObject MenuButton;
 	public GameObject ResolutionButton;
@@ -323,6 +349,74 @@ public class GestureDetectorXR : MonoBehaviour
 			string leftHandDataString = SerializeVector3List(leftHandGestureData);
 			leftHandDataString = typeMarker + ":" + leftHandDataString;
 			NetMQController.Instance.SendMessage("LeftHand", leftHandDataString);
+
+			// PICO发送频率统计
+			if (EnableSendFrequencyLogging)
+			{
+				_rightHandSendCount++;
+				_leftHandSendCount++;
+
+				float currentTime = Time.time;
+				if (currentTime - _lastRightSendFreqLogTime >= FREQ_CALC_INTERVAL)
+				{
+					_rightSendFrequency = _rightHandSendCount / (currentTime - _lastRightSendFreqLogTime);
+					_rightHandSendCount = 0;
+					_lastRightSendFreqLogTime = currentTime;
+					Debug.Log($"[PICO→App] 右手发送频率: {_rightSendFrequency:F1} Hz");
+				}
+
+				if (currentTime - _lastLeftSendFreqLogTime >= FREQ_CALC_INTERVAL)
+				{
+					_leftSendFrequency = _leftHandSendCount / (currentTime - _lastLeftSendFreqLogTime);
+					_leftHandSendCount = 0;
+					_lastLeftSendFreqLogTime = currentTime;
+					Debug.Log($"[PICO→App] 左手发送频率: {_leftSendFrequency:F1} Hz");
+				}
+			}
+
+			// PICO手腕部数据打印
+			if (EnableWristDataLogging)
+			{
+				float currentTime = Time.time;
+				if (currentTime - _lastWristLogTime >= WRIST_LOG_INTERVAL)
+				{
+					_lastWristLogTime = currentTime;
+					Vector3 rWrist = rightHandGestureData.Count > 0 ? rightHandGestureData[0] : Vector3.zero;
+					Vector3 rPalm = rightHandGestureData.Count > 1 ? rightHandGestureData[1] : Vector3.zero;
+					Vector3 lWrist = leftHandGestureData.Count > 0 ? leftHandGestureData[0] : Vector3.zero;
+					Vector3 lPalm = leftHandGestureData.Count > 1 ? leftHandGestureData[1] : Vector3.zero;
+					Debug.Log($"[PICO获取] index={_frameIndex} 右手腕={FormatVec(rWrist)} 右手掌={FormatVec(rPalm)} | 左手腕={FormatVec(lWrist)} 左手掌={FormatVec(lPalm)}");
+					_frameIndex++;
+				}
+			}
+
+			// PICO 26个坐标系数据打印
+			if (EnableFullJointLogging)
+			{
+				float currentTime = Time.time;
+				if (currentTime - _lastFullJointLogTime >= FULL_JOINT_LOG_INTERVAL)
+				{
+					_lastFullJointLogTime = currentTime;
+					
+					// 右手26个关节数据
+					string rightJoints = "";
+					for (int i = 0; i < Mathf.Min(26, rightHandGestureData.Count); i++)
+					{
+						rightJoints += $"{i}:{FormatVec(rightHandGestureData[i])}" + (i < 25 ? " " : "");
+					}
+					
+					// 左手26个关节数据
+					string leftJoints = "";
+					for (int i = 0; i < Mathf.Min(26, leftHandGestureData.Count); i++)
+					{
+						leftJoints += $"{i}:{FormatVec(leftHandGestureData[i])}" + (i < 25 ? " " : "");
+					}
+					
+					Debug.Log($"[PICO获取] index={_frameIndex} 右手26关节: {rightJoints}");
+					Debug.Log($"[PICO获取] index={_frameIndex} 左手26关节: {leftJoints}");
+					_frameIndex++;
+				}
+			}
 
 			// 节流的设备日志，以便您可以通过adb验证我们发送的内容
 			if (EnableKeypointLogging)

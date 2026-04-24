@@ -7,7 +7,7 @@ using System.Collections.Generic;
 using System.IO;
 
 /// <summary>
-/// ZMQ通信控制器，管理所有NetMQ套接字操作。
+/// ZMQ通信控制器，管理所有NetMQ sockets操作。
 /// 负责初始化、套接字创建和清理。
 /// </summary>
 public class NetMQController : MonoBehaviour
@@ -22,7 +22,7 @@ public class NetMQController : MonoBehaviour
             {
                 GameObject go = new GameObject("NetMQController");
                 _instance = go.AddComponent<NetMQController>();
-                DontDestroyOnLoad(go);
+                DontDestroyOnLoad(go); // 切换场景不销毁
             }
             return _instance;
         }
@@ -47,6 +47,23 @@ public class NetMQController : MonoBehaviour
     
     // 套接字失败计数
     private Dictionary<string, int> socketFailCounts = new Dictionary<string, int>();
+
+    // 转发频率统计
+    private Dictionary<string, int> _sendCounts = new Dictionary<string, int>();
+    private Dictionary<string, float> _lastSendFreqLogTime = new Dictionary<string, float>();
+    private Dictionary<string, float> _sendFrequencies = new Dictionary<string, float>();
+    private const float NETMQ_FREQ_CALC_INTERVAL = 1.0f;
+    private float _lastForwardLogTime = 0f;
+    private const float FORWARD_LOG_INTERVAL = 2.0f;
+    private float _lastWristLogTime = 0f;
+    private const float WRIST_LOG_INTERVAL = 2.0f;
+
+    // 26个坐标系数据打印
+    private float _lastFullJointLogTime = 0f;
+    private const float FULL_JOINT_LOG_INTERVAL = 5.0f;
+    
+    // 帧索引，用于匹配三个环节的数据
+    private int _frameIndex = 0;
     
     /// <summary>
     /// 初始化NetMQController
@@ -301,17 +318,58 @@ public class NetMQController : MonoBehaviour
             
             // 成功时重置失败计数
             socketFailCounts[socketName] = 0;
-            
-            // 偶尔记录日志
-            if (Time.time - lastLogTime > 1.0f)
+
+            // 初始化频率统计字典
+            if (!_sendCounts.ContainsKey(socketName))
             {
-                lastLogTime = Time.time;
-                Debug.Log($"NetMQController: 发送消息到 '{socketName}'");
+                _sendCounts[socketName] = 0;
+                _lastSendFreqLogTime[socketName] = 0f;
+                _sendFrequencies[socketName] = 0f;
+            }
+
+            // 转发频率统计
+            _sendCounts[socketName]++;
+            float currentTime = Time.time;
+            if (currentTime - _lastSendFreqLogTime[socketName] >= NETMQ_FREQ_CALC_INTERVAL)
+            {
+                _sendFrequencies[socketName] = _sendCounts[socketName] / (currentTime - _lastSendFreqLogTime[socketName]);
+                _sendCounts[socketName] = 0;
+                _lastSendFreqLogTime[socketName] = currentTime;
+                Debug.Log($"[App→Bot] {socketName} 转发频率: {_sendFrequencies[socketName]:F1} Hz");
+            }
+
+            // 定期打印转发位姿信息
+            if (currentTime - _lastForwardLogTime >= FORWARD_LOG_INTERVAL)
+            {
+                _lastForwardLogTime = currentTime;
+                string poseInfo = message.Length > 100 ? message.Substring(0, 100) + "..." : message;
+                Debug.Log($"[App→Bot] index={_frameIndex} {socketName} 转发数据: {poseInfo}");
+                _frameIndex++;
+            }
+
+            // 定期打印手腕部数据（只对Hand类型的消息）
+            if ((socketName == "RightHand" || socketName == "LeftHand") &&
+                currentTime - _lastWristLogTime >= WRIST_LOG_INTERVAL)
+            {
+                _lastWristLogTime = currentTime;
+                string wristData = ParseWristData(message);
+                Debug.Log($"[App→Bot] index={_frameIndex} {socketName} 手腕数据: {wristData}");
+                _frameIndex++;
+            }
+
+            // 定期打印26个坐标系数据（只对Hand类型的消息）
+            if ((socketName == "RightHand" || socketName == "LeftHand") &&
+                currentTime - _lastFullJointLogTime >= FULL_JOINT_LOG_INTERVAL)
+            {
+                _lastFullJointLogTime = currentTime;
+                string fullJointData = ParseFullJointData(message);
+                Debug.Log($"[App→Bot] index={_frameIndex} {socketName} 26关节数据: {fullJointData}");
+                _frameIndex++;
             }
 
             return true;
         }
-        catch (Exception e)
+        catch (Exception e) // 捕捉底层网络错误：如网络模块崩溃、端口被突然占用...
         {
             Debug.LogError($"NetMQController: 发送消息到 '{socketName}' 错误 - {e.Message}");
             socketFailCounts[socketName] = socketFailCounts.GetValueOrDefault(socketName, 0) + 1;
@@ -339,7 +397,71 @@ public class NetMQController : MonoBehaviour
         sockets.Clear();
         socketConnectionStatus.Clear();
     }
-    
+
+    /// <summary>
+    /// 解析手腕部数据
+    /// </summary>
+    /// <param name="message">消息字符串，格式：typeMarker:x,y,z|x,y,z|...</param>
+    /// <returns>格式化的手腕部数据字符串</returns>
+    private string ParseWristData(string message)
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(message))
+                return "空数据";
+
+            string[] parts = message.Split(':');
+            if (parts.Length < 2)
+                return "格式错误";
+
+            string[] joints = parts[1].Split('|');
+            if (joints.Length < 2)
+                return "关节数据不足";
+
+            string wrist = joints[0].Trim();
+            string palm = joints[1].Trim();
+
+            return $"手腕={wrist} 手掌={palm}";
+        }
+        catch (Exception e)
+        {
+            return "解析错误: " + e.Message;
+        }
+    }
+
+    /// <summary>
+    /// 解析26个关节数据
+    /// </summary>
+    /// <param name="message">消息字符串，格式：typeMarker:x,y,z|x,y,z|...</param>
+    /// <returns>格式化的26个关节数据字符串</returns>
+    private string ParseFullJointData(string message)
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(message))
+                return "空数据";
+
+            string[] parts = message.Split(':');
+            if (parts.Length < 2)
+                return "格式错误";
+
+            string[] joints = parts[1].Split('|');
+            string result = "";
+            
+            for (int i = 0; i < Mathf.Min(26, joints.Length); i++)
+            {
+                string joint = joints[i].Trim();
+                result += $"{i}:{joint}" + (i < 25 ? " " : "");
+            }
+
+            return result;
+        }
+        catch (Exception e)
+        {
+            return "解析错误: " + e.Message;
+        }
+    }
+
     /// <summary>
     /// 关闭并释放特定套接字
     /// </summary>
@@ -430,6 +552,7 @@ public class NetMQController : MonoBehaviour
     
     /// <summary>
     /// 通过发送测试消息执行诊断测试
+    /// 作用：在正式开始发送手势之前，确保所有的网络通道都是通畅的
     /// </summary>
     /// <returns>如果所有测试成功则返回true，否则返回false</returns>
     public bool PerformDiagnosticTests()

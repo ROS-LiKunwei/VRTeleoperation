@@ -321,5 +321,5 @@ def setup_root_logger(level: int = logging.DEBUG):
     logging.basicConfig(
         level=level,
         format="[%(levelname)s] %(asctime)s %(processName)s %(name)s: %(message)s",
-        datefmt="%H:%M:%S",
+        datefmt="%H:%M:%S.%f",
     )

@@ -1,3 +1,25 @@
+"""
+SYSMO-32双臂机器人接口模块
+
+本模块实现了SYSMO-32双臂机器人的BeaVR-bot接口，支持仿真模式和实机模式。
+SYSMO-32是6自由度双臂机器人，每臂6个旋转关节，共12个关节。
+
+与XArm7的区别：
+    - SYSMO-32每臂6个关节（XArm7是7个）
+    - SYSMO-32双臂固定在同一个base_link上（XArm7是单臂独立）
+    - SYSMO-32的关节限位与XArm7不同
+    - SYSMO-32的初始位姿与XArm7不同
+
+关节顺序（与URDF一致）：
+    左臂：left_shoulder_pitch, left_shoulder_roll, left_shoulder_yaw,
+          left_elbow, left_wrist_yaw, left_wrist_pitch
+    右臂：right_shoulder_pitch, right_shoulder_roll, right_shoulder_yaw,
+          right_elbow, right_wrist_yaw, right_wrist_pitch
+
+数据流位置：
+    xarm7_operator.py → [本模块: sysmo32_robot.py] → 物理机器人/MuJoCo仿真
+"""
+
 import logging
 import time
 
@@ -17,165 +39,172 @@ from beavr.teleop.components.interface.interface_types import (
 from beavr.teleop.components.operator.operator_types import CartesianTarget
 from beavr.teleop.configs.constants import robots
 
-# Only import DexArmControl if not in simulation mode
-DexArmControl = None
+logger = logging.getLogger(__name__)
 
-class MockDexArmControl:
+# SYSMO-32常量定义
+SYSMO32_NUM_JOINTS_PER_ARM = 6
+SYSMO32_TOTAL_JOINTS = 12
+SYSMO32_HOME_JS = np.zeros(SYSMO32_NUM_JOINTS_PER_ARM, dtype=np.float32)
+
+# SYSMO-32双臂初始位姿（笛卡尔空间，毫米+轴角）
+SYSMO32_BIMANUAL_LEFT_HOME = [206, 186, 475, 3.142, 0, 0]
+SYSMO32_BIMANUAL_RIGHT_HOME = [206, -186, 475, 3.142, 0, 0]
+
+# SYSMO-32缩放因子（毫米→米）
+SYSMO32_SCALE_FACTOR = 1000
+
+
+class MockSysmo32Control:
     """
-    XArm7 机器人的仿真控制器。
-    在仿真模式下使用，模拟真实的 DexArmControl 接口。
+    SYSMO-32仿真控制器（Mock模式）。
+
+    在没有物理机器人时使用，模拟SYSMO-32双臂的运动响应。
+    每臂6个关节，接收笛卡尔空间命令后更新模拟状态。
     """
-    def __init__(self, ip="192.168.1.197", simulation_mode=False):
-        """
-        初始化仿真控制器。
-        
-        Args:
-            ip: 机器人IP地址(仿真模式下仅作占位）
-            simulation_mode: 是否为仿真模式
-        """
+
+    def __init__(self, ip="127.0.0.1", simulation_mode=True, is_right_arm=True):
         self.simulation_mode = simulation_mode
-        # 仿真关节位置
-        self._joint_positions = np.array(robots.ROBOT_HOME_JS, dtype=np.float32)
-        # 仿真笛卡尔位置
-        self._cartesian_position = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
-        
-    def _init_xarm_control(self):
-        """初始化XArm控制（仿真模式下返回成功）"""
+        self._is_right_arm = is_right_arm
+
+        # 模拟关节位置（6个关节）
+        home = SYSMO32_BIMANUAL_RIGHT_HOME if is_right_arm else SYSMO32_BIMANUAL_LEFT_HOME
+        self._joint_positions = np.zeros(SYSMO32_NUM_JOINTS_PER_ARM, dtype=np.float32)
+        self._cartesian_position = np.array(home, dtype=np.float32)
+
+    def _init_control(self):
         return 0
-    
+
     def get_arm_states(self):
-        """获取机械臂状态"""
         return {
             "joint_position": self._joint_positions,
-            "joint_velocity": np.zeros(7, dtype=np.float32),
-            "joint_torque": np.zeros(7, dtype=np.float32),
+            "joint_velocity": np.zeros(SYSMO32_NUM_JOINTS_PER_ARM, dtype=np.float32),
+            "joint_torque": np.zeros(SYSMO32_NUM_JOINTS_PER_ARM, dtype=np.float32),
             "timestamp": time.time(),
         }
-    
+
     def get_arm_position(self):
-        """获取机械臂关节位置"""
         return self._joint_positions
-    
+
     def get_arm_velocity(self):
-        """获取机械臂关节速度"""
-        return np.zeros(7, dtype=np.float32)
-    
+        return np.zeros(SYSMO32_NUM_JOINTS_PER_ARM, dtype=np.float32)
+
     def get_arm_torque(self):
-        """获取机械臂关节力矩"""
-        return np.zeros(7, dtype=np.float32)
-    
+        return np.zeros(SYSMO32_NUM_JOINTS_PER_ARM, dtype=np.float32)
+
     def get_arm_cartesian_coords(self):
-        """获取机械臂笛卡尔坐标"""
         return self._cartesian_position
-    
+
     def get_cartesian_state(self):
-        """获取笛卡尔状态"""
         return {
             "cartesian_position": self._cartesian_position,
             "timestamp": time.time(),
         }
-    
+
     def get_arm_pose(self):
-        """获取机械臂位姿（返回仿射矩阵）"""
-        # Return a mock affine matrix
-        rotation = np.eye(3)  # 单位旋转矩阵
-        translation = np.array(self._cartesian_position[:3]) / robots.XARM_SCALE_FACTOR  # 平移向量
-        return np.block([[rotation, translation[:, np.newaxis]], [0, 0, 0, 1]])  # 4x4齐次矩阵 np.newaxis 扩展维度（3,）-> (3,1)
-    
+        rotation = np.eye(3)
+        translation = np.array(self._cartesian_position[:3]) / SYSMO32_SCALE_FACTOR
+        return np.block([[rotation, translation[:, np.newaxis]], [0, 0, 0, 1]])
+
     def move_arm_joint(self, joint_angles):
-        """关节空间运动"""
         self._joint_positions = np.array(joint_angles, dtype=np.float32)
         return 0
-    
+
     def move_arm_cartesian(self, cartesian_pos, duration=3):
-        """笛卡尔空间运动"""
-        # Update simulated cartesian position
         if len(cartesian_pos) == 7:
-            # Convert from quaternion to axis-angle
             pos_m = np.asarray(cartesian_pos[0:3], dtype=np.float32)
-            # Update position (ignoring orientation for simplicity)
-            self._cartesian_position[:3] = pos_m * robots.XARM_SCALE_FACTOR
+            self._cartesian_position[:3] = pos_m * SYSMO32_SCALE_FACTOR
         return 0
-    
+
     def arm_control(self, cartesian_pos):
-        """机械臂控制"""
         return self.move_arm_cartesian(cartesian_pos)
-    
+
     def home_arm(self):
-        """机械臂回零"""
-        self._joint_positions = np.array(robots.ROBOT_HOME_JS, dtype=np.float32)
-        self._cartesian_position = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        home = SYSMO32_BIMANUAL_RIGHT_HOME if self._is_right_arm else SYSMO32_BIMANUAL_LEFT_HOME
+        self._joint_positions = np.zeros(SYSMO32_NUM_JOINTS_PER_ARM, dtype=np.float32)
+        self._cartesian_position = np.array(home, dtype=np.float32)
         return 0
-    
+
     @property
     def robot(self):
-        """获取机器人对象"""
-        # Mock robot object
         class MockRobot:
             def set_mode_and_state(self, mode, state):
                 return True
         return MockRobot()
 
-logger = logging.getLogger(__name__)
 
-
-class XArm7Robot(RobotWrapper):
+class Sysmo32Robot(RobotWrapper):
     """
-    XArm7 遥操作接口和状态发布器。
+    SYSMO-32双臂机器人遥操作接口和状态发布器。
 
-    数据流概述：
-    - 订阅者接收操作员输入，话题包括：'endeff_coords', 'joint', 'reset', 'home', 'pause'。
-    - 内部getter返回强类型边界对象(例如,CartesianState)或本地字典。
-    - publish_current_state() 将这些边界对象序列化回下游消费者期望的传统有线格式
-      （参见beavrbot.py中的BeavrBot和configs.py中的配置路径）。
+    数据流角色：
+        本类是遥操作系统数据流的机器人接口层，
+        负责接收xarm7_operator发布的CartesianTarget命令，
+        驱动SYSMO-32双臂机器人运动（实机或仿真）。
 
-    有线格式（未更改）：
-    - 'joint_states' -> { 'joint_position': List[float], 'timestamp': float }
-    - 'operator_cartesian_states' -> { 'cartesian_position': [x, y, z], 'timestamp': float }
-    - 'xarm_cartesian_states' -> { 'cartesian_position': [x, y, z], 'timestamp': float }
-    - 'commanded_cartesian_state' -> { 'commanded_cartesian_position': [x,y,z,qx,qy,qz,qw], 'timestamp': float }
-    - 加上 'joint_angles_rad' 作为便利性（不被BeavrBot使用）
+    与XArm7Robot的区别：
+        - 每臂6个关节（XArm7是7个）
+        - 双臂共享同一个base_link
+        - 使用MockSysmo32Control替代DexArmControl
+        - 关节状态为6维向量
+
+    订阅Topic：
+        - 'endeff_coords': 笛卡尔空间目标命令（来自xarm7_operator）
+        - 'reset': 重置命令
+        - 'home': 归零命令
+        - 'pause': 暂停/恢复命令
+
+    发布Topic：
+        - 'endeff_homo': 末端执行器齐次变换矩阵（用于Operator重置）
+        - '{robot_name}': 机器人状态字典（用于数据记录）
     """
 
     def __init__(
         self,
-        host,                               # 网络主机地址
-        endeff_subscribe_port,              # 末端执行器命令订阅端口
-        joint_subscribe_port,               #末端执行器命令订阅端口
-        home_subscribe_port,                # 回零订阅端口
-        reset_subscribe_port,               # 重置订阅端口
-        teleoperation_state_port,           # 遥操作状态端口
-        robot_ip,                           # 机器人的IP地址   
-        is_right_arm=True,                  # 是否为右臂（True）或左臂（False）
-        simulation_mode: bool = False,      # 是否为仿真模式
-        endeff_publish_port: int = 10009,   # 末端执行器数据发布端口
-        state_publish_port: int = 10010,    # 状态发布端口
+        host,
+        endeff_subscribe_port,
+        joint_subscribe_port,
+        home_subscribe_port,
+        reset_subscribe_port,
+        teleoperation_state_port,
+        robot_ip="127.0.0.1",
+        is_right_arm=True,
+        simulation_mode: bool = True,
+        endeff_publish_port: int = 10009,
+        state_publish_port: int = 10010,
         **kwargs,
     ):
         """
-            初始化XArm7Robot
+        初始化SYSMO-32机器人接口。
+
+        Args:
+            host: 网络主机地址（ZMQ通信地址）。
+            endeff_subscribe_port: 末端执行器命令订阅端口。
+            joint_subscribe_port: 关节命令订阅端口。
+            home_subscribe_port: 归零命令订阅端口。
+            reset_subscribe_port: 重置命令订阅端口。
+            teleoperation_state_port: 遥操作状态端口。
+            robot_ip: 机器人IP地址（实机模式使用）。
+            is_right_arm: 是否为右臂（True）或左臂（False）。
+            simulation_mode: 是否为仿真模式（默认True）。
+            endeff_publish_port: 末端执行器数据发布端口。
+            state_publish_port: 机器人状态发布端口。
         """
-        # 确保必需的端口存在
         if not endeff_publish_port:
-            raise ValueError("XArm7Robot requires an 'endeff_publish_port'")
+            raise ValueError("Sysmo32Robot requires an 'endeff_publish_port'")
         if not state_publish_port:
-            raise ValueError("XArm7Robot requires a 'state_publish_port'")
+            raise ValueError("Sysmo32Robot requires a 'state_publish_port'")
 
-        # 在仿真模式下使用模拟控制器
-        if simulation_mode:
-            self._controller = MockDexArmControl(ip=robot_ip, simulation_mode=simulation_mode)
-        else:
-            # 仅在需要真实机器人时导入DexArmControl
-            global DexArmControl
-            if DexArmControl is None:
-                from beavr.teleop.components.interface.controller.robots.xarm7_control import DexArmControl
-            self._controller = DexArmControl(ip=robot_ip, simulation_mode=simulation_mode)
-        
+        # 使用Mock控制器（SYSMO-32暂无实机SDK）
+        self._controller = MockSysmo32Control(
+            ip=robot_ip,
+            simulation_mode=simulation_mode,
+            is_right_arm=is_right_arm,
+        )
+
         self._is_right_arm = is_right_arm
+        self._data_frequency = robots.VR_FREQ
 
-        self._data_frequency = robots.VR_FREQ  # 数据频率
-
-        # 订阅者
+        # ZMQ订阅者
         self._cartesian_coords_subscriber = ZMQSubscriber(
             host=host,
             port=endeff_subscribe_port,
@@ -183,7 +212,6 @@ class XArm7Robot(RobotWrapper):
             message_type=CartesianTarget,
         )
 
-        # 专用RESET订阅者 -------------------------------------------------
         self._reset_subscriber = ZMQSubscriber(
             host=host,
             port=reset_subscribe_port,
@@ -191,7 +219,6 @@ class XArm7Robot(RobotWrapper):
             message_type=SessionCommand,
         )
 
-        # 专用HOME订阅者 --------------------------------------------------
         self._home_subscriber = ZMQSubscriber(
             host=host,
             port=home_subscribe_port,
@@ -199,8 +226,6 @@ class XArm7Robot(RobotWrapper):
             message_type=SessionCommand,
         )
 
-        # Ops状态订阅者 --------------------------------------------------------
-        # 检查操作是停止还是继续。
         self._arm_teleop_state_subscriber = Ops(
             arm_teleop_state_subscriber=ZMQSubscriber(
                 host=host,
@@ -217,143 +242,112 @@ class XArm7Robot(RobotWrapper):
             "teleop_state": self._arm_teleop_state_subscriber.get_arm_teleop_state,
         }
 
-        # Centralized publisher manager and publishing configuration
+        # ZMQ发布者
         self._publisher_manager = ZMQPublisherManager.get_instance()
         self._publisher_host = host
         self._endeff_publish_port = endeff_publish_port
         self._state_publish_port = state_publish_port
 
-        # 添加接收消息的缓存
-        self._latest_cartesian_coords = None  # 最新的笛卡尔坐标
-        self._latest_joint_state = None  # 最新的关节状态
-        self._latest_cartesian_state_timestamp = 0  # 最新笛卡尔状态时间戳
-        self._latest_joint_state_timestamp = 0  # 最新关节状态时间戳
+        # 状态缓存
+        self._latest_cartesian_coords = None
+        self._latest_joint_state = None
+        self._latest_cartesian_state_timestamp = 0
+        self._latest_joint_state_timestamp = 0
+        self._latest_commanded_cartesian_position = None
+        self._latest_commanded_cartesian_timestamp = 0.0
 
-        # 记录控制
+        # 录制控制
         self._is_recording_enabled = False
 
-        # 添加最后有效命令笛卡尔位置的缓存
-        self._latest_commanded_cartesian_position = None  # 最新命令的笛卡尔位置
-        self._latest_commanded_cartesian_timestamp = 0.0  # 最新命令的笛卡尔位置时间戳
-
-        # 添加操作员和机器人之间的握手协调 ----------------------
+        # 握手协调
         self._handshake_coordinator = HandshakeCoordinator.get_instance()
         self._handshake_server_id = f"{self.name}_handshake"
 
-        # 为这个机器人启动握手服务器
         self._handshake_coordinator.start_server(
             subscriber_id=self._handshake_server_id,
             bind_host="*",
-            port=robots.TELEOP_HANDSHAKE_PORT + (1 if self._is_right_arm else 2),  # 唯一端口
+            port=robots.TELEOP_HANDSHAKE_PORT + (3 if self._is_right_arm else 4),
         )
         logger.info(f"Handshake server started for {self.name}")
 
-        self._is_homed = False  # 是否已回零
-
-    # recorder_functions removed in favor of inlined state gathering in publish_current_state()
+        self._is_homed = False
 
     @property
     def name(self):
-        """获取机器人名称"""
-        return f"{robots.ROBOT_NAME_XARM7}_{'right' if self._is_right_arm else 'left'}"
+        return f"sysmo32_{'right' if self._is_right_arm else 'left'}"
 
     @property
     def recorder_functions(self):
-        """由抽象基类要求。返回状态键到getter函数的映射。"""
         return {
-            "joint_states": self.get_joint_state, # 不加括号：它传递的是函数本身（一个指针/引用），而不是函数的运行结果
+            "joint_states": self.get_joint_state,
             "operator_cartesian_states": self.get_cartesian_state_from_operator,
-            "xarm_cartesian_states": self.get_robot_actual_cartesian_position,
+            "sysmo32_cartesian_states": self.get_robot_actual_cartesian_position,
             "commanded_cartesian_state": self.get_cartesian_commanded_position,
             "joint_angles_rad": self.get_joint_position,
         }
 
     @property
     def data_frequency(self):
-        """获取数据频率"""
         return self._data_frequency
 
-    # 状态信息函数
     def get_joint_state(self):
-        """获取关节状态"""
         arm_states = self._controller.get_arm_states()
         if arm_states is None or arm_states.get("joint_position") is None:
             return None
-        # 仅发布下游期望的有线格式键
         return {
             "joint_position": list(np.array(arm_states["joint_position"], dtype=np.float32)),
             "timestamp": arm_states.get("timestamp", time.time()),
         }
 
     def get_joint_velocity(self):
-        """获取关节速度"""
         return self._controller.get_arm_velocity()
 
     def get_joint_torque(self):
-        """获取关节力矩"""
         return self._controller.get_arm_torque()
 
     def get_cartesian_state(self):
-        """获取笛卡尔状态"""
-        cartesian_state = self._controller.get_cartesian_state()
-        return cartesian_state
+        return self._controller.get_cartesian_state()
 
     def get_joint_position(self):
-        """获取关节位置"""
         arm_position = self._controller.get_arm_position()
         if arm_position is None:
             return None
         return list(np.array(arm_position, dtype=np.float32))
 
     def get_cartesian_position(self):
-        """获取笛卡尔位置"""
         return self._controller.get_arm_cartesian_coords()
 
     def reset(self):
-        """重置机器人"""
-        return self._controller._init_xarm_control()
+        return self._controller._init_control()
 
     def get_teleop_state(self):
-        """
-        检查操作是停止还是继续。
-        """
         return self._arm_teleop_state_subscriber.get_arm_teleop_state()
 
     def get_pose(self):
-        """获取机器人位姿"""
         return self._controller.get_arm_pose()
 
-    # 运动函数
     def home(self):
-        """机械臂回零"""
         return self._controller.home_arm()
 
     def move(self, input_angles):
-        """关节空间运动"""
         self._controller.move_arm_joint(input_angles)
 
     def move_coords(self, cartesian_coords, duration=3):
-        """笛卡尔空间运动"""
         self._controller.move_arm_cartesian(cartesian_coords, duration=duration)
 
     def arm_control(self, cartesian_coords):
-        """机械臂控制"""
         self._controller.arm_control(cartesian_coords)
 
     def move_velocity(self, input_velocity_values, duration):
-        """速度控制（未实现）"""
         pass
 
     def get_cartesian_state_from_operator(self):
-        """从操作员获取笛卡尔状态"""
         if self._latest_cartesian_coords is None:
             return None
-        # 保持内部类型边界；稍后通过to_dict()发布为字典
         position = tuple(np.asarray(self._latest_cartesian_coords, dtype=np.float32).tolist())
         return CartesianState(position_m=position, timestamp_s=self._latest_cartesian_state_timestamp)
 
     def get_joint_state_from_operator(self):
-        """从操作员获取关节状态"""
         if self._latest_joint_state is None:
             return None
         return {
@@ -362,34 +356,27 @@ class XArm7Robot(RobotWrapper):
         }
 
     def get_cartesian_commanded_position(self):
-        """获取命令的笛卡尔位置"""
         if self._latest_commanded_cartesian_position is None:
             return None
         return CommandedCartesianState(
             commanded_cartesian_position=self._latest_commanded_cartesian_position.tolist()
-            if isinstance(self._latest_commanded_cartesian_position, np.ndarray) # 如果是 numpy 数组则转成 Python 列表，否则直接转成列表
+            if isinstance(self._latest_commanded_cartesian_position, np.ndarray)
             else list(self._latest_commanded_cartesian_position),
             timestamp_s=self._latest_commanded_cartesian_timestamp,
         )
 
     def get_robot_actual_cartesian_position(self):
-        """获取机器人实际的笛卡尔位置"""
         cartesian_state = self.get_cartesian_position()
         position = tuple(np.asarray(cartesian_state, dtype=np.float32).tolist())
         return CartesianState(position_m=position, timestamp_s=time.time())
 
     def get_robot_actual_joint_position(self):
-        """获取机器人实际的关节位置"""
-        # 重用关节状态getter获取观察到的关节数据
         return self.get_joint_state()
 
     def send_robot_pose(self):
-        """发送机器人位姿"""
         pose_homo = self._controller.get_arm_pose()
         try:
-            h_matrix = tuple(tuple(float(x) for x in row) for row in pose_homo)  # 转换为元组格式
-
-            # TODO: Remove the literal in the topic arg use a constant.
+            h_matrix = tuple(tuple(float(x) for x in row) for row in pose_homo)
             self._publisher_manager.publish(
                 host=self._publisher_host,
                 port=self._endeff_publish_port,
@@ -403,40 +390,43 @@ class XArm7Robot(RobotWrapper):
             logger.error(f"Failed to publish robot pose for {self.name}: {e}")
 
     def check_reset(self):
-        """检查是否需要重置"""
         reset_bool = self._reset_subscriber.recv_keypoints()
         return reset_bool is not None
 
     def check_home(self):
-        """检查是否需要回零"""
         home_bool = self._home_subscriber.recv_keypoints()
-
         if home_bool == robots.ARM_TELEOP_STOP:
             return True
         elif home_bool == robots.ARM_TELEOP_CONT:
             return False
-
         return False
 
-    # 带自动重置后记录启动的修改后的stream方法
     def stream(self):
-        """主数据流方法"""
-        self.home()  # 先回零
-        assert self._controller.robot.set_mode_and_state(1, 0), "Failed to enter SERVO-READY"
+        """
+        主流循环：接收笛卡尔命令并驱动机器人运动。
 
-        target_interval = 1.0 / self._data_frequency  # 目标时间间隔
-        next_frame_time = time.time()  # 下一帧时间
+        流程：
+        1. 归零机器人
+        2. 进入SERVO-READY模式
+        3. 循环：
+           a. 检查归零/重置命令
+           b. 检查遥操作状态（暂停/恢复）
+           c. 接收CartesianTarget命令
+           d. 驱动机器人运动
+           e. 发布当前状态
+        """
+        self.home()
+
+        target_interval = 1.0 / self._data_frequency
+        next_frame_time = time.time()
 
         while True:
             current_time = time.time()
 
-            # 仅以目标频率处理
             if current_time >= next_frame_time:
-                # 计算下一帧时间
                 next_frame_time = current_time + target_interval
 
                 if self.check_home() and not self._is_homed:
-                    # 执行回零运动。
                     self.home()
                     self._is_homed = True
                     self.send_robot_pose()
@@ -446,9 +436,7 @@ class XArm7Robot(RobotWrapper):
                 if self.check_reset():
                     self.send_robot_pose()
 
-                # 检查操作状态 --------------------------------------------------
                 if self.get_teleop_state() == robots.ARM_TELEOP_STOP:
-                    # 停止机器人移动并等待直到再次操作。
                     continue
 
                 msg = self._cartesian_coords_subscriber.recv_keypoints()
@@ -462,40 +450,32 @@ class XArm7Robot(RobotWrapper):
                     )
                     self._latest_commanded_cartesian_timestamp = cmd.timestamp_s
 
-                # 仅在有有效笛卡尔位置时移动
                 if self._latest_commanded_cartesian_position is not None:
                     self.move_coords(self._latest_commanded_cartesian_position)
 
-                # 每个周期发布当前状态，以便外部适配器（例如MultiRobotAdapter）接收最新的关节信息。
                 self.publish_current_state()
 
-                # 计算睡眠时间以保持一致的频率
                 sleep_time = max(0, next_frame_time - time.time())
                 if sleep_time > 0:
                     time.sleep(sleep_time)
 
     def publish_current_state(self):
-        # TODO: This needs to be updated along with how external adapters receive data.
         """
-        收集接口状态并通过ZMQ使用发布单个字典
-        self.name作为state_publish_port上的主题。对笛卡尔数据使用现有类型
-        (CartesianState, CommandedCartesianState)和关节的简单dict/list以确保清晰度。
+        收集并发布机器人当前状态。
+
+        发布的状态字典包含：
+        - joint_states: 关节位置和速度
+        - operator_cartesian_states: Operator计算的笛卡尔目标
+        - sysmo32_cartesian_states: 机器人实际笛卡尔位置
+        - commanded_cartesian_state: 命令的笛卡尔位姿
+        - joint_angles_rad: 关节角度（弧度）
         """
         publish_time = time.time()
 
-        # 1) 关节状态（dict: joint_position, timestamp）
         joint_states = self.get_joint_state()
-
-        # 2) operator笛卡尔状态（CartesianState）
         operator_cart = self.get_cartesian_state_from_operator()
-
-        # 3) 机器人实际笛卡尔状态（CartesianState）
         robot_cart = self.get_robot_actual_cartesian_position()
-
-        # 4) 命令的笛卡尔状态（CommandedCartesianState）
         commanded_cart = self.get_cartesian_commanded_position()
-
-        # 5) 便利性原始关节角度列表
         joint_angles_rad = self.get_joint_position()
 
         current_state_dict = {}
@@ -504,7 +484,7 @@ class XArm7Robot(RobotWrapper):
         if operator_cart is not None:
             current_state_dict["operator_cartesian_states"] = operator_cart.to_dict()
         if robot_cart is not None:
-            current_state_dict["xarm_cartesian_states"] = robot_cart.to_dict()
+            current_state_dict["sysmo32_cartesian_states"] = robot_cart.to_dict()
         if commanded_cart is not None:
             current_state_dict["commanded_cartesian_state"] = commanded_cart.to_dict()
         if joint_angles_rad is not None:
@@ -512,7 +492,6 @@ class XArm7Robot(RobotWrapper):
 
         current_state_dict["timestamp"] = publish_time
 
-        # 使用专用状态发布器和self.name主题发布状态字典
         self._publisher_manager.publish(
             host=self._publisher_host,
             port=self._state_publish_port,
@@ -521,8 +500,6 @@ class XArm7Robot(RobotWrapper):
         )
 
     def __del__(self):
-        """析构函数，确保清理资源"""
-        # 停止这个机器人的握手服务器
         if hasattr(self, "_handshake_coordinator") and hasattr(self, "_handshake_server_id"):
             self._handshake_coordinator.stop_server(self._handshake_server_id)
         cleanup_zmq_resources()
