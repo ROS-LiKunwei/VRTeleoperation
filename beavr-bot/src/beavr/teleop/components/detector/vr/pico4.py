@@ -12,7 +12,8 @@ PICO4 VR手部追踪探测器模块
     - 发送：ZMQ PUB套接字，发布解析后的InputFrame对象给下游组件
 
 数据格式：
-    - 接收格式："<type_marker>:x,y,z|x,y,z|..." （字符串，冒号前为类型标记，冒号后为26个关节坐标）
+    - 接收格式："<timestamp>:<type_marker>:x,y,z|x,y,z|..." 
+      其中timestamp格式为 "HH:MM:SS.ffffff"，type_marker为"relative"或"absolute"
     - 发送格式：InputFrame对象（包含时间戳、手侧、关键点序列、相对/绝对模式、方向帧向量）
 
 端口配置：
@@ -21,10 +22,15 @@ PICO4 VR手部追踪探测器模块
     - 关键点发布端口：8088 (KEYPOINT_STREAM_PORT)
     - 按钮事件端口：8095 (RESOLUTION_BUTTON_PORT)
     - 暂停/恢复端口：8100 (TELEOP_RESET_PORT)
+
+NTP时间同步：
+    - 支持与PICO4设备进行NTP时间同步
+    - 通过解析数据中的时间戳计算通信延迟
 """
 
 import logging
 import time
+from datetime import datetime
 from typing import Optional, Union
 
 import zmq
@@ -165,59 +171,89 @@ class PICO4VRHandDetector(Component):
         将原始关键点数据处理为坐标值列表。
 
         解析PICO4 Unity应用发送的原始数据格式：
-        "<type_marker>:x1,y1,z1|x2,y2,z2|...|x26,y26,z26"
+        - 新格式（带时间戳）："<timestamp>:<type_marker>:x1,y1,z1|x2,y2,z2|...|x26,y26,z26"
+          其中timestamp格式为 "HH:MM:SS.ffffff"
+        - 旧格式："<type_marker>:x1,y1,z1|x2,y2,z2|...|x26,y26,z26"
 
         Args:
-            data: 原始字节数据，格式为 b"<type_marker>:x,y,z|x,y,z|..."
+            data: 原始字节数据
 
         Returns:
-            list: 扁平化的坐标值列表，长度应为78（26个关节×3个坐标）。
-                  解析失败时返回空列表。
+            tuple: (values, send_timestamp)
+                   values: 扁平化的坐标值列表，长度应为78（26个关节×3个坐标），解析失败时返回空列表。
+                   send_timestamp: 发送时间戳字符串，格式为 "HH:MM:SS.ffffff"，无时间戳时返回None。
         """
         try:
             data_str = data.decode().strip()
             values = []
+            send_timestamp = None
 
-            # 解析坐标（格式：<hand>:x,y,z|x,y,z|x,y,z）
-            if ':' not in data_str:
-                logger.warning(f"_process_keypoints: 数据格式错误，缺少冒号分隔符: {data_str}")
-                return []
+            # 新格式：时间戳包含冒号，格式为 HH:MM:SS.ffffff:type_marker:coords
+            # 需要找到第三个冒号来分割时间戳和类型标记
+            first_colon = data_str.find(":")
+            if first_colon != -1:
+                second_colon = data_str.find(":", first_colon + 1)
+                if second_colon != -1:
+                    third_colon = data_str.find(":", second_colon + 1)
+                    if third_colon != -1:
+                        # 新格式：HH:MM:SS.ffffff:type_marker:coords
+                        send_timestamp = data_str[:third_colon]
+                        remaining = data_str[third_colon + 1:]
+                        # 分割类型标记和坐标数据
+                        parts = remaining.split(":", 1)
+                        if len(parts) >= 2:
+                            coords_part = parts[1].strip()
+                        else:
+                            coords_part = ""
+                    else:
+                        # 没有第三个冒号，尝试旧格式
+                        parts = data_str.split(":", 1)
+                        if len(parts) >= 2:
+                            coords_part = parts[1].strip()
+                        else:
+                            coords_part = ""
+                else:
+                    coords_part = ""
+            else:
+                coords_part = ""
 
-            parts = data_str.split(":")
-            if len(parts) < 2:
-                logger.warning(f"_process_keypoints: 数据格式错误，分割后部分不足: {data_str}")
-                return []
-
-            coords_part = parts[1].strip()
             if not coords_part:
                 logger.warning(f"_process_keypoints: 坐标部分为空: {data_str}")
-                return []
+                return [], send_timestamp
 
             coords = coords_part.split("|")
-            for coord in coords:
+            skipped_coords = []
+            for i, coord in enumerate(coords):
                 coord = coord.strip()
                 if not coord:
+                    skipped_coords.append(f"{i}:空")
                     continue
                 coord_values = coord.split(",")[:3]
                 if len(coord_values) != 3:
+                    skipped_coords.append(f"{i}:{coord}(只有{len(coord_values)}个值)")
                     continue
                 try:
                     values.extend(float(val) for val in coord_values)
                 except ValueError:
+                    skipped_coords.append(f"{i}:{coord}(转换失败)")
                     continue
+
+            if skipped_coords:
+                logger.debug(f"_process_keypoints: 跳过的坐标: {', '.join(skipped_coords)}")
 
             expected_count = 26 * 3
             actual_count = len(values)
             if actual_count != expected_count:
                 logger.warning(
                     f"_process_keypoints: 坐标数量不匹配. "
-                    f"期望 {expected_count} 个值, 得到 {actual_count}."
+                    f"期望 {expected_count} 个值, 得到 {actual_count}. "
+                    f"原始坐标数={len(coords)}, send_timestamp={send_timestamp}"
                 )
 
-            return values
+            return values, send_timestamp
         except Exception as e:
             logger.error(f"_process_keypoints: 处理数据时出错: {e}")
-            return []
+            return [], None
 
     def _receive_data(self, socket_name):
         """
@@ -238,6 +274,24 @@ class PICO4VRHandDetector(Component):
         except zmq.Again:
             return None
 
+    def _extract_coords_part(self, data_str):
+        """
+        从数据字符串中提取坐标部分，支持带时间戳的新格式。
+
+        格式: HH:MM:SS.ffffff:type_marker:coords 或 type_marker:coords
+
+        Returns:
+            str: 坐标部分字符串，解析失败返回None
+        """
+        parts = data_str.split(":")
+        if len(parts) < 2:
+            return None
+
+        if len(parts) >= 4 and "." in parts[1]:
+            return parts[3]
+        else:
+            return parts[1]
+
     def _parse_wrist_data(self, data):
         """
         解析手腕部数据，用于调试日志打印。
@@ -252,11 +306,11 @@ class PICO4VRHandDetector(Component):
         """
         try:
             data_str = data.decode().strip()
-            parts = data_str.split(":")
-            if len(parts) < 2:
+            coords_part = self._extract_coords_part(data_str)
+            if not coords_part:
                 return "格式错误"
 
-            coords = parts[1].split("|")
+            coords = coords_part.split("|")
             if len(coords) < 2:
                 return "数据不足"
 
@@ -280,11 +334,11 @@ class PICO4VRHandDetector(Component):
         """
         try:
             data_str = data.decode().strip()
-            parts = data_str.split(":")
-            if len(parts) < 2:
+            coords_part = self._extract_coords_part(data_str)
+            if not coords_part:
                 return "格式错误"
 
-            coords = parts[1].split("|")
+            coords = coords_part.split("|")
             result = []
 
             for i in range(min(26, len(coords))):
@@ -295,6 +349,49 @@ class PICO4VRHandDetector(Component):
         except Exception as e:
             return f"解析错误: {e}"
 
+    def _calculate_delay(self, send_timestamp):
+        """
+        计算从PICO发送到Bot接收的通信延迟。
+
+        Args:
+            send_timestamp: PICO发送时间戳，格式为 "HH:MM:SS.ffffff"
+
+        Returns:
+            float: 延迟（毫秒），计算失败返回None
+        """
+        if not send_timestamp:
+            return None
+
+        try:
+            send_time_parts = send_timestamp.split(".")
+            if len(send_time_parts) == 2:
+                time_str = send_time_parts[0]
+                fractional_part = send_time_parts[1]
+                # 处理毫秒或微秒精度，补齐到6位
+                microseconds = int(fractional_part.ljust(6, '0')[:6])
+                h, m, s = map(int, time_str.split(":"))
+                send_seconds_of_day = h * 3600 + m * 60 + s + microseconds / 1e6
+
+                now = datetime.now()
+                receive_seconds_of_day = now.hour * 3600 + now.minute * 60 + now.second + now.microsecond / 1e6
+
+                delay_s = receive_seconds_of_day - send_seconds_of_day
+                # 处理跨天情况
+                if delay_s < -3600:
+                    delay_s += 86400
+                elif delay_s > 3600:
+                    delay_s -= 86400
+
+                delay_ms = delay_s * 1000.0
+                # 限制合理范围（0-5000ms）
+                if delay_ms < 0 or delay_ms > 5000:
+                    return None
+
+                return delay_ms
+        except Exception as e:
+            logger.debug(f"延迟计算失败: {e}")
+            return None
+
     def stream(self):
         """
         统一VR手部检测的主流循环。
@@ -303,11 +400,12 @@ class PICO4VRHandDetector(Component):
         1. 以VR_FREQ(30Hz)频率运行
         2. 对每只配置的手：
            a. 从ZMQ PULL套接字接收原始手部数据
-           b. 解析原始数据为坐标值列表
+           b. 解析原始数据为坐标值列表（包含发送时间戳）
            c. 判断数据模式（相对/绝对）
-           d. 封装为InputFrame对象
-           e. 通过ZMQ PUB套接字发布给下游组件（keypoint_transform.py）
-           f. 定期打印调试日志（频率、手腕数据、26关节数据）
+           d. 计算通信延迟
+           e. 封装为InputFrame对象
+           f. 通过ZMQ PUB套接字发布给下游组件（keypoint_transform.py）
+           g. 定期打印调试日志（频率、手腕数据、26关节数据、延迟）
         3. 处理按钮事件和暂停/恢复命令
         """
         logger.info(f"Starting PICO4 VR hand detection with configuration: {self.hand_config}")
@@ -326,13 +424,16 @@ class PICO4VRHandDetector(Component):
                 keypoint_data = self._receive_data(socket_key)
 
                 if keypoint_data is not None:
-                    # 处理并发布此手的关键点
-                    keypoints = self._process_keypoints(keypoint_data)
+                    # 处理并发布此手的关键点（包含时间戳解析）
+                    keypoints, send_timestamp = self._process_keypoints(keypoint_data)
+
+                    # 计算延迟
+                    delay_ms = self._calculate_delay(send_timestamp)
+                    if delay_ms is None and send_timestamp is not None:
+                        logger.debug(f"延迟计算失败: send_timestamp={send_timestamp}")
+
                     is_relative = not keypoint_data.decode().strip().startswith(robots.ABSOLUTE)
-                    # TODO: 我们真的只需要发布一次！
-                    # 我们可以将所有信息存储在单个模式表中
                     # 发布InputFrame对象给下游的keypoint_transform.py
-                    # InputFrame包含：时间戳、手侧、关键点序列、相对/绝对模式、方向帧向量、帧索引
                     self.publisher_manager.publish(
                         host=self.host,
                         port=self.pico4_pub_port,
@@ -360,13 +461,15 @@ class PICO4VRHandDetector(Component):
                         self._receive_frequencies[socket_key] = self._receive_counts[socket_key] / (current_time - self._last_receive_freq_log_time[socket_key])
                         self._receive_counts[socket_key] = 0
                         self._last_receive_freq_log_time[socket_key] = current_time
-                        logger.info(f"[Bot接收] {socket_key} 接收频率: {self._receive_frequencies[socket_key]:.1f} Hz")
+                        delay_str = f", 平均延迟={delay_ms:.1f}ms" if delay_ms else ""
+                        logger.info(f"[Bot接收] {socket_key} 接收频率: {self._receive_frequencies[socket_key]:.1f} Hz{delay_str}")
 
                     # 定期打印手腕部数据（每3秒）
                     if current_time - getattr(self, '_last_wrist_log_time', 0) >= 3.0:
                         self._last_wrist_log_time = current_time
                         wrist_data = self._parse_wrist_data(keypoint_data)
-                        logger.info(f"[Bot接收] index={self._frame_index} {socket_key} 手腕数据: {wrist_data}")
+                        delay_str = f", 延迟={delay_ms:.1f}ms" if delay_ms else ""
+                        logger.info(f"[Bot接收] index={self._frame_index} {socket_key} 手腕数据: {wrist_data}{delay_str}")
                         self._frame_index += 1
 
                     # 定期打印26个坐标系数据（每5秒）
@@ -382,9 +485,10 @@ class PICO4VRHandDetector(Component):
                         pose_sample = keypoints[:9] if len(keypoints) >= 9 else keypoints
                         logger.info(f"[Bot接收] {socket_key} 位姿样本: {pose_sample}")
 
+                    delay_str = f", 延迟={delay_ms:.1f}ms" if delay_ms else ""
                     logger.debug(
                         f"PICO4: 发布 {hand_side} 手数据到端口 {self.pico4_pub_port}, "
-                        f"关键点数量: {len(keypoints)}, 相对模式: {is_relative}"
+                        f"关键点数量: {len(keypoints)}, 相对模式: {is_relative}{delay_str}"
                     )
 
             # 处理并发布按钮状态（在手部之间共享）

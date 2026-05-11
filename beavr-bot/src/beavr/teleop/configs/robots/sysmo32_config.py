@@ -162,12 +162,13 @@ class Sysmo32Config:
     def _configure_for_laterality(self):
         """根据laterality配置所有组件"""
 
-        # Detector配置
+        # Detector配置 - 使用PICO4检测器
         self.detector = []
         if self.laterality == Laterality.BIMANUAL:
             self.detector.append(
                 SharedComponentRegistry.get_bimanual_detector_config(
                     host=network.HOST_ADDRESS,
+                    detector_type="pico4",
                 )
             )
         else:
@@ -176,6 +177,7 @@ class Sysmo32Config:
                 SharedComponentRegistry.get_detector_config(
                     hand_side=hand_side,
                     host=network.HOST_ADDRESS,
+                    detector_type="pico4",
                 )
             )
 

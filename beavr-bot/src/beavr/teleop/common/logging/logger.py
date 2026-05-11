@@ -12,6 +12,16 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
+class MicrosecondFormatter(logging.Formatter):
+    """Custom formatter that supports microseconds using datetime.strftime"""
+    def formatTime(self, record, datefmt=None):
+        """Format time with microseconds"""
+        if datefmt:
+            return datetime.fromtimestamp(record.created).strftime(datefmt)
+        else:
+            return super().formatTime(record, datefmt)
+
+
 class BaseLogger:
     """Base class for all loggers."""
 
@@ -309,17 +319,51 @@ def synchronize_logs(log_files, output_file):
         json.dump(synced_data, f, indent=2)
 
 
-def setup_root_logger(level: int = logging.DEBUG):
+def setup_root_logger(level: int = logging.DEBUG, log_dir: str = "/home/likunwei/dataCollection/beavr-bot/Log"):
     """Configure the root logger only once (no-op if already configured)."""
     root = logging.getLogger()
+    
+    # Generate dynamic log filename with year-month-day-hour-minute format
+    timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M-%S.%f")[:-3]
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = os.path.join(log_dir, f"beavr_run_{timestamp}.log")
+    
     if root.handlers:
         # Configuration already exists – just raise the level if needed
         if root.level > level:
             root.setLevel(level)
+        # Update date format for existing handlers
+        for handler in root.handlers:
+            if hasattr(handler, 'formatter') and handler.formatter:
+                formatter = MicrosecondFormatter(
+                    "[%(levelname)s] %(asctime)s %(processName)s %(name)s: %(message)s",
+                    datefmt="%H:%M:%S.%f"
+                )
+                handler.setFormatter(formatter)
         return
 
-    logging.basicConfig(
-        level=level,
-        format="[%(levelname)s] %(asctime)s %(processName)s %(name)s: %(message)s",
-        datefmt="%H:%M:%S.%f",
+    # Create handlers
+    console_handler = logging.StreamHandler()
+    file_handler = logging.FileHandler(log_file)
+    
+    # Create formatter with microsecond support
+    formatter = MicrosecondFormatter(
+        "[%(levelname)s] %(asctime)s %(processName)s %(name)s: %(message)s",
+        datefmt="%H:%M:%S.%f"
     )
+    
+    # Set formatters
+    console_handler.setFormatter(formatter)
+    file_handler.setFormatter(formatter)
+    
+    # Clear existing handlers
+    root.handlers = []
+    
+    # Add handlers
+    root.addHandler(console_handler)
+    root.addHandler(file_handler)
+    
+    # Set level
+    root.setLevel(level)
+    
+    logger.info(f"Log file created: {log_file}")
