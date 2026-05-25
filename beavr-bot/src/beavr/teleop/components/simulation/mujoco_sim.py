@@ -25,7 +25,10 @@ MuJoCo仿真环境模块 - SYSMO-32双臂机器人
 
 import logging
 import os
+import re
 import time
+from datetime import datetime
+from pathlib import Path
 from typing import Dict, List, Optional
 
 import mujoco
@@ -40,6 +43,14 @@ from beavr.teleop.components.operator.operator_types import CartesianTarget
 from beavr.teleop.configs.constants import robots
 
 logger = logging.getLogger(__name__)
+
+
+class MicrosecondFormatter(logging.Formatter):
+    def formatTime(self, record, datefmt=None):
+        dt = datetime.fromtimestamp(record.created)
+        if datefmt:
+            return dt.strftime(datefmt)
+        return dt.isoformat(timespec="microseconds")
 
 
 class MuJoCoSysmoSimulator(Component):
@@ -85,6 +96,21 @@ class MuJoCoSysmoSimulator(Component):
 
     LEFT_ENDEFF_SITE = "left_endeff"
     RIGHT_ENDEFF_SITE = "right_endeff"
+
+    POSITION_SERVO_KP = 150.0
+    JOINT_DAMPING = 2.5
+    SIMULATION_TIMESTEP = 0.002
+    ENABLE_GRAVITY_COMPENSATION = True
+    HOME_JOINT_POSITIONS = {
+        "left_shoulder_roll_joint": 0.5,
+        "right_shoulder_roll_joint": -0.5,
+        "left_elbow_joint": -1.2,
+        "right_elbow_joint": 1.2,
+        "left_wrist_yaw_joint": 0.0,
+        "right_wrist_yaw_joint": 0.0,
+        "left_wrist_pitch_joint": 0.0,
+        "right_wrist_pitch_joint": 0.0,
+    }
 
     def __init__(
         self,
@@ -138,24 +164,73 @@ class MuJoCoSysmoSimulator(Component):
         # 关节索引缓存
         self._left_joint_ids = []
         self._right_joint_ids = []
+        self._joint_actuator_ids = {}
+        self._joint_hold_qpos = None
+        self._initial_endeff_poses = {}
         self._left_endeff_site_id = None
         self._right_endeff_site_id = None
         self._cache_joint_ids()
+        self._cache_actuator_ids()
+        self._configure_position_servos()
 
         # 目标位姿缓存
         self._left_target: Optional[CartesianTarget] = None
         self._right_target: Optional[CartesianTarget] = None
 
         # IK参数
-        self._ik_max_iter = 1000
+        self._ik_full_max_iter = 25
+        self._ik_approx_max_iter = 120
         self._ik_tolerance = 1e-3
         self._ik_orientation_tolerance = 0.03
         self._ik_singularity_condition_threshold = 1e4
         self._ik_joint_step_limit = 0.08
         self._ik_fallback_position_tolerance = 0.03
+        self._ik_reject_position_tolerance = 0.08
         self._last_ik_diag_log_time: Dict[str, float] = {}
+        self._ik_reject_active: Dict[str, bool] = {}
+        self._ik_logger = self._setup_ik_logger()
+        self._ik_logger.info(
+            (
+                "IK logger initialized: "
+                f"full_max_iter={self._ik_full_max_iter}, "
+                f"approx_max_iter={self._ik_approx_max_iter}, "
+                f"tolerance={self._ik_tolerance}, "
+                f"orientation_tolerance={self._ik_orientation_tolerance}, "
+                f"reject_position_tolerance={self._ik_reject_position_tolerance}, "
+                f"singularity_condition_threshold={self._ik_singularity_condition_threshold}"
+            )
+        )
+        self._cache_initial_endeff_poses()
 
         logger.info(f"MuJoCo SYSMO-32仿真器初始化完成, URDF: {urdf_path}")
+
+    def _setup_ik_logger(self):
+        repo_root = Path(__file__).resolve().parents[5]
+        ik_log_dir = repo_root / "Log" / "IK"
+        ik_log_dir.mkdir(parents=True, exist_ok=True)
+
+        timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M-%S.%f")[:-3]
+        log_file = ik_log_dir / f"ik_run_{timestamp}_pid{os.getpid()}.log"
+
+        ik_logger = logging.getLogger(f"{__name__}.ik.{os.getpid()}")
+        ik_logger.setLevel(logging.DEBUG)
+        ik_logger.propagate = False
+
+        for handler in list(ik_logger.handlers):
+            ik_logger.removeHandler(handler)
+            handler.close()
+
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(
+            MicrosecondFormatter(
+                "[%(levelname)s] %(asctime)s %(processName)s %(name)s: %(message)s",
+                datefmt="%H:%M:%S.%f",
+            )
+        )
+        ik_logger.addHandler(file_handler)
+        ik_logger.info(f"IK log file created: {log_file}")
+        return ik_logger
 
     def _load_model(self):
         """
@@ -179,23 +254,24 @@ class MuJoCoSysmoSimulator(Component):
             with open(xml_path, "r") as f:
                 xml_string = f.read()
 
-            # 在left_arm_J6_Link body中添加site
-            xml_string = xml_string.replace(
-                '<body name="left_arm_J6_Link"',
-                '<body name="left_arm_J6_Link">\n'
-                '        <site name="left_endeff" pos="0 0.07 0" rgba="0 1 0 1" size="0.02"/>',
+            xml_string = self._insert_site_into_body(
+                xml_string,
+                "left_arm_J6_Link",
+                '<site name="left_endeff" pos="0 0.05 0" rgba="0 1 0 1" size="0.02"/>',
+            )
+            xml_string = self._insert_site_into_body(
+                xml_string,
+                "right_arm_J6_Link",
+                '<site name="right_endeff" pos="0 -0.05 0" rgba="1 0 0 1" size="0.02"/>',
             )
 
-            # 在right_arm_J6_Link body中添加site
-            xml_string = xml_string.replace(
-                '<body name="right_arm_J6_Link"',
-                '<body name="right_arm_J6_Link">\n'
-                '        <site name="right_endeff" pos="0 -0.07 0" rgba="1 0 0 1" size="0.02"/>',
-            )
+            actuator_xml = self._build_position_actuator_xml(temp_model)
+            xml_string = xml_string.replace("</mujoco>", f"{actuator_xml}\n</mujoco>")
 
             self.model = mujoco.MjModel.from_xml_string(xml_string)
             self.data = mujoco.MjData(self.model)
-            mujoco.mj_step(self.model, self.data)
+            self.model.opt.timestep = self.SIMULATION_TIMESTEP
+            mujoco.mj_forward(self.model, self.data)
             logger.info(
                 f"MuJoCo模型加载成功: {self.model.nq} 个自由度, "
                 f"{self.model.njnt} 个关节, {self.model.nsite} 个site"
@@ -203,6 +279,35 @@ class MuJoCoSysmoSimulator(Component):
         except Exception as e:
             logger.error(f"MuJoCo模型加载失败: {e}")
             raise
+
+    def _insert_site_into_body(self, xml_string, body_name, site_xml):
+        pattern = rf'(<body name="{re.escape(body_name)}"[^>]*>)'
+        replacement = rf'\1\n        {site_xml}'
+        updated_xml, count = re.subn(pattern, replacement, xml_string, count=1)
+        if count != 1:
+            raise ValueError(f"未找到MuJoCo body，无法添加site: {body_name}")
+        return updated_xml
+
+    def _build_position_actuator_xml(self, source_model):
+        actuator_lines = ["  <actuator>"]
+        for joint_name in self.LEFT_JOINT_NAMES + self.RIGHT_JOINT_NAMES:
+            actuator_name = self._actuator_name_for_joint(joint_name)
+            joint_id = mujoco.mj_name2id(source_model, mujoco.mjtObj.mjOBJ_JOINT, joint_name)
+            low, high = source_model.jnt_range[joint_id]
+            actuator_lines.append(
+                (
+                    f'    <position name="{actuator_name}" joint="{joint_name}" '
+                    f'kp="{self.POSITION_SERVO_KP}" ctrllimited="true" '
+                    f'ctrlrange="{low} {high}"/>'
+                )
+            )
+        actuator_lines.append("  </actuator>")
+        return "\n".join(actuator_lines)
+
+    def _actuator_name_for_joint(self, joint_name):
+        if joint_name.endswith("_joint"):
+            return joint_name[: -len("_joint")]
+        return joint_name
 
     def _cache_joint_ids(self):
         """
@@ -260,6 +365,133 @@ class MuJoCoSysmoSimulator(Component):
             f"右手{len(self._right_joint_ids)}个"
         )
 
+    def _cache_actuator_ids(self):
+        self._joint_actuator_ids = {}
+        if self.model is None:
+            return
+
+        for joint_name in self.LEFT_JOINT_NAMES + self.RIGHT_JOINT_NAMES:
+            actuator_name = self._actuator_name_for_joint(joint_name)
+            actuator_id = mujoco.mj_name2id(
+                self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, actuator_name
+            )
+            if actuator_id >= 0:
+                self._joint_actuator_ids[joint_name] = actuator_id
+            else:
+                logger.warning(f"MuJoCo位置执行器未找到: {actuator_name}")
+
+        logger.info(f"位置执行器缓存完成: {len(self._joint_actuator_ids)}个")
+
+    def _configure_position_servos(self):
+        if self.model is None or self.data is None:
+            return
+
+        self.model.opt.timestep = self.SIMULATION_TIMESTEP
+        self.data.qvel[:] = 0.0
+        self.data.qacc[:] = 0.0
+        self.data.qfrc_applied[:] = 0.0
+
+        self._apply_home_joint_positions()
+
+        for actuator_id in self._joint_actuator_ids.values():
+            self.model.actuator_gainprm[actuator_id, 0] = self.POSITION_SERVO_KP
+            self.model.actuator_biasprm[actuator_id, 1] = -self.POSITION_SERVO_KP
+
+        for joint_id in self._left_joint_ids + self._right_joint_ids:
+            dof_addr = self.model.jnt_dofadr[joint_id]
+            self.model.dof_damping[dof_addr] = self.JOINT_DAMPING
+
+            joint_name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_JOINT, joint_id)
+            actuator_id = self._joint_actuator_ids.get(joint_name)
+            if actuator_id is not None:
+                qpos_addr = self.model.jnt_qposadr[joint_id]
+                self.data.ctrl[actuator_id] = self.data.qpos[qpos_addr]
+
+        self._joint_hold_qpos = self.data.qpos.copy()
+        mujoco.mj_forward(self.model, self.data)
+        logger.info(
+            "MuJoCo位置伺服参数已配置: "
+            f"kp={self.POSITION_SERVO_KP}, joint_damping={self.JOINT_DAMPING}, "
+            f"timestep={self.SIMULATION_TIMESTEP}, "
+            f"gravity_compensation={self.ENABLE_GRAVITY_COMPENSATION}, "
+            f"home_joints={self.HOME_JOINT_POSITIONS}"
+        )
+
+    def _apply_home_joint_positions(self):
+        for joint_name, home_qpos in self.HOME_JOINT_POSITIONS.items():
+            joint_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, joint_name)
+            if joint_id < 0:
+                logger.warning(f"Home姿态关节未找到: {joint_name}")
+                continue
+
+            qpos_addr = self.model.jnt_qposadr[joint_id]
+            low, high = self.model.jnt_range[joint_id]
+            self.data.qpos[qpos_addr] = np.clip(home_qpos, low, high)
+
+    def _apply_arm_gravity_compensation(self):
+        if not self.ENABLE_GRAVITY_COMPENSATION:
+            return
+
+        mujoco.mj_forward(self.model, self.data)
+        self.data.qfrc_applied[:] = 0.0
+        for joint_id in self._left_joint_ids + self._right_joint_ids:
+            dof_addr = self.model.jnt_dofadr[joint_id]
+            self.data.qfrc_applied[dof_addr] = self.data.qfrc_bias[dof_addr]
+
+    def _apply_joint_position_holds(self):
+        if self._joint_hold_qpos is None:
+            return
+
+        for joint_id in self._left_joint_ids + self._right_joint_ids:
+            qpos_addr = self.model.jnt_qposadr[joint_id]
+            dof_addr = self.model.jnt_dofadr[joint_id]
+            hold_qpos = self._joint_hold_qpos[qpos_addr]
+            self.data.qpos[qpos_addr] = hold_qpos
+            self.data.qvel[dof_addr] = 0.0
+
+            joint_name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_JOINT, joint_id)
+            actuator_id = self._joint_actuator_ids.get(joint_name)
+            if actuator_id is not None:
+                self.data.ctrl[actuator_id] = hold_qpos
+
+    def _cache_initial_endeff_poses(self):
+        self._initial_endeff_poses = {}
+        for side, joint_ids, site_id in (
+            (robots.LEFT, self._left_joint_ids, self._left_endeff_site_id),
+            (robots.RIGHT, self._right_joint_ids, self._right_endeff_site_id),
+        ):
+            if not joint_ids:
+                continue
+            pos, quat = self._get_endeff_pose(joint_ids, site_id)
+            self._initial_endeff_poses[side] = (pos, quat)
+            self._ik_logger.info(
+                (
+                    f"MuJoCo初始末端位姿[{side}]: "
+                    f"pos={self._fmt_array(pos)}, quat_wxyz={self._fmt_array(quat)}"
+                )
+            )
+
+    def _get_endeff_pose(self, joint_ids, endeff_site_id):
+        mujoco.mj_forward(self.model, self.data)
+        if endeff_site_id is not None and endeff_site_id >= 0:
+            pos = self.data.site_xpos[endeff_site_id].copy()
+            mat = self.data.site_xmat[endeff_site_id].reshape(3, 3).copy()
+        else:
+            last_joint_body_id = self.model.jnt_bodyid[joint_ids[-1]]
+            pos = self.data.xpos[last_joint_body_id].copy()
+            mat = self.data.xmat[last_joint_body_id].reshape(3, 3).copy()
+
+        quat = np.zeros(4)
+        mujoco.mju_mat2Quat(quat, mat.flatten())
+        return pos, quat
+
+    def _quat_relative(self, reference_quat, target_quat):
+        inv_reference = np.zeros(4)
+        relative = np.zeros(4)
+        mujoco.mju_negQuat(inv_reference, reference_quat)
+        mujoco.mju_mulQuat(relative, target_quat, inv_reference)
+        return relative
+
     def _cartesian_to_mujoco_pos(self, position_m, orientation_xyzw):
         """
         将CartesianTarget的位姿转换为MuJoCo格式。
@@ -312,15 +544,37 @@ class MuJoCoSysmoSimulator(Component):
         if current_time - self._last_ik_diag_log_time.get(key, 0.0) < 1.0:
             return
         self._last_ik_diag_log_time[key] = current_time
-        logger.log(
+        self._ik_logger.log(
             level,
             (
-                f"IK诊断[{side}][{mode}]: converged={diagnostics['converged']}, "
-                f"iter={diagnostics['iterations']}, pos_err={diagnostics['pos_error_norm']:.4f}m, "
+                f"IK诊断[{side}][{mode}]\n"
+                f"  status: converged={diagnostics['converged']}, "
+                f"iter={diagnostics['iterations']}, "
+                f"pos_err={diagnostics['pos_error_norm']:.4f}m, "
                 f"ori_err={diagnostics['ori_error_norm']:.4f}rad, "
                 f"cond={diagnostics['condition_number']:.1f}, "
-                f"singular={diagnostics['near_singular']}, hit_limit={diagnostics['hit_limit']}"
+                f"singular={diagnostics['near_singular']}, "
+                f"hit_limit={diagnostics['hit_limit']}\n"
+                f"  initial: pos={self._fmt_array(diagnostics['initial_pos'])}, "
+                f"quat_wxyz={self._fmt_array(diagnostics['initial_quat'])}\n"
+                f"  target_relative_to_initial: "
+                f"pos={self._fmt_array(diagnostics['target_relative_pos'])}, "
+                f"quat_wxyz={self._fmt_array(diagnostics['target_relative_quat'])}\n"
+                f"  target: pos={self._fmt_array(diagnostics['target_pos'])}, "
+                f"quat_wxyz={self._fmt_array(diagnostics['target_quat'])}\n"
+                f"  current_start: pos={self._fmt_array(diagnostics['current_start_pos'])}, "
+                f"quat_wxyz={self._fmt_array(diagnostics['current_start_quat'])}\n"
+                f"  current_end: pos={self._fmt_array(diagnostics['current_end_pos'])}, "
+                f"quat_wxyz={self._fmt_array(diagnostics['current_end_quat'])}"
             ),
+        )
+
+    def _fmt_array(self, values):
+        return np.array2string(
+            np.asarray(values, dtype=np.float64),
+            precision=4,
+            suppress_small=False,
+            separator=",",
         )
 
     def _warn_ik_fallback(self, side):
@@ -329,7 +583,21 @@ class MuJoCoSysmoSimulator(Component):
         if current_time - self._last_ik_diag_log_time.get(key, 0.0) < 1.0:
             return
         self._last_ik_diag_log_time[key] = current_time
-        logger.warning(f"IK[{side}]: 姿态目标可能不可达或接近奇异，使用位置优先近似解。")
+        self._ik_logger.warning(f"IK[{side}]: 姿态目标可能不可达或接近奇异，使用位置优先近似解。")
+
+    def _build_pose_diagnostics(self, side, target_pos, target_quat):
+        initial_pos, initial_quat = self._initial_endeff_poses.get(
+            side,
+            (np.full(3, np.nan), np.full(4, np.nan)),
+        )
+        return {
+            "initial_pos": initial_pos.copy(),
+            "initial_quat": initial_quat.copy(),
+            "target_relative_pos": target_pos - initial_pos,
+            "target_relative_quat": self._quat_relative(initial_quat, target_quat)
+            if np.all(np.isfinite(initial_quat))
+            else np.full(4, np.nan),
+        }
 
     def _solve_ik_pass(
         self,
@@ -338,6 +606,8 @@ class MuJoCoSysmoSimulator(Component):
         target_quat,
         endeff_site_id,
         orientation_weight,
+        max_iter,
+        side,
     ):
         """Run one IK pass. orientation_weight=0 gives a position-only approximation."""
         qpos_addrs = [self.model.jnt_qposadr[jid] for jid in joint_ids]
@@ -353,8 +623,12 @@ class MuJoCoSysmoSimulator(Component):
         ori_error_norm = np.inf
         converged = False
         iterations = 0
+        current_start_pos = None
+        current_start_quat = None
+        current_end_pos = None
+        current_end_quat = None
 
-        for iteration in range(self._ik_max_iter):
+        for iteration in range(max_iter):
             iterations = iteration + 1
             mujoco.mj_forward(self.model, self.data)
 
@@ -371,6 +645,12 @@ class MuJoCoSysmoSimulator(Component):
 
             current_quat = np.zeros(4)
             mujoco.mju_mat2Quat(current_quat, current_mat.flatten())
+            if current_start_pos is None:
+                current_start_pos = current_pos.copy()
+                current_start_quat = current_quat.copy()
+            current_end_pos = current_pos.copy()
+            current_end_quat = current_quat.copy()
+
             quat_error = np.zeros(4)
             mujoco.mju_negQuat(quat_error, target_quat)
             mujoco.mju_mulQuat(quat_error, quat_error, current_quat)
@@ -433,6 +713,20 @@ class MuJoCoSysmoSimulator(Component):
 
         result = best_qpos.copy()
         self.data.qpos[:] = saved_qpos
+        if current_start_pos is None:
+            mujoco.mj_forward(self.model, self.data)
+            if endeff_site_id is not None and endeff_site_id >= 0:
+                current_start_pos = self.data.site_xpos[endeff_site_id].copy()
+                current_mat = self.data.site_xmat[endeff_site_id].reshape(3, 3).copy()
+            else:
+                last_joint_body_id = self.model.jnt_bodyid[joint_ids[-1]]
+                current_start_pos = self.data.xpos[last_joint_body_id].copy()
+                current_mat = self.data.xmat[last_joint_body_id].reshape(3, 3).copy()
+            current_start_quat = np.zeros(4)
+            mujoco.mju_mat2Quat(current_start_quat, current_mat.flatten())
+            current_end_pos = current_start_pos.copy()
+            current_end_quat = current_start_quat.copy()
+
         diagnostics = {
             "converged": converged,
             "iterations": iterations,
@@ -441,7 +735,14 @@ class MuJoCoSysmoSimulator(Component):
             "condition_number": float(max_condition_number),
             "near_singular": near_singular,
             "hit_limit": hit_limit,
+            "target_pos": target_pos.copy(),
+            "target_quat": target_quat.copy(),
+            "current_start_pos": current_start_pos.copy(),
+            "current_start_quat": current_start_quat.copy(),
+            "current_end_pos": current_end_pos.copy(),
+            "current_end_quat": current_end_quat.copy(),
         }
+        diagnostics.update(self._build_pose_diagnostics(side, target_pos, target_quat))
         return result, diagnostics
 
     def _solve_ik(self, joint_ids, target_pos, target_quat, endeff_site_id=None, side="unknown"):
@@ -469,7 +770,13 @@ class MuJoCoSysmoSimulator(Component):
             return None
 
         full_result, full_diag = self._solve_ik_pass(
-            joint_ids, target_pos, target_quat, endeff_site_id, orientation_weight=1.0
+            joint_ids,
+            target_pos,
+            target_quat,
+            endeff_site_id,
+            orientation_weight=1.0,
+            max_iter=self._ik_full_max_iter,
+            side=side,
         )
         full_unstable = (
             full_diag["near_singular"]
@@ -482,14 +789,43 @@ class MuJoCoSysmoSimulator(Component):
 
         if not full_unstable and full_diag["converged"]:
             self._log_ik_diagnostics(side, "full", full_diag, level=logging.DEBUG)
+            self._ik_reject_active[side] = False
             return full_result
 
         self._log_ik_diagnostics(side, "full_unstable", full_diag, level=logging.WARNING)
         approx_result, approx_diag = self._solve_ik_pass(
-            joint_ids, target_pos, target_quat, endeff_site_id, orientation_weight=0.0
+            joint_ids,
+            target_pos,
+            target_quat,
+            endeff_site_id,
+            orientation_weight=0.0,
+            max_iter=self._ik_approx_max_iter,
+            side=side,
         )
         self._log_ik_diagnostics(side, "approx_position_only", approx_diag, level=logging.WARNING)
         self._warn_ik_fallback(side)
+
+        if (
+            not approx_diag["converged"]
+            and approx_diag["pos_error_norm"] > self._ik_reject_position_tolerance
+        ):
+            if not self._ik_reject_active.get(side, False):
+                self._ik_logger.error(
+                    (
+                        f"IK[{side}]: 近似解仍不可达，拒绝应用目标并保持上一帧。\n"
+                        f"  status: pos_err={approx_diag['pos_error_norm']:.4f}m, "
+                        f"reject_threshold={self._ik_reject_position_tolerance:.4f}m, "
+                        f"hit_limit={approx_diag['hit_limit']}, "
+                        f"singular={approx_diag['near_singular']}\n"
+                        f"  target: pos={self._fmt_array(approx_diag['target_pos'])}\n"
+                        f"  current_start: pos={self._fmt_array(approx_diag['current_start_pos'])}\n"
+                        f"  current_end: pos={self._fmt_array(approx_diag['current_end_pos'])}"
+                    )
+                )
+            self._ik_reject_active[side] = True
+            return None
+
+        self._ik_reject_active[side] = False
         return approx_result
 
     def _apply_endeff_target(self, target: CartesianTarget, joint_ids, endeff_site_id):
@@ -533,7 +869,14 @@ class MuJoCoSysmoSimulator(Component):
                     low = self.model.jnt_range[jid, 0]
                     high = self.model.jnt_range[jid, 1]
                     clamped = np.clip(joint_angles[i], low, high)
+                    joint_name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_JOINT, jid)
+                    actuator_id = self._joint_actuator_ids.get(joint_name)
+                    if actuator_id is not None:
+                        self.data.ctrl[actuator_id] = clamped
+                    if self._joint_hold_qpos is not None:
+                        self._joint_hold_qpos[qpos_addr] = clamped
                     self.data.qpos[qpos_addr] = clamped
+                    self.data.qvel[self.model.jnt_dofadr[jid]] = 0.0
 
         except Exception as e:
             logger.error(f"应用末端目标失败: {e}")
@@ -620,8 +963,13 @@ class MuJoCoSysmoSimulator(Component):
                         self._left_endeff_site_id,
                     )
 
+                    self._apply_joint_position_holds()
+                    self._apply_arm_gravity_compensation()
+
                     # 步进仿真
                     mujoco.mj_step(self.model, self.data)
+                    self._apply_joint_position_holds()
+                    mujoco.mj_forward(self.model, self.data)
 
                     # 更新渲染
                     viewer.sync()
@@ -645,7 +993,11 @@ class MuJoCoSysmoSimulator(Component):
                     self._left_endeff_site_id,
                 )
 
+                self._apply_joint_position_holds()
+                self._apply_arm_gravity_compensation()
                 mujoco.mj_step(self.model, self.data)
+                self._apply_joint_position_holds()
+                mujoco.mj_forward(self.model, self.data)
 
                 self.timer.end_loop()
 
