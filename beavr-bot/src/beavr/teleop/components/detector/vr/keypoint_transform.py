@@ -46,7 +46,7 @@ from enum import IntEnum
 
 import numpy as np
 
-from beavr.teleop.common.math.vectorops import moving_average, normalize_vector
+from beavr.teleop.common.math.vectorops import moving_average
 from beavr.teleop.common.network.publisher import ZMQPublisherManager
 from beavr.teleop.common.network.subscriber import ZMQSubscriber
 from beavr.teleop.common.network.utils import cleanup_zmq_resources
@@ -57,6 +57,15 @@ from beavr.teleop.components.detector.vr.log_keypoints import KeypointLogger
 from beavr.teleop.configs.constants import robots
 
 logger = logging.getLogger(__name__)
+
+UNITY_LEFT_TO_INTERNAL_RIGHT = np.array([1.0, 1.0, -1.0], dtype=np.float64)
+
+
+def _safe_normalize(vector, min_norm=1e-6):
+    norm = np.linalg.norm(vector)
+    if not np.isfinite(norm) or norm < min_norm:
+        return None
+    return vector / norm
 
 
 class HandMode(IntEnum):
@@ -175,6 +184,34 @@ class TransformHandPositionCoords(Component):
                 auto_save_interval=auto_save_interval,
                 moving_average_limit=moving_average_limit,
             )
+        self._last_invalid_frame_log_time = 0.0
+
+    def _warn_invalid_frame(self, reason):
+        current_time = time.time()
+        if current_time - self._last_invalid_frame_log_time >= 1.0:
+            self._last_invalid_frame_log_time = current_time
+            logger.warning(f"{self.hand_side}_hand_keypoint_transform: 跳过无效手部帧: {reason}")
+
+    def _validate_hand_coords(self, hand_coords):
+        if hand_coords is None or hand_coords.shape != (robots.OCULUS_NUM_KEYPOINTS, 3):
+            return False, "关键点形状错误"
+        if not np.all(np.isfinite(hand_coords)):
+            return False, "关键点包含 NaN/Inf"
+
+        wrist = hand_coords[self.wrist_idx]
+        distances = np.linalg.norm(hand_coords - wrist, axis=1)
+        if float(np.max(distances)) < 1e-4:
+            return False, "所有关键点几乎重合"
+
+        return True, ""
+
+    def _unity_left_handed_to_internal_right_handed(self, hand_coords):
+        """
+        PICO Unity Integration SDK reports positions in Unity's left-handed
+        world frame: +X right, +Y up, +Z forward. The teleop stack uses an
+        internal right-handed VR frame: +X right, +Y up, +Z backward.
+        """
+        return hand_coords * UNITY_LEFT_TO_INTERNAL_RIGHT
 
     def _get_hand_coords(self):
         """
@@ -241,13 +278,19 @@ class TransformHandPositionCoords(Component):
         Returns:
             tuple: (x_vec, y_vec, z_vec) 正交化后的三个单位向量
         """
-        x_vec = normalize_vector(x_vec)
+        x_vec = _safe_normalize(x_vec)
+        if x_vec is None:
+            return None
 
         y_vec = y_vec - np.dot(y_vec, x_vec) * x_vec
-        y_vec = normalize_vector(y_vec)
+        y_vec = _safe_normalize(y_vec)
+        if y_vec is None:
+            return None
 
         z_vec = np.cross(x_vec, y_vec)
-        z_vec = normalize_vector(z_vec)
+        z_vec = _safe_normalize(z_vec)
+        if z_vec is None:
+            return None
 
         return x_vec, y_vec, z_vec
 
@@ -272,11 +315,18 @@ class TransformHandPositionCoords(Component):
         v2 = hand_coords[self.pinky_knuckle_idx] - wrist  # 手腕→小指掌指
         v3 = hand_coords[self.middle_knuckle_idx] - wrist  # 手腕→中指掌指
 
-        palm_normal = normalize_vector(np.cross(v1, v3))  # 手掌法向量（Z方向）
-        palm_direction = normalize_vector((v1 + v2 + v3) / 3)  # 手掌朝向（Y方向）
-        cross_product = normalize_vector(np.cross(palm_direction, palm_normal))  # 侧向（X方向）
+        palm_normal = _safe_normalize(np.cross(v1, v3))  # 手掌法向量（Z方向）
+        palm_direction = _safe_normalize((v1 + v2 + v3) / 3)  # 手掌朝向（Y方向）
+        if palm_normal is None or palm_direction is None:
+            return None
+        cross_product = _safe_normalize(np.cross(palm_direction, palm_normal))  # 侧向（X方向）
+        if cross_product is None:
+            return None
 
-        x_vec, y_vec, z_vec = self._orthogonalize_frame(cross_product, palm_direction, palm_normal)
+        frame = self._orthogonalize_frame(cross_product, palm_direction, palm_normal)
+        if frame is None:
+            return None
+        x_vec, y_vec, z_vec = frame
 
         return [x_vec, y_vec, z_vec]
 
@@ -303,16 +353,26 @@ class TransformHandPositionCoords(Component):
         v2 = hand_coords[self.pinky_knuckle_idx] - wrist
         v3 = hand_coords[self.middle_knuckle_idx] - wrist
 
-        if self.hand_side == robots.RIGHT:
-            palm_normal = normalize_vector(np.cross(v1, v3))
-            palm_direction = normalize_vector((v1 + v2 + v3) / 3)
-            cross_product = normalize_vector(np.cross(palm_direction, palm_normal))
-        else:
-            palm_normal = normalize_vector(np.cross(v1, v3))
-            palm_direction = normalize_vector((v1 + v2 + v3) / 3)
-            cross_product = normalize_vector(np.cross(palm_direction, palm_normal))
+        palm_normal_raw = np.cross(v1, v3)
+        # PICO reports left-hand gestures with mirrored handedness relative to
+        # the right hand. Flip the palm normal so downstream operators always
+        # receive the same right-handed frame convention for both hands.
+        if self.hand_side == robots.LEFT:
+            palm_normal_raw = -palm_normal_raw
 
-        x_vec, y_vec, z_vec = self._orthogonalize_frame(cross_product, palm_normal, palm_direction)
+        palm_normal = _safe_normalize(palm_normal_raw)
+        palm_direction = _safe_normalize((v1 + v2 + v3) / 3)
+
+        if palm_normal is None or palm_direction is None:
+            return None
+        cross_product = _safe_normalize(np.cross(palm_direction, palm_normal))
+        if cross_product is None:
+            return None
+
+        frame = self._orthogonalize_frame(cross_product, palm_normal, palm_direction)
+        if frame is None:
+            return None
+        x_vec, y_vec, z_vec = frame
 
         return [wrist, x_vec, y_vec, z_vec]
 
@@ -336,6 +396,12 @@ class TransformHandPositionCoords(Component):
                 - transformed_keypoints: 变换后的关键点坐标，形状为(26, 3)
                 - coordinate_frame: 手部方向帧 [wrist, x_vec, y_vec, z_vec]
         """
+        is_valid, invalid_reason = self._validate_hand_coords(hand_coords)
+        if not is_valid:
+            self._warn_invalid_frame(invalid_reason)
+            return None, None
+        hand_coords = self._unity_left_handed_to_internal_right_handed(hand_coords)
+
         # 步骤1：平移 - 以手腕为原点
         translated_coords = copy(hand_coords) - hand_coords[0]
 
@@ -347,11 +413,13 @@ class TransformHandPositionCoords(Component):
         # rotation_matrix = np.linalg.solve(original_coord_frame, np.eye(3)).T
         rotation_matrix = np.eye(3)
 
-        # TODO：更改为使用实际的旋转矩阵
         transformed_keypoints = (rotation_matrix @ translated_coords.T).T
 
         # 步骤3：计算手部方向帧（使用原始坐标，不是平移后的坐标）
         coordinate_frame = self._get_stable_hand_dir_frame(hand_coords)
+        if coordinate_frame is None:
+            self._warn_invalid_frame("无法从手掌关键点建立稳定坐标系")
+            return None, None
 
         return transformed_keypoints, coordinate_frame
 
@@ -387,6 +455,9 @@ class TransformHandPositionCoords(Component):
                 transformed_keypoints,  # transformed_keypoints 是相对于手腕的
                 coordinate_frame,       #[wrist, x_vec, y_vec, z_vec],手腕在真实 VR 空间中的绝对坐标 + 手在世界坐标系下的绝对朝向
             ) = self.transform_keypoints(hand_coords)
+            if transformed_keypoints is None or coordinate_frame is None:
+                self.timer.end_loop()
+                continue
 
             # 3. 对变换后的坐标进行滑动平均平滑
             self.averaged_keypoints = moving_average(
@@ -404,12 +475,21 @@ class TransformHandPositionCoords(Component):
 
             # 5. 确保方向帧向量保持正交性
             origin = self.averaged_coordinate_frame[0]
-            x_vec = normalize_vector(self.averaged_coordinate_frame[1])
-            y_vec = normalize_vector(self.averaged_coordinate_frame[2])
-            z_vec = normalize_vector(self.averaged_coordinate_frame[3])
+            x_vec = _safe_normalize(self.averaged_coordinate_frame[1])
+            y_vec = _safe_normalize(self.averaged_coordinate_frame[2])
+            z_vec = _safe_normalize(self.averaged_coordinate_frame[3])
+            if x_vec is None or y_vec is None or z_vec is None:
+                self._warn_invalid_frame("平滑后的方向向量退化")
+                self.timer.end_loop()
+                continue
 
             # 重新正交化
-            x_vec, y_vec, z_vec = self._orthogonalize_frame(x_vec, y_vec, z_vec)
+            orthogonal_frame = self._orthogonalize_frame(x_vec, y_vec, z_vec)
+            if orthogonal_frame is None:
+                self._warn_invalid_frame("正交化方向帧失败")
+                self.timer.end_loop()
+                continue
+            x_vec, y_vec, z_vec = orthogonal_frame
 
             # 重构正交帧
             self.averaged_coordinate_frame = [origin, x_vec, y_vec, z_vec]

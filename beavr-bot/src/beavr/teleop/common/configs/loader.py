@@ -27,7 +27,15 @@ _CONFIGS_PKG = "beavr.teleop.configs.robots"
 
 
 class Laterality(Enum):
-    """Enumeration for robot arm laterality options."""
+    """Enumeration for robot arm laterality options.
+        反向映射字典 _value2member_map_ 是在枚举类 定义阶段 由 EnumMeta （枚举元类）自动构建的。当你定义：
+            Laterality.RIGHT
+            Laterality.LEFT
+            Laterality.BIMANUAL
+        元类会自动创建：
+        - _member_map_ : 名称 → 成员的映射
+        - _value2member_map_ : 值 → 成员的反向映射
+    """
 
     RIGHT = "right"
     LEFT = "left"

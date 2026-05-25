@@ -147,8 +147,13 @@ class MuJoCoSysmoSimulator(Component):
         self._right_target: Optional[CartesianTarget] = None
 
         # IK参数
-        self._ik_max_iter = 100
-        self._ik_tolerance = 1e-4
+        self._ik_max_iter = 1000
+        self._ik_tolerance = 1e-3
+        self._ik_orientation_tolerance = 0.03
+        self._ik_singularity_condition_threshold = 1e4
+        self._ik_joint_step_limit = 0.08
+        self._ik_fallback_position_tolerance = 0.03
+        self._last_ik_diag_log_time: Dict[str, float] = {}
 
         logger.info(f"MuJoCo SYSMO-32仿真器初始化完成, URDF: {urdf_path}")
 
@@ -291,7 +296,155 @@ class MuJoCoSysmoSimulator(Component):
 
         return pos, quat_wxyz
 
-    def _solve_ik(self, joint_ids, target_pos, target_quat, endeff_site_id=None):
+    def _clamp_joint_qpos(self, joint_ids, qpos_addrs):
+        hit_limit = False
+        for jid, addr in zip(joint_ids, qpos_addrs):
+            low = self.model.jnt_range[jid, 0]
+            high = self.model.jnt_range[jid, 1]
+            before = self.data.qpos[addr]
+            self.data.qpos[addr] = np.clip(before, low, high)
+            hit_limit = hit_limit or not np.isclose(before, self.data.qpos[addr], atol=1e-9)
+        return hit_limit
+
+    def _log_ik_diagnostics(self, side, mode, diagnostics, level=logging.INFO):
+        current_time = time.time()
+        key = f"{side}:{mode}"
+        if current_time - self._last_ik_diag_log_time.get(key, 0.0) < 1.0:
+            return
+        self._last_ik_diag_log_time[key] = current_time
+        logger.log(
+            level,
+            (
+                f"IK诊断[{side}][{mode}]: converged={diagnostics['converged']}, "
+                f"iter={diagnostics['iterations']}, pos_err={diagnostics['pos_error_norm']:.4f}m, "
+                f"ori_err={diagnostics['ori_error_norm']:.4f}rad, "
+                f"cond={diagnostics['condition_number']:.1f}, "
+                f"singular={diagnostics['near_singular']}, hit_limit={diagnostics['hit_limit']}"
+            ),
+        )
+
+    def _warn_ik_fallback(self, side):
+        current_time = time.time()
+        key = f"{side}:fallback_reason"
+        if current_time - self._last_ik_diag_log_time.get(key, 0.0) < 1.0:
+            return
+        self._last_ik_diag_log_time[key] = current_time
+        logger.warning(f"IK[{side}]: 姿态目标可能不可达或接近奇异，使用位置优先近似解。")
+
+    def _solve_ik_pass(
+        self,
+        joint_ids,
+        target_pos,
+        target_quat,
+        endeff_site_id,
+        orientation_weight,
+    ):
+        """Run one IK pass. orientation_weight=0 gives a position-only approximation."""
+        qpos_addrs = [self.model.jnt_qposadr[jid] for jid in joint_ids]
+        joint_dof_addrs = [self.model.jnt_dofadr[jid] for jid in joint_ids]
+        saved_qpos = self.data.qpos.copy()
+        best_qpos = np.array([self.data.qpos[addr] for addr in qpos_addrs])
+        best_score = np.inf
+        hit_limit = False
+        near_singular = False
+        condition_number = 0.0
+        max_condition_number = 0.0
+        pos_error_norm = np.inf
+        ori_error_norm = np.inf
+        converged = False
+        iterations = 0
+
+        for iteration in range(self._ik_max_iter):
+            iterations = iteration + 1
+            mujoco.mj_forward(self.model, self.data)
+
+            if endeff_site_id is not None and endeff_site_id >= 0:
+                current_pos = self.data.site_xpos[endeff_site_id].copy()
+                current_mat = self.data.site_xmat[endeff_site_id].reshape(3, 3).copy()
+            else:
+                last_joint_body_id = self.model.jnt_bodyid[joint_ids[-1]]
+                current_pos = self.data.xpos[last_joint_body_id].copy()
+                current_mat = self.data.xmat[last_joint_body_id].reshape(3, 3).copy()
+
+            pos_error = target_pos - current_pos
+            pos_error_norm = np.linalg.norm(pos_error)
+
+            current_quat = np.zeros(4)
+            mujoco.mju_mat2Quat(current_quat, current_mat.flatten())
+            quat_error = np.zeros(4)
+            mujoco.mju_negQuat(quat_error, target_quat)
+            mujoco.mju_mulQuat(quat_error, quat_error, current_quat)
+            axis_angle = np.zeros(3)
+            mujoco.mju_quat2Vel(axis_angle, quat_error, 1.0)
+            ori_error_norm = np.linalg.norm(axis_angle)
+
+            score = pos_error_norm + orientation_weight * ori_error_norm
+            if score < best_score:
+                best_score = score
+                best_qpos = np.array([self.data.qpos[addr] for addr in qpos_addrs])
+
+            orientation_satisfied = (
+                orientation_weight <= 0.0 or ori_error_norm < self._ik_orientation_tolerance
+            )
+            if pos_error_norm < self._ik_tolerance and orientation_satisfied:
+                converged = True
+                break
+
+            jacp = np.zeros((3, self.model.nv))
+            jacr = np.zeros((3, self.model.nv))
+            if endeff_site_id is not None and endeff_site_id >= 0:
+                mujoco.mj_jacSite(self.model, self.data, jacp, jacr, endeff_site_id)
+            else:
+                last_joint_body_id = self.model.jnt_bodyid[joint_ids[-1]]
+                mujoco.mj_jacBody(self.model, self.data, jacp, jacr, last_joint_body_id)
+
+            if orientation_weight > 0.0:
+                jacobian = np.vstack([jacp, orientation_weight * jacr])
+                error = np.concatenate([pos_error, orientation_weight * axis_angle])
+            else:
+                jacobian = jacp
+                error = pos_error
+
+            jacobian_sub = jacobian[:, joint_dof_addrs]
+            try:
+                condition_number = float(np.linalg.cond(jacobian_sub))
+            except np.linalg.LinAlgError:
+                condition_number = np.inf
+            if (
+                not np.isfinite(condition_number)
+                or condition_number > self._ik_singularity_condition_threshold
+            ):
+                near_singular = True
+            if not np.isfinite(condition_number):
+                max_condition_number = np.inf
+            elif np.isfinite(max_condition_number):
+                max_condition_number = max(max_condition_number, condition_number)
+
+            damping = 0.1
+            jt_j = jacobian_sub.T @ jacobian_sub + damping**2 * np.eye(len(joint_ids))
+            delta_q = np.linalg.solve(jt_j, jacobian_sub.T @ error)
+            delta_norm = np.linalg.norm(delta_q)
+            if delta_norm > self._ik_joint_step_limit:
+                delta_q *= self._ik_joint_step_limit / delta_norm
+
+            for i, addr in enumerate(qpos_addrs):
+                self.data.qpos[addr] += delta_q[i]
+            hit_limit = self._clamp_joint_qpos(joint_ids, qpos_addrs) or hit_limit
+
+        result = best_qpos.copy()
+        self.data.qpos[:] = saved_qpos
+        diagnostics = {
+            "converged": converged,
+            "iterations": iterations,
+            "pos_error_norm": float(pos_error_norm),
+            "ori_error_norm": float(ori_error_norm),
+            "condition_number": float(max_condition_number),
+            "near_singular": near_singular,
+            "hit_limit": hit_limit,
+        }
+        return result, diagnostics
+
+    def _solve_ik(self, joint_ids, target_pos, target_quat, endeff_site_id=None, side="unknown"):
         """
         使用MuJoCo内置IK求解器计算关节角度。
 
@@ -315,89 +468,29 @@ class MuJoCoSysmoSimulator(Component):
         if not joint_ids or self.model is None:
             return None
 
-        # 获取关节的qpos地址
-        qpos_addrs = []
-        for jid in joint_ids:
-            qpos_addr = self.model.jnt_qposadr[jid]
-            qpos_addrs.append(qpos_addr)
+        full_result, full_diag = self._solve_ik_pass(
+            joint_ids, target_pos, target_quat, endeff_site_id, orientation_weight=1.0
+        )
+        full_unstable = (
+            full_diag["near_singular"]
+            or full_diag["hit_limit"]
+            or (
+                full_diag["pos_error_norm"] < self._ik_fallback_position_tolerance
+                and full_diag["ori_error_norm"] > self._ik_orientation_tolerance
+            )
+        )
 
-        # 保存当前关节角度（用于恢复）
-        saved_qpos = self.data.qpos.copy()
+        if not full_unstable and full_diag["converged"]:
+            self._log_ik_diagnostics(side, "full", full_diag, level=logging.DEBUG)
+            return full_result
 
-        # IK迭代
-        for iteration in range(self._ik_max_iter):
-            # 前向运动学
-            mujoco.mj_forward(self.model, self.data)
-
-            # 获取当前末端位姿
-            if endeff_site_id is not None and endeff_site_id >= 0:
-                current_pos = self.data.site_xpos[endeff_site_id].copy()
-                current_mat = self.data.site_xmat[endeff_site_id].reshape(3, 3).copy()
-            else:
-                # 使用最后一个关节的body位姿
-                last_joint_body_id = self.model.jnt_bodyid[joint_ids[-1]]
-                current_pos = self.data.xpos[last_joint_body_id].copy()
-                current_mat = self.data.xmat[last_joint_body_id].reshape(3, 3).copy()
-
-            # 计算位置误差
-            pos_error = target_pos - current_pos
-            pos_error_norm = np.linalg.norm(pos_error)
-
-            # 计算姿态误差
-            current_quat = np.zeros(4)
-            mujoco.mju_mat2Quat(current_quat, current_mat.flatten())
-            quat_error = np.zeros(4)
-            mujoco.mju_negQuat(quat_error, target_quat)
-            mujoco.mju_mulQuat(quat_error, quat_error, current_quat)
-            # 将四元数误差转换为轴角
-            axis_angle = np.zeros(3)
-            mujoco.mju_quat2Vel(axis_angle, quat_error, 1.0)
-            ori_error_norm = np.linalg.norm(axis_angle)
-
-            # 检查收敛
-            if pos_error_norm < self._ik_tolerance and ori_error_norm < 0.01:
-                break
-
-            # 组合误差向量
-            error = np.concatenate([pos_error, axis_angle])
-
-            # 计算雅可比矩阵
-            jacp = np.zeros((3, self.model.nv))
-            jacr = np.zeros((3, self.model.nv))
-
-            if endeff_site_id is not None and endeff_site_id >= 0:
-                mujoco.mj_jacSite(self.model, self.data, jacp, jacr, endeff_site_id)
-            else:
-                last_joint_body_id = self.model.jnt_bodyid[joint_ids[-1]]
-                mujoco.mj_jacBody(self.model, self.data, jacp, jacr, last_joint_body_id)
-
-            jacobian = np.vstack([jacp, jacr])
-
-            # 提取相关关节的雅可比列
-            joint_dof_addrs = []
-            for jid in joint_ids:
-                dof_addr = self.model.jnt_dofadr[jid]
-                joint_dof_addrs.append(dof_addr)
-
-            jacobian_sub = jacobian[:, joint_dof_addrs]
-
-            # 伪逆方法求解关节角度增量
-            damping = 0.1
-            jt_j = jacobian_sub.T @ jacobian_sub + damping**2 * np.eye(len(joint_ids))
-            delta_q = np.linalg.solve(jt_j, jacobian_sub.T @ error)
-
-            # 更新关节角度
-            step_size = 0.5
-            for i, addr in enumerate(qpos_addrs):
-                self.data.qpos[addr] += step_size * delta_q[i]
-
-        # 提取求解结果
-        result = np.array([self.data.qpos[addr] for addr in qpos_addrs])
-
-        # 恢复原始关节角度（IK求解不直接修改仿真状态）
-        self.data.qpos[:] = saved_qpos
-
-        return result
+        self._log_ik_diagnostics(side, "full_unstable", full_diag, level=logging.WARNING)
+        approx_result, approx_diag = self._solve_ik_pass(
+            joint_ids, target_pos, target_quat, endeff_site_id, orientation_weight=0.0
+        )
+        self._log_ik_diagnostics(side, "approx_position_only", approx_diag, level=logging.WARNING)
+        self._warn_ik_fallback(side)
+        return approx_result
 
     def _apply_endeff_target(self, target: CartesianTarget, joint_ids, endeff_site_id):
         """
@@ -417,11 +510,21 @@ class MuJoCoSysmoSimulator(Component):
             return
 
         try:
+            if not self._is_valid_target(target):
+                logger.warning(f"跳过 {target.hand_side} 手无效目标: pos/orientation 包含 NaN/Inf 或四元数退化")
+                return
+
             target_pos, target_quat = self._cartesian_to_mujoco_pos(
                 target.position_m, target.orientation_xyzw
             )
 
-            joint_angles = self._solve_ik(joint_ids, target_pos, target_quat, endeff_site_id)
+            joint_angles = self._solve_ik(
+                joint_ids,
+                target_pos,
+                target_quat,
+                endeff_site_id,
+                side=target.hand_side,
+            )
 
             if joint_angles is not None:
                 for i, jid in enumerate(joint_ids):
@@ -435,6 +538,17 @@ class MuJoCoSysmoSimulator(Component):
         except Exception as e:
             logger.error(f"应用末端目标失败: {e}")
 
+    def _is_valid_target(self, target: CartesianTarget) -> bool:
+        pos = np.asarray(target.position_m, dtype=np.float64)
+        quat = np.asarray(target.orientation_xyzw, dtype=np.float64)
+        return (
+            pos.shape == (3,)
+            and quat.shape == (4,)
+            and np.all(np.isfinite(pos))
+            and np.all(np.isfinite(quat))
+            and np.linalg.norm(quat) > 1e-6
+        )
+
     def _receive_targets(self):
         """
         从ZMQ订阅者接收笛卡尔空间目标命令。
@@ -445,6 +559,10 @@ class MuJoCoSysmoSimulator(Component):
         # 接收右手目标
         right_msg = self._right_endeff_subscriber.recv_keypoints()
         if right_msg is not None:
+            if right_msg.hand_side != robots.RIGHT or not self._is_valid_target(right_msg):
+                logger.warning("MuJoCo: 跳过右手无效或错侧目标")
+                right_msg = None
+        if right_msg is not None:
             self._right_target = right_msg
             logger.debug(
                 f"右手目标: pos=({right_msg.position_m[0]:.3f}, "
@@ -453,6 +571,10 @@ class MuJoCoSysmoSimulator(Component):
 
         # 接收左手目标
         left_msg = self._left_endeff_subscriber.recv_keypoints()
+        if left_msg is not None:
+            if left_msg.hand_side != robots.LEFT or not self._is_valid_target(left_msg):
+                logger.warning("MuJoCo: 跳过左手无效或错侧目标")
+                left_msg = None
         if left_msg is not None:
             self._left_target = left_msg
             logger.debug(

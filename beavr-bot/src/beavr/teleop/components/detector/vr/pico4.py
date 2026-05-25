@@ -33,6 +33,7 @@ import time
 from datetime import datetime
 from typing import Optional, Union
 
+import numpy as np
 import zmq
 
 from beavr.teleop.common.network.publisher import ZMQPublisherManager
@@ -122,6 +123,7 @@ class PICO4VRHandDetector(Component):
         self._last_receive_time = {}
         self._last_wrist_log_time = 0.0
         self._last_full_joint_log_time = 0.0
+        self._last_invalid_frame_log_time = {}
         self._freq_calc_interval = 1.0  # 1秒计算一次频率
         self._frame_index = 0  # 帧索引，用于匹配三个环节的数据
 
@@ -221,14 +223,18 @@ class PICO4VRHandDetector(Component):
                 logger.warning(f"_process_keypoints: 坐标部分为空: {data_str}")
                 return [], send_timestamp
 
+            # Unity's SerializeVector3List terminates the payload with ":".
+            # Strip that protocol marker before splitting, otherwise the final
+            # z value becomes e.g. "0.4563943:" and fails float conversion.
+            coords_part = coords_part.strip().rstrip(":")
             coords = coords_part.split("|")
             skipped_coords = []
             for i, coord in enumerate(coords):
-                coord = coord.strip()
+                coord = coord.strip().rstrip(":")
                 if not coord:
                     skipped_coords.append(f"{i}:空")
                     continue
-                coord_values = coord.split(",")[:3]
+                coord_values = [value.strip().rstrip(":") for value in coord.split(",")[:3]]
                 if len(coord_values) != 3:
                     skipped_coords.append(f"{i}:{coord}(只有{len(coord_values)}个值)")
                     continue
@@ -254,6 +260,63 @@ class PICO4VRHandDetector(Component):
         except Exception as e:
             logger.error(f"_process_keypoints: 处理数据时出错: {e}")
             return [], None
+
+    def _is_relative_frame(self, data):
+        """Return whether the incoming PICO4 frame is marked relative."""
+        data_str = data.decode().strip()
+        if data_str.startswith(robots.ABSOLUTE):
+            return False
+        if data_str.startswith(robots.RELATIVE):
+            return True
+
+        # Timestamped format: HH:MM:SS.ffffff:absolute|relative:coords
+        first_colon = data_str.find(":")
+        second_colon = data_str.find(":", first_colon + 1) if first_colon != -1 else -1
+        third_colon = data_str.find(":", second_colon + 1) if second_colon != -1 else -1
+        if third_colon != -1:
+            marker = data_str[third_colon + 1:].split(":", 1)[0].strip()
+            return marker != robots.ABSOLUTE
+
+        return True
+
+    def _is_valid_hand_keypoints(self, keypoints, hand_side):
+        """Reject startup placeholders and malformed frames before publishing."""
+        expected_count = robots.OCULUS_NUM_KEYPOINTS * 3
+        if len(keypoints) != expected_count:
+            return False, f"关键点数量 {len(keypoints)} != {expected_count}"
+
+        arr = np.asarray(keypoints, dtype=np.float64).reshape(robots.OCULUS_NUM_KEYPOINTS, 3)
+        if not np.all(np.isfinite(arr)):
+            return False, "关键点包含 NaN/Inf"
+
+        wrist = arr[0]
+        relative = arr - wrist
+        max_distance = float(np.max(np.linalg.norm(relative, axis=1)))
+        if max_distance < 1e-4:
+            return False, "所有关键点几乎重合，疑似 Unity/PICO4 启动占位帧"
+
+        knuckles = robots.OCULUS_JOINTS["knuckles"]
+        index_vec = arr[knuckles[0]] - wrist
+        middle_vec = arr[knuckles[1]] - wrist
+        pinky_vec = arr[knuckles[-1]] - wrist
+        palm_span = max(
+            np.linalg.norm(index_vec),
+            np.linalg.norm(middle_vec),
+            np.linalg.norm(pinky_vec),
+            np.linalg.norm(np.cross(index_vec, middle_vec)),
+            np.linalg.norm(np.cross(index_vec, pinky_vec)),
+        )
+        if palm_span < 1e-5:
+            return False, "手掌关键点退化，无法建立手部坐标系"
+
+        return True, ""
+
+    def _warn_invalid_frame(self, hand_side, reason):
+        current_time = time.time()
+        last_time = self._last_invalid_frame_log_time.get(hand_side, 0.0)
+        if current_time - last_time >= 1.0:
+            self._last_invalid_frame_log_time[hand_side] = current_time
+            logger.warning(f"PICO4: 跳过 {hand_side} 手无效帧: {reason}")
 
     def _receive_data(self, socket_name):
         """
@@ -432,7 +495,12 @@ class PICO4VRHandDetector(Component):
                     if delay_ms is None and send_timestamp is not None:
                         logger.debug(f"延迟计算失败: send_timestamp={send_timestamp}")
 
-                    is_relative = not keypoint_data.decode().strip().startswith(robots.ABSOLUTE)
+                    is_valid, invalid_reason = self._is_valid_hand_keypoints(keypoints, hand_side)
+                    if not is_valid:
+                        self._warn_invalid_frame(hand_side, invalid_reason)
+                        continue
+
+                    is_relative = self._is_relative_frame(keypoint_data)
                     # 发布InputFrame对象给下游的keypoint_transform.py
                     self.publisher_manager.publish(
                         host=self.host,

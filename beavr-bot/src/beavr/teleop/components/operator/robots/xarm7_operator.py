@@ -47,8 +47,8 @@ class XArmOperator(Operator):
         endeff_publish_port: int,
         endeff_subscribe_port: int,
         moving_average_limit: int,
-        h_r_v: np.ndarray,  # Transformation matrix Robot base to VR base
-        h_t_v: np.ndarray,  # Transformation matrix Hand Tracking base to VR base
+        h_r_v: np.ndarray,
+        h_t_v: Optional[np.ndarray] = None,
         use_filter: bool = True,
         arm_resolution_port: Optional[int] = None,
         teleoperation_state_port: Optional[int] = None,
@@ -68,7 +68,7 @@ class XArmOperator(Operator):
             endeff_subscribe_port: 用于订阅末端执行器当前状态的端口.
             moving_average_limit: 滑动平均滤波器的样本数量（目前暂未使用）.
             h_r_v: 机器人基座坐标系到 VR 坐标系的 4x4 齐次变换矩阵.
-            h_t_v: 手部追踪坐标系到 VR 坐标系的 4x4 齐次变换矩阵.
+            h_t_v: (已弃用) 手部追踪坐标系到 VR 坐标系的变换矩阵,保留仅为向后兼容.
             use_filter: 是否启用互补状态滤波器.
             arm_resolution_port: （可选）用于接收机械臂精度控制消息的端口.
             teleoperation_state_port: （可选）用于接收遥操作重置或暂停消息的端口.
@@ -81,9 +81,7 @@ class XArmOperator(Operator):
         self.notify_component_start(self.operator_name)
         self._host, self._port = host, transformed_keypoints_port
 
-        # Transformation matrices specific to the arm setup
-        self.h_r_v = h_r_v  # 机器人基座到VR坐标系的变换矩阵
-        self.h_t_v = h_t_v  # 手部追踪到VR坐标系的变换矩阵
+        self.h_r_v = h_r_v
 
         # 初始化ZMQ上下文和订阅者
         self._context = get_global_context()
@@ -162,12 +160,14 @@ class XArmOperator(Operator):
         self.real = False  # 占位符：指示仿真vs真实机器人
 
         # Transformation matrices state
-        self.robot_init_h: Optional[np.ndarray] = None  # 机器人初始齐次矩阵
-        self.robot_moving_h: Optional[np.ndarray] = None  # 机器人当前移动齐次矩阵
-        self.hand_init_h: Optional[np.ndarray] = None  # 手部初始齐次矩阵
-        self.hand_moving_h: Optional[np.ndarray] = None  # 手部当前移动齐次矩阵
-        self.hand_init_t: Optional[np.ndarray] = None  # 手部初始平移向量
-        self.last_valid_hand_frame: Optional[np.ndarray] = None  # 缓存最后接收到的手部帧
+        self.robot_init_h: Optional[np.ndarray] = None
+        self.robot_moving_h: Optional[np.ndarray] = None
+        self.hand_init_h: Optional[np.ndarray] = None
+        self.hand_moving_h: Optional[np.ndarray] = None
+        self.hand_init_t: Optional[np.ndarray] = None
+        self.last_valid_hand_frame: Optional[np.ndarray] = None
+        self._last_hand_data_time: float = 0.0
+        self._last_invalid_hand_frame_log_time: float = 0.0
 
         # Filter setup
         self.use_filter = use_filter  # 是否使用滤波器
@@ -253,7 +253,9 @@ class XArmOperator(Operator):
     def _get_hand_frame(self) -> Optional[np.ndarray]:
         """
         从 ZMQ 订阅者获取最新的手部帧数据。
-        如果当前没有立即可用的新数据，则使用缓存的上一次数值。
+
+        当手部追踪数据丢失或无效时返回 None,使调用方跳过本轮发布,
+        从而让机器人手臂保持在当前位置不动。
 
         返回:
             一个 4x3 的 numpy 数组，代表手部坐标帧 ([t; R_列1; R_列2; R_列3])
@@ -269,20 +271,65 @@ class XArmOperator(Operator):
                     # frame_vectors 应该是一个包含 4 个元组的序列 (origin + 3 basis vectors)
                     # Convert from Tuple[Tuple[float, float, float], ...] to numpy array (4, 3)
                     frame_data = np.array(data.frame_vectors, dtype=np.float64).reshape(4, 3)
-                    self.last_valid_hand_frame = frame_data  # 缓存这个新的有效帧
-                    return frame_data
-
+                    frame_data = self._sanitize_hand_frame(frame_data)
+                    if frame_data is not None:
+                        self.last_valid_hand_frame = frame_data
+                        self._last_hand_data_time = time.time()
+                        return frame_data
+                    else:
+                        logger.debug(f"{self.operator_name}: 手部帧数据无效(NaN/退化),跳过")
+                        return None
             except Exception as e:
                 logger.error(f"Error processing InputFrame data: {e}")
                 # 如果处理失败，则进入后续逻辑尝试返回缓存帧
 
         # 如果没有新数据或处理失败，检查是否存在已缓存的帧，如果有则返回它
         if self.last_valid_hand_frame is not None:
-            logger.info(f"No new data, returning cached frame: {self.last_valid_hand_frame}")
+            if hasattr(self, '_last_hand_data_time') and (time.time() - self._last_hand_data_time) > 0.15:
+                logger.debug(f"{self.operator_name}: 手部数据超时(>{0.15:.2f}s),手臂保持原位")
+                return None
             return self.last_valid_hand_frame
 
         # 如果既没有新数据也没有缓存帧，返回 None
         return None
+
+    def _warn_invalid_hand_frame(self, reason: str) -> None:
+        current_time = time.time()
+        if current_time - self._last_invalid_hand_frame_log_time >= 1.0:
+            self._last_invalid_hand_frame_log_time = current_time
+            logger.warning(f"{self.operator_name}: 跳过无效手部帧: {reason}")
+
+    def _sanitize_hand_frame(self, frame: np.ndarray) -> Optional[np.ndarray]:
+        """Validate and orthonormalize frame_vectors before reset/control uses them."""
+        if frame is None or frame.shape != (4, 3):
+            self._warn_invalid_hand_frame("frame_vectors 形状错误")
+            return None
+        if not np.all(np.isfinite(frame)):
+            self._warn_invalid_hand_frame("frame_vectors 包含 NaN/Inf")
+            return None
+
+        origin = frame[0]
+        axes = frame[1:]
+        axis_norms = np.linalg.norm(axes, axis=1)
+        if np.any(axis_norms < 1e-6):
+            self._warn_invalid_hand_frame("方向轴长度为 0")
+            return None
+
+        r_mat = axes.T
+        det = np.linalg.det(r_mat)
+        if not np.isfinite(det) or abs(det) < 1e-4:
+            self._warn_invalid_hand_frame("方向矩阵退化")
+            return None
+
+        r_fixed = self.project_to_rotation_matrix(r_mat)
+        if not np.all(np.isfinite(r_fixed)):
+            self._warn_invalid_hand_frame("方向矩阵正交化失败")
+            return None
+
+        sanitized = np.empty((4, 3), dtype=np.float64)
+        sanitized[0] = origin
+        sanitized[1:] = r_fixed.T
+        return sanitized
 
     def _turn_frame_to_homo_mat(self, frame: np.ndarray) -> np.ndarray:
         """
@@ -295,6 +342,8 @@ class XArmOperator(Operator):
         """
         if frame is None or frame.shape != (4, 3):
             raise ValueError("Input frame must be a 4x3 numpy array.")
+        if not np.all(np.isfinite(frame)):
+            raise ValueError("Input frame contains NaN or Inf.")
         t = frame[0]  # 提取平移向量（手腕位置）
         r_cols = frame[1:]  # 提取旋转矩阵列（3x3）
 
@@ -367,6 +416,9 @@ class XArmOperator(Operator):
         Returns:
             A valid 3x3 rotation matrix.
         """
+        if r_mat is None or not np.all(np.isfinite(r_mat)):
+            logger.warning("Invalid rotation matrix contains NaN/Inf. Returning identity matrix.")
+            return np.eye(3)
         try:
             u, _, vt = np.linalg.svd(r_mat)  # 执行SVD分解,将矩阵分解为两个正交阵 U 和 V^T
             r_fixed = u @ vt  # 重建旋转矩阵,通过将中间的奇异值矩阵 \Sigma 强制设为单位矩阵 I，重新构建出一个完美的正交矩阵。
@@ -610,35 +662,40 @@ class XArmOperator(Operator):
             self.is_first_frame = True
             return
 
-        # 6. 坐标系空间重定向 Apply Coordinate Transformations (using provided H_R_V and H_T_V)
-        
-        # 将手部坐标系(T)下的运动量，映射到机器人基座坐标系(R)下
+        # 6. 坐标系空间重定向 Apply Coordinate Transformations
         try:
-            h_r_v_inv = np.linalg.inv(self.h_r_v)  # 机器人基座到VR坐标系的逆矩阵
-            h_t_v_inv = np.linalg.inv(self.h_t_v)  # 手部到VR坐标系的逆矩阵
+            h_robot_to_vr = self.h_r_v
+            r_robot_to_vr = h_robot_to_vr[:3, :3]
+            r_vr_to_robot = np.linalg.inv(r_robot_to_vr)
 
-            # 计算手部相对旋转在机器人基座坐标系下的等效变换 (基底变换/相似变换: P^-1 * R * P)
-            # 旋转部分变换：结合 H_R_V 矩阵，将手部的相对转动量映射到机器人空间
-            h_ht_hi_r = h_r_v_inv[:3, :3] @ h_ht_hi[:3, :3] @ self.h_r_v[:3, :3]  # handRelRotInVRWorld_2_robotBase=VRBase_2_robotBase * VRHand_2_VRHandInit * robotBase_2_VRWorld
-            # 平移部分变换：通过左乘一个 h_t_v_inv（手部坐标系的逆映射），其实是在做一个轴向置换（Axis Swapping），目的是直接把手部在空间里的位移方向，强行“掰”成机器人基座能够理解的方向
-            h_ht_hi_t = h_t_v_inv[:3, :3] @ h_ht_hi[:3, 3] * self.resolution_scale  # handRelMov_2_VRHandTrack = R{VRBase_2_VRHandTrack} * T{Hand_Relative_Motion}
+            relative_affine_in_robot_frame = np.eye(4)
+            relative_affine_in_robot_frame[:3, :3] = (
+                r_vr_to_robot @ h_ht_hi[:3, :3] @ r_robot_to_vr
+            )
+            relative_affine_in_robot_frame[:3, 3] = (
+                r_vr_to_robot
+                @ (self.hand_moving_h[:3, 3] - self.hand_init_h[:3, 3])
+                * self.resolution_scale
+            )
 
         except np.linalg.LinAlgError:
-            logger.error(f"Error ({self.operator_name}): Could not invert H_R_V or H_T_V matrix.")
-            # Handle error appropriately, maybe reset or use identity
+            logger.error(
+                f"Error ({self.operator_name}): Could not invert H_R_V or initial hand pose matrix."
+            )
             return
 
         # 修正计算出的旋转矩阵，确保其正交合法（防止由于连续乘法导致的数值漂移）
-        h_ht_hi_r = self.project_to_rotation_matrix(h_ht_hi_r)  # 确保旋转矩阵有效
-
-        # 在机器人基座坐标系中进行相对仿射变换
-        relative_affine_in_robot_frame = np.eye(4)  # 初始化4x4单位矩阵
-        relative_affine_in_robot_frame[:3, :3] = h_ht_hi_r  # 设置旋转部分
-        relative_affine_in_robot_frame[:3, 3] = h_ht_hi_t  # 设置平移部分
+        relative_affine_in_robot_frame[:3, :3] = self.project_to_rotation_matrix(
+            relative_affine_in_robot_frame[:3, :3]
+        )  # 确保旋转矩阵有效
+        relative_affine_in_robot_frame[3, :] = [0, 0, 0, 1]
 
         # 7. 计算机器人最终目标位姿
-        # H_RT_RH = H_RI_RH * relative_affine_in_robot_frame
-        h_rt_rh = self.robot_init_h @ relative_affine_in_robot_frame  # 计算目标机器人位姿
+        # Keep translation and orientation decoupled. A wrist orientation change
+        # must not rotate the initial end-effector position around base_link.
+        h_rt_rh = np.eye(4)
+        h_rt_rh[:3, :3] = relative_affine_in_robot_frame[:3, :3] @ self.robot_init_h[:3, :3]
+        h_rt_rh[:3, 3] = self.robot_init_h[:3, 3] + relative_affine_in_robot_frame[:3, 3]
 
         # 再次确保最终输出的矩阵旋转部分是合法的
         h_rt_rh[:3, :3] = self.project_to_rotation_matrix(h_rt_rh[:3, :3])  # 确保旋转矩阵有效

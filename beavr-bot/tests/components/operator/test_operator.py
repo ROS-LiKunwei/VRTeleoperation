@@ -112,3 +112,35 @@ def test_operator_publishes_cartesian_target(bus):
     # Unit quaternion with positive w hemisphere
     assert np.isclose(np.linalg.norm(quat), 1.0, atol=1e-6)
     assert quat[3] >= 0.0
+
+
+def test_operator_rejects_nan_hand_frame():
+    op = XArmOperator(
+        operator_name="xarm7_right_operator",
+        host="127.0.0.1",
+        transformed_keypoints_port=5555,
+        stream_configs={},
+        stream_oculus=False,
+        endeff_publish_port=7777,
+        endeff_subscribe_port=6666,
+        moving_average_limit=3,
+        h_r_v=_identity4(),
+        h_t_v=_identity4(),
+        use_filter=False,
+        arm_resolution_port=None,
+        teleoperation_state_port=None,
+        logging_config={"enabled": False},
+        hand_side=robots.RIGHT,
+    )
+
+    frame = np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [np.nan, 0.0, 0.0],
+            [0.0, np.nan, 0.0],
+            [0.0, 0.0, np.nan],
+        ],
+        dtype=np.float64,
+    )
+
+    assert op._sanitize_hand_frame(frame) is None

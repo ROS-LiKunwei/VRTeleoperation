@@ -1,6 +1,7 @@
 import numpy as np
 
 from beavr.teleop.components.detector.vr.keypoint_transform import (
+    UNITY_LEFT_TO_INTERNAL_RIGHT,
     TransformHandPositionCoords,
 )
 from beavr.teleop.configs.constants import robots
@@ -71,3 +72,79 @@ def test_transform_coordinate_frame():
     raw_distances = np.linalg.norm(hand_coords[1:] - hand_coords[0], axis=1)
     transformed_distances = np.linalg.norm(transformed_hand_coords[1:] - transformed_hand_coords[0], axis=1)
     np.testing.assert_allclose(transformed_distances, raw_distances, atol=1e-6)
+
+
+def test_transform_rejects_degenerate_all_zero_frame():
+    tf = TransformHandPositionCoords(
+        host="",
+        keypoint_sub_port=0,
+        keypoint_transform_pub_port=0,
+        hand_side=robots.RIGHT,
+        moving_average_limit=1,
+    )
+    hand_coords = np.zeros((robots.OCULUS_NUM_KEYPOINTS, 3), dtype=np.float64)
+
+    transformed_hand_coords, hand_dir_frame = tf.transform_keypoints(hand_coords)
+
+    assert transformed_hand_coords is None
+    assert hand_dir_frame is None
+
+
+def test_left_hand_frame_is_converted_to_right_handed_convention():
+    raw_keypoints = _make_keypoints_for_right_hand_identity_frame()
+    hand_coords = np.array(raw_keypoints, dtype=np.float64)
+
+    right_tf = TransformHandPositionCoords(
+        host="",
+        keypoint_sub_port=0,
+        keypoint_transform_pub_port=0,
+        hand_side=robots.RIGHT,
+        moving_average_limit=1,
+    )
+    left_tf = TransformHandPositionCoords(
+        host="",
+        keypoint_sub_port=0,
+        keypoint_transform_pub_port=0,
+        hand_side=robots.LEFT,
+        moving_average_limit=1,
+    )
+
+    _, right_frame = right_tf.transform_keypoints(hand_coords)
+    _, left_frame = left_tf.transform_keypoints(hand_coords)
+
+    np.testing.assert_allclose(left_frame[0], right_frame[0], atol=1e-6)
+    np.testing.assert_allclose(left_frame[1], -right_frame[1], atol=1e-6)
+    np.testing.assert_allclose(left_frame[2], -right_frame[2], atol=1e-6)
+    np.testing.assert_allclose(left_frame[3], right_frame[3], atol=1e-6)
+    np.testing.assert_allclose(np.cross(left_frame[1], left_frame[2]), left_frame[3], atol=1e-6)
+
+
+def test_unity_left_handed_positions_are_converted_to_internal_right_handed_frame():
+    raw_keypoints = _make_keypoints_for_right_hand_identity_frame()
+    hand_coords = np.array(raw_keypoints, dtype=np.float64)
+    hand_coords[0] = np.array([0.2, 0.3, 0.4])
+    knuckles = robots.OCULUS_JOINTS["knuckles"]
+    hand_coords[knuckles[0]] = hand_coords[0] + np.array([0.1, 0.0, 0.0])
+    hand_coords[knuckles[1]] = hand_coords[0] + np.array([0.0, 0.1, 0.0])
+    hand_coords[knuckles[-1]] = hand_coords[0] + np.array([0.0, 0.0, 0.1])
+
+    tf = TransformHandPositionCoords(
+        host="",
+        keypoint_sub_port=0,
+        keypoint_transform_pub_port=0,
+        hand_side=robots.RIGHT,
+        moving_average_limit=1,
+    )
+
+    transformed_hand_coords, hand_dir_frame = tf.transform_keypoints(hand_coords)
+
+    np.testing.assert_allclose(
+        hand_dir_frame[0],
+        hand_coords[0] * UNITY_LEFT_TO_INTERNAL_RIGHT,
+        atol=1e-6,
+    )
+    np.testing.assert_allclose(
+        transformed_hand_coords[knuckles[-1]],
+        (hand_coords[knuckles[-1]] - hand_coords[0]) * UNITY_LEFT_TO_INTERNAL_RIGHT,
+        atol=1e-6,
+    )
