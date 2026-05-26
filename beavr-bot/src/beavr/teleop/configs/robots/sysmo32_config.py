@@ -313,7 +313,7 @@ class Sysmo32Config:
         self.environment = [
             MuJoCoSimConfig(
                 host=network.HOST_ADDRESS,
-                urdf_path="configs/robots/sysmo32.urdf",
+                urdf_path="robots/sysmo_description/urdf/sysmo32.urdf",
                 right_endeff_subscribe_port=ports.XARM_ENDEFF_SUBSCRIBE_PORT + SYSMO32_RIGHT_PORT_OFFSET,
                 left_endeff_subscribe_port=ports.XARM_ENDEFF_SUBSCRIBE_PORT + SYSMO32_LEFT_PORT_OFFSET,
                 render=True,

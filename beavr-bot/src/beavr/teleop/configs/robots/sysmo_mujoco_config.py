@@ -27,7 +27,7 @@ SYSMO32_LEFT_PORT_OFFSET = 4
 class MuJoCoSimConfig:
     """MuJoCo仿真环境配置"""
     host: str = network.HOST_ADDRESS
-    urdf_path: str = "configs/robots/sysmo32.urdf"
+    urdf_path: str = "robots/sysmo_description/urdf/sysmo32.urdf"
     right_endeff_subscribe_port: int = ports.XARM_ENDEFF_SUBSCRIBE_PORT + SYSMO32_RIGHT_PORT_OFFSET
     left_endeff_subscribe_port: int = ports.XARM_ENDEFF_SUBSCRIBE_PORT + SYSMO32_LEFT_PORT_OFFSET
     render: bool = True

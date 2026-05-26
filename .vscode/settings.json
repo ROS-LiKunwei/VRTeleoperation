@@ -1,5 +1,6 @@
 {
     "python.analysis.extraPaths": [
         "./beavr-bot/src"
-    ]
+    ],
+    "cmake.sourceDirectory": "/home/likunwei/dataCollection/beavr-bot/robots/sysmo_description"
 }

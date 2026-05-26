@@ -16,7 +16,7 @@ sysinfo.txt
 
 # Asset pipeline cache
 /[Aa]sset[Ss]tore/
-Assets/AssetStoreTools*
+#Assets/AssetStoreTools*
 
 # Auto-generated VS/JetBrains files
 .vs/
