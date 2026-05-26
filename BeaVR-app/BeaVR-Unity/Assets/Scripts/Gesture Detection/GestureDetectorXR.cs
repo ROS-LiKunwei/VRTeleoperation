@@ -44,12 +44,19 @@ public class GestureDetectorXR : MonoBehaviour
 	private float _lastWristLogTime = 0f;
 	private const float WRIST_LOG_INTERVAL = 2.0f;
 
+	// 手势发送过滤：避免发送手丢失时的旧姿态，以及毫米级抖动
+	[Header("手势发送过滤")]
+	[Tooltip("两次已发送手势帧之间的最大关节位移小于该值时跳过发送。单位：米，0.001 = 1毫米。")]
+	public float MinGestureSendDeltaMeters = 0.001f;
+	private readonly Dictionary<string, List<Vector3>> _lastSentHandFrames = new Dictionary<string, List<Vector3>>();
+	private readonly Dictionary<string, string> _lastSentHandModes = new Dictionary<string, string>();
+
 	// PICO 26个坐标系数据打印
     [Header("PICO 26个坐标系数据打印")]
     public bool EnableFullJointLogging = true;
     private float _lastFullJointLogTime = 0f;
     private const float FULL_JOINT_LOG_INTERVAL = 5.0f;
-    
+
     // 帧索引，用于匹配三个环节的数据
     private int _frameIndex = 0;
 
@@ -64,15 +71,42 @@ public class GestureDetectorXR : MonoBehaviour
 	public HighResolutionButtonController HighResolutionButtonController;
 	public LowResolutionButtonController LowResolutionButtonController;
 
+	// 头部手势控制：点头开始，摇头结束
+	[Header("头部手势控制")]
+	public bool EnableHeadGestureControl = true;
+	public Button NodStartButton;
+	public Button ShakeEndButton;
+	[Range(5f, 35f)] public float HeadGestureAngleThresholdDegrees = 12f;
+	[Range(0.2f, 2.0f)] public float HeadGestureWindowSeconds = 0.8f;
+	[Range(0.2f, 3.0f)] public float HeadGestureCooldownSeconds = 1.2f;
+	[Range(0.1f, 5.0f)] public float HeadNeutralFollowSpeed = 1.5f;
+	private bool _hasHeadNeutral = false;
+	private float _neutralHeadPitch = 0f;
+	private float _neutralHeadYaw = 0f;
+	private int _nodStage = 0;
+	private int _nodDirection = 0;
+	private float _nodStageStartTime = 0f;
+	private int _shakeStage = 0;
+	private int _shakeDirection = 0;
+	private float _shakeStageStartTime = 0f;
+	private float _headGestureRangeStartTime = 0f;
+	private float _minPitchDeltaInWindow = 0f;
+	private float _maxPitchDeltaInWindow = 0f;
+	private float _minYawDeltaInWindow = 0f;
+	private float _maxYawDeltaInWindow = 0f;
+	private float _lastHeadGestureTriggerTime = -999f;
+
 	// 网络
 	private NetworkManager netConfig;
 	private bool connectionAttemptInProgress = false;
 
 	// 模式
-	bool StreamRelativeData = true;
+	bool StreamRelativeData = false;
 	bool StreamAbsoluteData = false;
 	bool StreamResolution = false;
 	private bool ShouldContinueArmTeleop = false;
+	[Header("手势模式切换")]
+	public bool EnablePinchStreamingControl = false;
 
 	// 关节顺序定义（26个关节）
 	static readonly XRHandJointID[] k_JointOrder = new XRHandJointID[]
@@ -118,8 +152,32 @@ public class GestureDetectorXR : MonoBehaviour
 		// 获取XR手部子系统
 		TryResolveHandSubsystem();
 
+		if (NodStartButton == null && MenuButton != null)
+			NodStartButton = MenuButton.GetComponentInChildren<Button>(true);
+		if (NodStartButton == null)
+			NodStartButton = FindSceneButtonByName("start");
+		if (ShakeEndButton == null)
+			ShakeEndButton = FindSceneButtonByName("end");
+
 		// 给OpenXR一点时间并运行NetMQController初始化
 		StartCoroutine(InitializeNetMQAfterDelay());
+	}
+
+	/// <summary>
+	/// 按场景对象名查找按钮，便于自动绑定start/end按钮。
+	/// </summary>
+	Button FindSceneButtonByName(string buttonName)
+	{
+		Button[] buttons = Resources.FindObjectsOfTypeAll<Button>();
+		for (int i = 0; i < buttons.Length; i++)
+		{
+			Button button = buttons[i];
+			if (button == null || button.gameObject == null || !button.gameObject.scene.IsValid())
+				continue;
+			if (string.Equals(button.gameObject.name, buttonName, StringComparison.OrdinalIgnoreCase))
+				return button;
+		}
+		return null;
 	}
 
 	/// <summary>
@@ -176,6 +234,8 @@ public class GestureDetectorXR : MonoBehaviour
 		if (_handSubsystem == null)
 			TryResolveHandSubsystem();
 
+		ProcessHeadGestureControl();
+
 		bool isConnected = NetMQController.Instance.AreSocketsConnected();
 		if (!isConnected)
 		{
@@ -200,7 +260,8 @@ public class GestureDetectorXR : MonoBehaviour
 		connectionAttemptInProgress = false;
 
 		// 处理手势（左手捏合）
-		StreamPauser();
+		if (EnablePinchStreamingControl)
+			StreamPauser();
 
 		// 发送辅助通道
 		SendResolutionThroughController();
@@ -326,6 +387,217 @@ public class GestureDetectorXR : MonoBehaviour
 	}
 
 	/// <summary>
+	/// 识别头部点头/摇头动作。点头触发开始，摇头触发结束。
+	/// </summary>
+	void ProcessHeadGestureControl()
+	{
+		if (!EnableHeadGestureControl)
+			return;
+
+		InputDevice headDevice = InputDevices.GetDeviceAtXRNode(XRNode.Head);
+		if (!headDevice.isValid || !headDevice.TryGetFeatureValue(CommonUsages.deviceRotation, out Quaternion headRotation))
+			return;
+
+		GetHeadPitchYaw(headRotation, out float pitch, out float yaw);
+
+		if (!_hasHeadNeutral)
+		{
+			_neutralHeadPitch = pitch;
+			_neutralHeadYaw = yaw;
+			_hasHeadNeutral = true;
+			return;
+		}
+
+		float pitchDelta = Mathf.DeltaAngle(_neutralHeadPitch, pitch);
+		float yawDelta = Mathf.DeltaAngle(_neutralHeadYaw, yaw);
+		float threshold = Mathf.Max(1f, HeadGestureAngleThresholdDegrees);
+		float currentTime = Time.time;
+
+		if (Mathf.Abs(pitchDelta) < threshold * 0.5f && Mathf.Abs(yawDelta) < threshold * 0.5f)
+		{
+			float follow = Mathf.Clamp01(Time.deltaTime * HeadNeutralFollowSpeed);
+			_neutralHeadPitch = Mathf.LerpAngle(_neutralHeadPitch, pitch, follow);
+			_neutralHeadYaw = Mathf.LerpAngle(_neutralHeadYaw, yaw, follow);
+		}
+
+		if (currentTime - _lastHeadGestureTriggerTime < HeadGestureCooldownSeconds)
+			return;
+
+		UpdateHeadGestureRange(pitchDelta, yawDelta, currentTime);
+		float pitchRange = _maxPitchDeltaInWindow - _minPitchDeltaInWindow;
+		float yawRange = _maxYawDeltaInWindow - _minYawDeltaInWindow;
+		bool nodTriggered = pitchRange >= threshold * 1.6f && pitchRange >= yawRange;
+		bool shakeTriggered = yawRange >= threshold * 1.4f && yawRange > pitchRange * 1.1f;
+
+		if (shakeTriggered && yawRange >= pitchRange)
+		{
+			_lastHeadGestureTriggerTime = currentTime;
+			ResetHeadGestureState();
+			TriggerEndFromHeadGesture();
+		}
+		else if (nodTriggered)
+		{
+			_lastHeadGestureTriggerTime = currentTime;
+			ResetHeadGestureState();
+			TriggerStartFromHeadGesture();
+		}
+	}
+
+	/// <summary>
+	/// 跟踪短时间窗口内的俯仰/左右转头范围，用于更稳定地识别点头和摇头。
+	/// </summary>
+	void UpdateHeadGestureRange(float pitchDelta, float yawDelta, float currentTime)
+	{
+		if (_headGestureRangeStartTime <= 0f || currentTime - _headGestureRangeStartTime > HeadGestureWindowSeconds)
+		{
+			_headGestureRangeStartTime = currentTime;
+			_minPitchDeltaInWindow = pitchDelta;
+			_maxPitchDeltaInWindow = pitchDelta;
+			_minYawDeltaInWindow = yawDelta;
+			_maxYawDeltaInWindow = yawDelta;
+			return;
+		}
+
+		_minPitchDeltaInWindow = Mathf.Min(_minPitchDeltaInWindow, pitchDelta);
+		_maxPitchDeltaInWindow = Mathf.Max(_maxPitchDeltaInWindow, pitchDelta);
+		_minYawDeltaInWindow = Mathf.Min(_minYawDeltaInWindow, yawDelta);
+		_maxYawDeltaInWindow = Mathf.Max(_maxYawDeltaInWindow, yawDelta);
+	}
+
+	/// <summary>
+	/// 从头显朝向向量计算俯仰和左右转头角，避免直接使用欧拉角导致轴不稳定。
+	/// </summary>
+	void GetHeadPitchYaw(Quaternion headRotation, out float pitch, out float yaw)
+	{
+		Vector3 forward = headRotation * Vector3.forward;
+		if (forward.sqrMagnitude < 0.0001f)
+		{
+			pitch = 0f;
+			yaw = 0f;
+			return;
+		}
+
+		forward.Normalize();
+		pitch = Mathf.Asin(Mathf.Clamp(forward.y, -1f, 1f)) * Mathf.Rad2Deg;
+		yaw = Mathf.Atan2(forward.x, forward.z) * Mathf.Rad2Deg;
+	}
+
+	/// <summary>
+	/// 检测某个角度轴是否完成一次正反向摆动。
+	/// </summary>
+	bool UpdateAlternatingHeadGesture(float delta, ref int stage, ref int direction, ref float stageStartTime, float threshold, float currentTime)
+	{
+		if (stage != 0 && currentTime - stageStartTime > HeadGestureWindowSeconds)
+		{
+			stage = 0;
+			direction = 0;
+		}
+
+		if (stage == 0)
+		{
+			if (Mathf.Abs(delta) >= threshold)
+			{
+				stage = 1;
+				direction = delta > 0f ? 1 : -1;
+				stageStartTime = currentTime;
+			}
+			return false;
+		}
+
+		if (stage == 1 && direction != 0 && delta * direction <= -threshold)
+			return true;
+
+		return false;
+	}
+
+	/// <summary>
+	/// 重置头部手势检测状态。
+	/// </summary>
+	void ResetHeadGestureState()
+	{
+		_nodStage = 0;
+		_nodDirection = 0;
+		_shakeStage = 0;
+		_shakeDirection = 0;
+		_headGestureRangeStartTime = 0f;
+	}
+
+	/// <summary>
+	/// 将Unity的0-360欧拉角规整到-180到180。
+	/// </summary>
+	float NormalizeAngle(float angle)
+	{
+		return Mathf.Repeat(angle + 180f, 360f) - 180f;
+	}
+
+	/// <summary>
+	/// 点头时闪烁开始按钮，并允许向后端发送手部数据。
+	/// </summary>
+	void TriggerStartFromHeadGesture()
+	{
+		Debug.Log("头部手势：点头开始发送手部数据");
+		if (NodStartButton != null)
+			StartCoroutine(FlashButton(NodStartButton));
+
+		SetHeadGestureStreaming(true);
+	}
+
+	/// <summary>
+	/// 摇头时闪烁结束按钮，并停止向后端发送手部数据。
+	/// </summary>
+	void TriggerEndFromHeadGesture()
+	{
+		Debug.Log("头部手势：摇头停止发送手部数据");
+		if (ShakeEndButton != null)
+			StartCoroutine(FlashButton(ShakeEndButton));
+
+		SetHeadGestureStreaming(false);
+	}
+
+	/// <summary>
+	/// 头部手势专用发送开关：只控制数据流，不触发按钮OnClick，也不隐藏UI。
+	/// </summary>
+	void SetHeadGestureStreaming(bool shouldStream)
+	{
+		if (shouldStream)
+		{
+			StreamResolution = false;
+			StreamRelativeData = true;
+			StreamAbsoluteData = false;
+			ShouldContinueArmTeleop = true;
+			if (StreamBorder != null) StreamBorder.color = Color.green;
+			return;
+		}
+
+		StreamRelativeData = false;
+		StreamAbsoluteData = false;
+		StreamResolution = false;
+		ShouldContinueArmTeleop = false;
+		ResetLastSentHandFrame("RightHand");
+		ResetLastSentHandFrame("LeftHand");
+		if (StreamBorder != null) StreamBorder.color = Color.red;
+		NetMQController.Instance.SendMessage("Pause", "Low");
+	}
+
+	/// <summary>
+	/// 显示按钮闪烁提示，但不触发按钮自身的OnClick事件。
+	/// </summary>
+	IEnumerator FlashButton(Button button)
+	{
+		if (button == null)
+			yield break;
+
+		button.Select();
+		if (button.targetGraphic != null)
+		{
+			Color originalColor = button.targetGraphic.color;
+			button.targetGraphic.color = button.colors.pressedColor;
+			yield return new WaitForSecondsRealtime(0.12f);
+			button.targetGraphic.color = originalColor;
+		}
+	}
+
+	/// <summary>
 	/// 通过控制器发送手部数据
 	/// </summary>
 	/// <param name="typeMarker">数据类型标记（"relative"或"absolute"）</param>
@@ -336,25 +608,46 @@ public class GestureDetectorXR : MonoBehaviour
 			if (_handSubsystem == null)
 				return;
 
+			bool sentRight = false;
+			bool sentLeft = false;
+
 			// 右手
 			List<Vector3> rightHandGestureData = new List<Vector3>();
-			CollectHandJointPositions(_handSubsystem.rightHand, rightHandGestureData);
-			string rightHandDataString = SerializeVector3List(rightHandGestureData);
-			rightHandDataString = typeMarker + ":" + rightHandDataString;
-			NetMQController.Instance.SendMessage("RightHand", rightHandDataString);
+			if (!CollectHandJointPositions(_handSubsystem.rightHand, rightHandGestureData))
+			{
+				ResetLastSentHandFrame("RightHand");
+			}
+			else if (ShouldSendHandFrame("RightHand", rightHandGestureData, typeMarker))
+			{
+				string rightHandDataString = SerializeVector3List(rightHandGestureData);
+				rightHandDataString = typeMarker + ":" + rightHandDataString;
+				sentRight = NetMQController.Instance.SendMessage("RightHand", rightHandDataString);
+				if (sentRight)
+					StoreLastSentHandFrame("RightHand", rightHandGestureData, typeMarker);
+			}
 
 			// 左手
 			List<Vector3> leftHandGestureData = new List<Vector3>();
-			CollectHandJointPositions(_handSubsystem.leftHand, leftHandGestureData);
-			string leftHandDataString = SerializeVector3List(leftHandGestureData);
-			leftHandDataString = typeMarker + ":" + leftHandDataString;
-			NetMQController.Instance.SendMessage("LeftHand", leftHandDataString);
+			if (!CollectHandJointPositions(_handSubsystem.leftHand, leftHandGestureData))
+			{
+				ResetLastSentHandFrame("LeftHand");
+			}
+			else if (ShouldSendHandFrame("LeftHand", leftHandGestureData, typeMarker))
+			{
+				string leftHandDataString = SerializeVector3List(leftHandGestureData);
+				leftHandDataString = typeMarker + ":" + leftHandDataString;
+				sentLeft = NetMQController.Instance.SendMessage("LeftHand", leftHandDataString);
+				if (sentLeft)
+					StoreLastSentHandFrame("LeftHand", leftHandGestureData, typeMarker);
+			}
 
 			// PICO发送频率统计
 			if (EnableSendFrequencyLogging)
 			{
-				_rightHandSendCount++;
-				_leftHandSendCount++;
+				if (sentRight)
+					_rightHandSendCount++;
+				if (sentLeft)
+					_leftHandSendCount++;
 
 				float currentTime = Time.time;
 				if (currentTime - _lastRightSendFreqLogTime >= FREQ_CALC_INTERVAL)
@@ -362,7 +655,7 @@ public class GestureDetectorXR : MonoBehaviour
 					_rightSendFrequency = _rightHandSendCount / (currentTime - _lastRightSendFreqLogTime);
 					_rightHandSendCount = 0;
 					_lastRightSendFreqLogTime = currentTime;
-					Debug.Log($"[PICO→App] 右手发送频率: {_rightSendFrequency:F1} Hz");
+					Debug.Log($"[PICO→App] 右手实际发送频率: {_rightSendFrequency:F1} Hz");
 				}
 
 				if (currentTime - _lastLeftSendFreqLogTime >= FREQ_CALC_INTERVAL)
@@ -370,7 +663,7 @@ public class GestureDetectorXR : MonoBehaviour
 					_leftSendFrequency = _leftHandSendCount / (currentTime - _lastLeftSendFreqLogTime);
 					_leftHandSendCount = 0;
 					_lastLeftSendFreqLogTime = currentTime;
-					Debug.Log($"[PICO→App] 左手发送频率: {_leftSendFrequency:F1} Hz");
+					Debug.Log($"[PICO→App] 左手实际发送频率: {_leftSendFrequency:F1} Hz");
 				}
 			}
 
@@ -397,21 +690,21 @@ public class GestureDetectorXR : MonoBehaviour
 				if (currentTime - _lastFullJointLogTime >= FULL_JOINT_LOG_INTERVAL)
 				{
 					_lastFullJointLogTime = currentTime;
-					
+
 					// 右手26个关节数据
 					string rightJoints = "";
 					for (int i = 0; i < Mathf.Min(26, rightHandGestureData.Count); i++)
 					{
 						rightJoints += $"{i}:{FormatVec(rightHandGestureData[i])}" + (i < 25 ? " " : "");
 					}
-					
+
 					// 左手26个关节数据
 					string leftJoints = "";
 					for (int i = 0; i < Mathf.Min(26, leftHandGestureData.Count); i++)
 					{
 						leftJoints += $"{i}:{FormatVec(leftHandGestureData[i])}" + (i < 25 ? " " : "");
 					}
-					
+
 					Debug.Log($"[PICO获取] index={_frameIndex} 右手26关节: {rightJoints}");
 					Debug.Log($"[PICO获取] index={_frameIndex} 左手26关节: {leftJoints}");
 					_frameIndex++;
@@ -453,9 +746,12 @@ public class GestureDetectorXR : MonoBehaviour
 	/// </summary>
 	/// <param name="hand">手部对象</param>
 	/// <param name="outPositions">输出位置列表</param>
-	void CollectHandJointPositions(XRHand hand, List<Vector3> outPositions)
+	bool CollectHandJointPositions(XRHand hand, List<Vector3> outPositions)
 	{
 		outPositions.Clear();
+		if (!hand.isTracked)
+			return false;
+
 		for (int i = 0; i < k_JointOrder.Length; i++)
 		{
 			var joint = hand.GetJoint(k_JointOrder[i]);
@@ -468,6 +764,62 @@ public class GestureDetectorXR : MonoBehaviour
 				outPositions.Add(Vector3.zero);
 			}
 		}
+
+		return true;
+	}
+
+	/// <summary>
+	/// 判断当前手部帧是否应该发送。与上一次成功发送的帧相比，最大关节位移小于阈值时跳过。
+	/// </summary>
+	bool ShouldSendHandFrame(string handKey, List<Vector3> currentFrame, string typeMarker)
+	{
+		if (currentFrame == null || currentFrame.Count == 0)
+			return false;
+
+		if (!_lastSentHandModes.TryGetValue(handKey, out var lastMode) ||
+			lastMode != typeMarker)
+		{
+			return true;
+		}
+
+		if (!_lastSentHandFrames.TryGetValue(handKey, out var lastFrame) ||
+			lastFrame == null ||
+			lastFrame.Count != currentFrame.Count)
+		{
+			return true;
+		}
+
+		float threshold = Mathf.Max(0f, MinGestureSendDeltaMeters);
+		if (threshold <= 0f)
+			return true;
+
+		for (int i = 0; i < currentFrame.Count; i++)
+		{
+			if (Vector3.Distance(currentFrame[i], lastFrame[i]) >= threshold)
+				return true;
+		}
+
+		return false;
+	}
+
+	/// <summary>
+	/// 保存上一次成功发送的手部帧，避免后续被列表复用影响比较。
+	/// </summary>
+	void StoreLastSentHandFrame(string handKey, List<Vector3> frame, string typeMarker)
+	{
+		_lastSentHandFrames[handKey] = new List<Vector3>(frame);
+		_lastSentHandModes[handKey] = typeMarker;
+	}
+
+	/// <summary>
+	/// 手部丢失追踪时清除上一帧，避免重新追踪后继续沿用旧姿态比较。
+	/// </summary>
+	void ResetLastSentHandFrame(string handKey)
+	{
+		if (_lastSentHandFrames.ContainsKey(handKey))
+			_lastSentHandFrames.Remove(handKey);
+		if (_lastSentHandModes.ContainsKey(handKey))
+			_lastSentHandModes.Remove(handKey);
 	}
 
 	/// <summary>
@@ -615,6 +967,29 @@ public class GestureDetectorXR : MonoBehaviour
 		catch (Exception e)
 		{
 			Debug.LogError("ActivateStreaming错误: " + e.Message);
+		}
+	}
+
+	/// <summary>
+	/// 停止遥操作并显示菜单。
+	/// </summary>
+	public void DeactivateStreaming()
+	{
+		try
+		{
+			StreamRelativeData = false;
+			StreamAbsoluteData = false;
+			StreamResolution = false;
+			ShouldContinueArmTeleop = false;
+			ResetLastSentHandFrame("RightHand");
+			ResetLastSentHandFrame("LeftHand");
+			if (StreamBorder != null) StreamBorder.color = Color.red;
+			ToggleMenuButton(true);
+			NetMQController.Instance.SendMessage("Pause", "Low");
+		}
+		catch (Exception e)
+		{
+			Debug.LogError("DeactivateStreaming错误: " + e.Message);
 		}
 	}
 
