@@ -254,6 +254,7 @@ class MuJoCoSysmoSimulator(Component):
             with open(xml_path, "r") as f:
                 xml_string = f.read()
 
+            xml_string = self._resolve_exported_mesh_paths(xml_string)
             xml_string = self._insert_site_into_body(
                 xml_string,
                 "left_arm_J6_Link",
@@ -279,6 +280,18 @@ class MuJoCoSysmoSimulator(Component):
         except Exception as e:
             logger.error(f"MuJoCo模型加载失败: {e}")
             raise
+
+    def _resolve_exported_mesh_paths(self, xml_string):
+        urdf_dir = Path(self.urdf_path).resolve().parent
+
+        def resolve_mesh_file(match):
+            mesh_file = match.group(1)
+            mesh_path = Path(mesh_file)
+            if not mesh_path.is_absolute():
+                mesh_path = (urdf_dir / mesh_path).resolve()
+            return f'file="{mesh_path}"'
+
+        return re.sub(r'file="([^"]+\.(?:STL|stl))"', resolve_mesh_file, xml_string)
 
     def _insert_site_into_body(self, xml_string, body_name, site_xml):
         pattern = rf'(<body name="{re.escape(body_name)}"[^>]*>)'
