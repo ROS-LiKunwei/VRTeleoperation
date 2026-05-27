@@ -45,10 +45,10 @@ sysinfo.txt
 *.xcuserstate
 *.ipa
 *.exe
-*.dll
-*.so
-*.dylib
-*.bundle
+
+# Do not ignore Unity asset/plugin binaries globally. Runtime dependencies under
+# Assets (for example NuGet DLLs or native XR plugins) must be versioned with
+# their .meta files so other machines can open the project.
 
 # Unity packages
 *.unitypackage
@@ -60,7 +60,6 @@ sysinfo.txt
 [Bb]in/
 [Oo]bj/
 *.exe
-*.dll
 *.app
 *.log
 *.cache
