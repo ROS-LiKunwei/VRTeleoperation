@@ -12,7 +12,7 @@ PICO4 VR手部追踪探测器模块
     - 发送：ZMQ PUB套接字，发布解析后的InputFrame对象给下游组件
 
 数据格式：
-    - 接收格式："<timestamp>:<type_marker>:x,y,z|x,y,z|..." 
+    - 接收格式："<timestamp>:<type_marker>:x,y,z|x,y,z|..."
       其中timestamp格式为 "HH:MM:SS.ffffff"，type_marker为"relative"或"absolute"
     - 发送格式：InputFrame对象（包含时间戳、手侧、关键点序列、相对/绝对模式、方向帧向量）
 
@@ -200,7 +200,7 @@ class PICO4VRHandDetector(Component):
                     if third_colon != -1:
                         # 新格式：HH:MM:SS.ffffff:type_marker:coords
                         send_timestamp = data_str[:third_colon]
-                        remaining = data_str[third_colon + 1:]
+                        remaining = data_str[third_colon + 1 :]
                         # 分割类型标记和坐标数据
                         parts = remaining.split(":", 1)
                         if len(parts) >= 2:
@@ -274,7 +274,7 @@ class PICO4VRHandDetector(Component):
         second_colon = data_str.find(":", first_colon + 1) if first_colon != -1 else -1
         third_colon = data_str.find(":", second_colon + 1) if second_colon != -1 else -1
         if third_colon != -1:
-            marker = data_str[third_colon + 1:].split(":", 1)[0].strip()
+            marker = data_str[third_colon + 1 :].split(":", 1)[0].strip()
             return marker != robots.ABSOLUTE
 
         return True
@@ -431,12 +431,14 @@ class PICO4VRHandDetector(Component):
                 time_str = send_time_parts[0]
                 fractional_part = send_time_parts[1]
                 # 处理毫秒或微秒精度，补齐到6位
-                microseconds = int(fractional_part.ljust(6, '0')[:6])
+                microseconds = int(fractional_part.ljust(6, "0")[:6])
                 h, m, s = map(int, time_str.split(":"))
                 send_seconds_of_day = h * 3600 + m * 60 + s + microseconds / 1e6
 
                 now = datetime.now()
-                receive_seconds_of_day = now.hour * 3600 + now.minute * 60 + now.second + now.microsecond / 1e6
+                receive_seconds_of_day = (
+                    now.hour * 3600 + now.minute * 60 + now.second + now.microsecond / 1e6
+                )
 
                 delay_s = receive_seconds_of_day - send_seconds_of_day
                 # 处理跨天情况
@@ -525,26 +527,37 @@ class PICO4VRHandDetector(Component):
 
                     self._receive_counts[socket_key] += 1
                     current_time = time.time()
-                    if current_time - self._last_receive_freq_log_time[socket_key] >= self._freq_calc_interval:
-                        self._receive_frequencies[socket_key] = self._receive_counts[socket_key] / (current_time - self._last_receive_freq_log_time[socket_key])
+                    if (
+                        current_time - self._last_receive_freq_log_time[socket_key]
+                        >= self._freq_calc_interval
+                    ):
+                        self._receive_frequencies[socket_key] = self._receive_counts[socket_key] / (
+                            current_time - self._last_receive_freq_log_time[socket_key]
+                        )
                         self._receive_counts[socket_key] = 0
                         self._last_receive_freq_log_time[socket_key] = current_time
                         delay_str = f", 平均延迟={delay_ms:.1f}ms" if delay_ms else ""
-                        logger.info(f"[Bot接收] {socket_key} 接收频率: {self._receive_frequencies[socket_key]:.1f} Hz{delay_str}")
+                        logger.info(
+                            f"[Bot接收] {socket_key} 接收频率: {self._receive_frequencies[socket_key]:.1f} Hz{delay_str}"
+                        )
 
                     # 定期打印手腕部数据（每3秒）
-                    if current_time - getattr(self, '_last_wrist_log_time', 0) >= 3.0:
+                    if current_time - getattr(self, "_last_wrist_log_time", 0) >= 3.0:
                         self._last_wrist_log_time = current_time
                         wrist_data = self._parse_wrist_data(keypoint_data)
                         delay_str = f", 延迟={delay_ms:.1f}ms" if delay_ms else ""
-                        logger.info(f"[Bot接收] index={self._frame_index} {socket_key} 手腕数据: {wrist_data}{delay_str}")
+                        logger.info(
+                            f"[Bot接收] index={self._frame_index} {socket_key} 手腕数据: {wrist_data}{delay_str}"
+                        )
                         self._frame_index += 1
 
                     # 定期打印26个坐标系数据（每5秒）
-                    if current_time - getattr(self, '_last_full_joint_log_time', 0) >= 5.0:
+                    if current_time - getattr(self, "_last_full_joint_log_time", 0) >= 5.0:
                         self._last_full_joint_log_time = current_time
                         full_joint_data = self._parse_full_joint_data(keypoint_data)
-                        logger.info(f"[Bot接收] index={self._frame_index} {socket_key} 26关节数据: {full_joint_data}")
+                        logger.info(
+                            f"[Bot接收] index={self._frame_index} {socket_key} 26关节数据: {full_joint_data}"
+                        )
                         self._frame_index += 1
 
                     # 定期打印接收到的位姿信息
@@ -587,7 +600,7 @@ class PICO4VRHandDetector(Component):
                     topic=robots.PAUSE,
                     data=SessionCommand(
                         timestamp_s=time.time(),
-                        command="resume" if pause_data == b"Low" else "pause",
+                        command=robots.RESUME if pause_data == b"High" else robots.PAUSE,
                     ),
                 )
 

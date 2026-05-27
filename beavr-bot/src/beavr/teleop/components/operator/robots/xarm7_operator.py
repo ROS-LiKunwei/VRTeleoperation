@@ -250,7 +250,7 @@ class XArmOperator(Operator):
     # ------------------------------
     # Frame / Matrix utilities
     # ------------------------------
-    def _get_hand_frame(self) -> Optional[np.ndarray]:
+    def _get_hand_frame(self, use_cache: bool = True) -> Optional[np.ndarray]:
         """
         从 ZMQ 订阅者获取最新的手部帧数据。
 
@@ -283,15 +283,22 @@ class XArmOperator(Operator):
                 logger.error(f"Error processing InputFrame data: {e}")
                 # 如果处理失败，则进入后续逻辑尝试返回缓存帧
 
-        # 如果没有新数据或处理失败，检查是否存在已缓存的帧，如果有则返回它
-        if self.last_valid_hand_frame is not None:
-            if hasattr(self, '_last_hand_data_time') and (time.time() - self._last_hand_data_time) > 0.15:
+        # 如果没有新数据或处理失败，正常控制时可短暂复用缓存帧；reset时必须等待新帧。
+        if use_cache and self.last_valid_hand_frame is not None:
+            if hasattr(self, "_last_hand_data_time") and (time.time() - self._last_hand_data_time) > 0.15:
                 logger.debug(f"{self.operator_name}: 手部数据超时(>{0.15:.2f}s),手臂保持原位")
                 return None
             return self.last_valid_hand_frame
 
         # 如果既没有新数据也没有缓存帧，返回 None
         return None
+
+    def _clear_hand_tracking_cache(self) -> None:
+        """Clear hand-frame state so the next resume/reset cannot use stale VR data."""
+        self.last_valid_hand_frame = None
+        self._last_hand_data_time = 0.0
+        self.hand_moving_h = None
+        self.comp_filter = None
 
     def _warn_invalid_hand_frame(self, reason: str) -> None:
         current_time = time.time()
@@ -403,7 +410,7 @@ class XArmOperator(Operator):
 
     def project_to_rotation_matrix(self, r_mat: np.ndarray) -> np.ndarray:
         """
-        使用奇异值分解(SVD)将一个近似旋转的3x3矩阵调整为一个有效的SO(3)旋转矩阵,确保行列式为+1(去除反射) 
+        使用奇异值分解(SVD)将一个近似旋转的3x3矩阵调整为一个有效的SO(3)旋转矩阵,确保行列式为+1(去除反射)
         作用：矩阵纠偏,保证了无论计算如何波动，发给机器人的始终是一个物理上可实现的、平滑的旋转状态。
             在遥操作过程中，旋转矩阵经过多次乘法运算、缩放或网络传输，会因为浮点数精度误差逐渐失去其正交特性（不再是标准旋转矩阵）。
         如果直接将带误差的矩阵发给机器人，可能会导致：
@@ -421,7 +428,9 @@ class XArmOperator(Operator):
             return np.eye(3)
         try:
             u, _, vt = np.linalg.svd(r_mat)  # 执行SVD分解,将矩阵分解为两个正交阵 U 和 V^T
-            r_fixed = u @ vt  # 重建旋转矩阵,通过将中间的奇异值矩阵 \Sigma 强制设为单位矩阵 I，重新构建出一个完美的正交矩阵。
+            r_fixed = (
+                u @ vt
+            )  # 重建旋转矩阵,通过将中间的奇异值矩阵 \Sigma 强制设为单位矩阵 I，重新构建出一个完美的正交矩阵。
 
             # 正交矩阵的行列式可能是 +1（旋转）或 -1（镜像/反射），确保行列式为 +1（旋转）
             if np.linalg.det(r_fixed) < 0:
@@ -527,7 +536,9 @@ class XArmOperator(Operator):
                 )
                 self.robot_init_h[3, :] = [0, 0, 0, 1]  # 重置底部行
             # Ensure rotation part is valid SO(3)
-            self.robot_init_h[:3, :3] = self.project_to_rotation_matrix(self.robot_init_h[:3, :3])  # 确保旋转矩阵有效
+            self.robot_init_h[:3, :3] = self.project_to_rotation_matrix(
+                self.robot_init_h[:3, :3]
+            )  # 确保旋转矩阵有效
 
         except Exception:
             # logger.error(f"ERROR ({self.operator_name}): Failed to process received robot frame: {e}")
@@ -538,12 +549,12 @@ class XArmOperator(Operator):
         # 将当前计算出的目标位姿初始化为初始位姿
         self.robot_moving_h = copy(self.robot_init_h)  # 初始化机器人移动姿态为初始姿态
         logger.info(f"{self.operator_name} Robot init H:\n{self.robot_init_h}")
-        
+
         # 4. 获取手部的初始位姿
         first_hand_frame = None
         while first_hand_frame is None:
             # 阻塞等待直到获取到有效的 VR 手部追踪数据
-            first_hand_frame = self._get_hand_frame()  # 等待有效手部帧
+            first_hand_frame = self._get_hand_frame(use_cache=False)  # 等待有效新手部帧
             time.sleep(0.01)
 
         try:
@@ -554,7 +565,7 @@ class XArmOperator(Operator):
             logger.error(f"ERROR ({self.operator_name}): Failed to convert initial hand frame to matrix: {e}")
             self.is_first_frame = True  # Stay in reset state
             return None
-        
+
         # 5. 完成重置
         self.is_first_frame = False  # Reset successful
         self.comp_filter = None  # Reset filter, will be initialized on first _apply call
@@ -579,9 +590,9 @@ class XArmOperator(Operator):
         # 如果数组为空或只有一个元素，无需进行连续性检查
         if quats is None or len(quats) <= 1:
             return quats
-        
+
         # 初始化修正后的列表，将第一个四元数作为初始参考基准
-        fixed = [quats[0]]  
+        fixed = [quats[0]]
         for q in quats[1:]:
             # 1. 计算当前四元数 q 与上一个已修正四元数 (fixed[-1]) 的点积 (Dot Product)
             # 点积的大小反映了两个四元数在四维球体空间中的“距离”或夹角
@@ -614,6 +625,12 @@ class XArmOperator(Operator):
         )  # 检查是否需要重置
 
         # 在检查完状态跳变后，更新当前状态变量
+        if new_arm_teleop_state == robots.ARM_TELEOP_STOP:
+            self._clear_hand_tracking_cache()
+
+        if needs_reset:
+            self._clear_hand_tracking_cache()
+
         self.arm_teleop_state = new_arm_teleop_state  # 更新遥操作状态
 
         # 决定当前周期是否需要对外发布机器人指令（只有在 CONT 状态下才发布）
@@ -669,19 +686,13 @@ class XArmOperator(Operator):
             r_vr_to_robot = np.linalg.inv(r_robot_to_vr)
 
             relative_affine_in_robot_frame = np.eye(4)
-            relative_affine_in_robot_frame[:3, :3] = (
-                r_vr_to_robot @ h_ht_hi[:3, :3] @ r_robot_to_vr
-            )
+            relative_affine_in_robot_frame[:3, :3] = r_vr_to_robot @ h_ht_hi[:3, :3] @ r_robot_to_vr
             relative_affine_in_robot_frame[:3, 3] = (
-                r_vr_to_robot
-                @ (self.hand_moving_h[:3, 3] - self.hand_init_h[:3, 3])
-                * self.resolution_scale
+                r_vr_to_robot @ (self.hand_moving_h[:3, 3] - self.hand_init_h[:3, 3]) * self.resolution_scale
             )
 
         except np.linalg.LinAlgError:
-            logger.error(
-                f"Error ({self.operator_name}): Could not invert H_R_V or initial hand pose matrix."
-            )
+            logger.error(f"Error ({self.operator_name}): Could not invert H_R_V or initial hand pose matrix.")
             return
 
         # 修正计算出的旋转矩阵，确保其正交合法（防止由于连续乘法导致的数值漂移）
@@ -702,7 +713,7 @@ class XArmOperator(Operator):
         self.robot_moving_h = copy(h_rt_rh)  # 缓存当前计算结果
 
         # 8. 格式转换：将 4x4 齐次矩阵转换为 [x, y, z, qx, qy, qz, qw] 7维笛卡尔坐标格式
-        cart_target_raw = self._homo2cart(self.robot_moving_h) 
+        cart_target_raw = self._homo2cart(self.robot_moving_h)
 
         # 9. 应用滤波器（平滑抖动）
         if self.use_filter:
@@ -712,7 +723,7 @@ class XArmOperator(Operator):
                 self.comp_filter = CompStateFilter(
                     init_state=cart_target_raw,
                     pos_ratio=0.7,  # 位置平滑系数
-                    ori_ratio=0.85, # 姿态平滑系数
+                    ori_ratio=0.85,  # 姿态平滑系数
                     adaptive=True,
                 )
                 cart_target_filtered = cart_target_raw  # 第一帧直接使用原始值
@@ -798,18 +809,18 @@ class XArmOperator(Operator):
             The averaged action.
         """
         # 1. 入队：将最新的一帧数据放到队列的末尾
-        queue.append(action) 
-        
+        queue.append(action)
+
         # 2. 维护窗口大小：如果当前保存的历史数据量超过了设定的上限 (limit)
         if len(queue) > limit:
-            queue.pop(0)  
-            
+            queue.pop(0)
+
         # 3. 安全检查：在计算均值前确保队列不为空（极少数异常情况下触发）
         if not queue:
             return action  # 如果为空，直接返回当前数据（不做处理）
-        
+
         # 4. 计算均值：沿着 axis=0（列方向）对队列中的所有历史向量求算术平均值
-        return np.mean(queue, axis=0)  
+        return np.mean(queue, axis=0)
 
     def run(self):
         # TODO: Call this method stream to align with rest of the codebase
@@ -847,4 +858,4 @@ class XArmOperator(Operator):
         # 3. 全局 ZMQ 资源清理
         # ZMQ (ZeroMQ) 如果不手动清理其上下文 (Context) 和套接字 (Sockets)，
         # 很容易导致内存泄漏或端口被死锁占用（报 "Address already in use" 错误）。
-        cleanup_zmq_resources()  
+        cleanup_zmq_resources()

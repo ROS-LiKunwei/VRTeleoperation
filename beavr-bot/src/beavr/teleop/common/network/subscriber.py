@@ -225,6 +225,7 @@ class ZMQSubscriber(BaseSubscriber[T], Generic[T]):
             serializer=serializer,
         )
         self._last_data: Optional[T] = None
+        self._data_lock = threading.Lock()
         self.start()
 
     def process_message(self, data: T) -> None:
@@ -233,7 +234,8 @@ class ZMQSubscriber(BaseSubscriber[T], Generic[T]):
         Args:
             data: The received keypoint data
         """
-        self._last_data = data
+        with self._data_lock:
+            self._last_data = data
 
     def recv_keypoints(self) -> Optional[T]:
         """Get the latest keypoint data.
@@ -241,9 +243,9 @@ class ZMQSubscriber(BaseSubscriber[T], Generic[T]):
         Returns:
             The latest keypoint data if available, None otherwise
         """
-        data = self._last_data
-        if data is not None:
-            pass
+        with self._data_lock:
+            data = self._last_data
+            self._last_data = None
         return data
 
 
