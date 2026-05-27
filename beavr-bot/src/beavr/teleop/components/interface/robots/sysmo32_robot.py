@@ -47,11 +47,31 @@ SYSMO32_TOTAL_JOINTS = 12
 SYSMO32_HOME_JS = np.zeros(SYSMO32_NUM_JOINTS_PER_ARM, dtype=np.float32)
 
 # SYSMO-32双臂初始位姿（笛卡尔空间，毫米+轴角）
-SYSMO32_BIMANUAL_LEFT_HOME = [206, 186, 475, 3.142, 0, 0]
-SYSMO32_BIMANUAL_RIGHT_HOME = [206, -186, 475, 3.142, 0, 0]
+SYSMO32_BIMANUAL_LEFT_HOME = [278.7504, 445.4513, 99.2101, 0.2427, 0.7903, -1.3631]
+SYSMO32_BIMANUAL_RIGHT_HOME = [278.7504, -445.4513, 99.2101, -0.2427, 0.7903, 1.3631]
 
 # SYSMO-32缩放因子（毫米→米）
 SYSMO32_SCALE_FACTOR = 1000
+
+
+def _axis_angle_to_matrix(axis_angle):
+    rotvec = np.asarray(axis_angle, dtype=np.float64)
+    angle = np.linalg.norm(rotvec)
+    if angle < 1e-9:
+        return np.eye(3)
+
+    x, y, z = rotvec / angle
+    c = np.cos(angle)
+    s = np.sin(angle)
+    one_minus_c = 1.0 - c
+    return np.array(
+        [
+            [c + x * x * one_minus_c, x * y * one_minus_c - z * s, x * z * one_minus_c + y * s],
+            [y * x * one_minus_c + z * s, c + y * y * one_minus_c, y * z * one_minus_c - x * s],
+            [z * x * one_minus_c - y * s, z * y * one_minus_c + x * s, c + z * z * one_minus_c],
+        ],
+        dtype=np.float64,
+    )
 
 
 class MockSysmo32Control:
@@ -101,7 +121,7 @@ class MockSysmo32Control:
         }
 
     def get_arm_pose(self):
-        rotation = np.eye(3)
+        rotation = _axis_angle_to_matrix(self._cartesian_position[3:6])
         translation = np.array(self._cartesian_position[:3]) / SYSMO32_SCALE_FACTOR
         return np.block([[rotation, translation[:, np.newaxis]], [0, 0, 0, 1]])
 
