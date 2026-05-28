@@ -23,6 +23,3 @@ dist/
 __pycache__/
 *.pyc
 
-# Local network configuration
-beavr-bot/src/beavr/teleop/configs/constants/network.py
-BeaVR-app/BeaVR-Unity/Assets/Resources/Configurations/Network.json
