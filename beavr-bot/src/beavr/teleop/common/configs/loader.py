@@ -78,6 +78,7 @@ class CompositeRobotConfig:
     operators: List[Any] = field(default_factory=list, init=False)
     robots: List[Any] = field(default_factory=list, init=False)
     environment: List[Any] = field(default_factory=list, init=False)
+    camera_streamers: List[Any] = field(default_factory=list, init=False)
     recorded_data: List[Any] = field(default_factory=list, init=False)
 
     def __post_init__(self):
@@ -127,6 +128,10 @@ class CompositeRobotConfig:
             if hasattr(config, "environment"):
                 environment = config.environment or []
                 self.environment.extend(environment)
+
+            if hasattr(config, "camera_streamers"):
+                camera_streamers = config.camera_streamers or []
+                self.camera_streamers.extend(camera_streamers)
 
             # Merge recorded_data configs
             if hasattr(config, "recorded_data"):
@@ -212,6 +217,13 @@ class CompositeRobotConfig:
             else:
                 built_environment.append(env_config)
 
+        built_camera_streamers = []
+        for camera_config in self.camera_streamers:
+            if hasattr(camera_config, "build"):
+                built_camera_streamers.append(camera_config.build())
+            else:
+                built_camera_streamers.append(camera_config)
+
         logger.info(
             f"  🏗️  Built {len(built_detectors)} detectors, {len(built_transforms)} transforms, "
             f"{len(built_visualizers)} visualizers, {len(built_operators)} operators, "
@@ -226,6 +238,7 @@ class CompositeRobotConfig:
             "operators": built_operators,
             "robots": built_robots,
             "environment": built_environment,
+            "camera_streamers": built_camera_streamers,
             "recorded_data": self.recorded_data,
         }
 

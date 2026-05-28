@@ -61,6 +61,7 @@ class TeleOperator(ProcessInstantiator):
         self._init_keypoint_transform()
         # 启动可视化（包含可选的 XELA 可视化）
         self._init_visualizers()
+        self._init_camera_streamers()
 
         # 启用机器人接口时，启动机器人相关进程（连接/控制/状态等）
         if self.teleop_config.flags.robot_interface:
@@ -117,6 +118,11 @@ class TeleOperator(ProcessInstantiator):
             xela_visualizers = getattr(self.robot_config, "xela_visualizers", [])
             for visualizer_config in xela_visualizers:
                 self.processes.append(Process(target=self._start_component, args=(visualizer_config,)))
+
+    def _init_camera_streamers(self):
+        """Initialize real camera streamers for VR visual feedback."""
+        for camera_config in getattr(self.robot_config, "camera_streamers", []):
+            self.processes.append(Process(target=self._start_component, args=(camera_config,)))
 
     def _init_operator(self):
         """初始化 operator 进程（可能有多个操作器组件）。"""

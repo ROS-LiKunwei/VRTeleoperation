@@ -28,7 +28,12 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
+from beavr.lerobot.common.robot_devices.cameras.configs import (
+    IntelRealSenseCameraConfig,
+    OpenCVCameraConfig,
+)
 from beavr.teleop.common.configs.loader import Laterality, log_laterality_configuration
+from beavr.teleop.components.camera.real_camera_streamer import RealCameraStreamer
 from beavr.teleop.components.interface.robots.sysmo32_robot import Sysmo32Robot
 from beavr.teleop.components.operator.robots.sysmo32_operator import Sysmo32Operator
 from beavr.teleop.configs.constants import network, ports, robots
@@ -132,6 +137,54 @@ class Sysmo32OperatorCfg:
         )
 
 
+@dataclass
+class Sysmo32RealCameraStreamerCfg:
+    """Publish a real robot camera feed to the VR app image stream."""
+
+    host: str = network.HOST_ADDRESS
+    port: int = ports.SIM_IMAGE_PORT
+    camera_name: str = "front"
+    camera_type: str = "opencv"
+    camera_index: int | str = 0
+    serial_number: int | None = None
+    realsense_name: str | None = None
+    fps: int = 30
+    width: int = 640
+    height: int = 480
+    rotation: int | None = None
+    color_mode: str = "rgb"
+
+    def build(self):
+        if self.camera_type == "opencv":
+            camera_config = OpenCVCameraConfig(
+                camera_index=self.camera_index,
+                fps=self.fps,
+                width=self.width,
+                height=self.height,
+                rotation=self.rotation,
+                color_mode=self.color_mode,
+            )
+        elif self.camera_type == "intelrealsense":
+            camera_config = IntelRealSenseCameraConfig(
+                name=self.realsense_name,
+                serial_number=self.serial_number,
+                fps=self.fps,
+                width=self.width,
+                height=self.height,
+                rotation=self.rotation,
+                color_mode=self.color_mode,
+            )
+        else:
+            raise ValueError(f"Unsupported camera_type: {self.camera_type}")
+
+        return RealCameraStreamer(
+            camera_config=camera_config,
+            host=self.host,
+            port=self.port,
+            camera_name=self.camera_name,
+        )
+
+
 ROBOT_NAME_SYSMO32 = "sysmo32"
 
 
@@ -154,6 +207,7 @@ class Sysmo32Config:
     robots: list = field(default_factory=list)
     operators: list = field(default_factory=list)
     environment: list = field(default_factory=list)
+    camera_streamers: list = field(default_factory=list)
 
     def __post_init__(self):
         log_laterality_configuration(self.laterality, ROBOT_NAME_SYSMO32)
@@ -202,6 +256,21 @@ class Sysmo32Config:
                     moving_average_limit=3,
                 )
             )
+
+        # Real camera stream for VR visual feedback.
+        # Unity subscribes to tcp://<bot_pc_ip>:10005 and displays this feed in the headset.
+        self.camera_streamers = [
+            Sysmo32RealCameraStreamerCfg(
+                host=network.HOST_ADDRESS,
+                port=ports.SIM_IMAGE_PORT,
+                camera_name="front",
+                camera_type="opencv",
+                camera_index=0,
+                fps=30,
+                width=640,
+                height=480,
+            )
+        ]
 
         # Robot配置
         self.robots = []
@@ -330,4 +399,5 @@ class Sysmo32Config:
             "robots": [item.build() for item in self.robots],
             "operators": [item.build() for item in self.operators],
             "environment": [item.build() for item in self.environment],
+            "camera_streamers": [item.build() for item in self.camera_streamers],
         }
