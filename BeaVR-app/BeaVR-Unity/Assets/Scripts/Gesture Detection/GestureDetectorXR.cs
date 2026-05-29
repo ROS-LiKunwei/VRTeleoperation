@@ -67,6 +67,11 @@ public class GestureDetectorXR : MonoBehaviour
 	public GameObject LowResolutionButton;
 	// WristTracker视觉已移除
 	public RawImage StreamBorder;
+	public Outline StreamBorderOutline;
+	public Vector2 StreamBorderOutlineDistance = new Vector2(30f, -30f);
+	private static readonly Color StreamBorderRed = new Color(0.75f, 0.0f, 0.0f, 1.0f);
+	private static readonly Color StreamBorderGreen = new Color(0.0f, 0.55f, 0.0f, 1.0f);
+	private static readonly Color StreamBorderBlue = new Color(0.0f, 0.2f, 0.8f, 1.0f);
 
 	public HighResolutionButtonController HighResolutionButtonController;
 	public LowResolutionButtonController LowResolutionButtonController;
@@ -225,6 +230,34 @@ public class GestureDetectorXR : MonoBehaviour
 		return vectorString;
 	}
 
+	void SetStreamBorder(Color color)
+	{
+		if (StreamBorder != null)
+			StreamBorder.color = color;
+
+		ResolveStreamBorderOutline();
+		if (StreamBorderOutline != null)
+		{
+			StreamBorderOutline.effectColor = color;
+			StreamBorderOutline.effectDistance = StreamBorderOutlineDistance;
+			StreamBorderOutline.useGraphicAlpha = false;
+		}
+	}
+
+	void ResolveStreamBorderOutline()
+	{
+		if (StreamBorderOutline != null)
+			return;
+
+		CameraOneStreamer cameraStreamer = FindFirstObjectByType<CameraOneStreamer>();
+		if (cameraStreamer == null || cameraStreamer.image == null)
+			return;
+
+		StreamBorderOutline = cameraStreamer.image.GetComponent<Outline>();
+		if (StreamBorderOutline == null)
+			StreamBorderOutline = cameraStreamer.image.gameObject.AddComponent<Outline>();
+	}
+
     /// <summary>
     /// 每帧更新手势探测器
     /// </summary>
@@ -239,7 +272,7 @@ public class GestureDetectorXR : MonoBehaviour
 		bool isConnected = NetMQController.Instance.AreSocketsConnected();
 		if (!isConnected)
 		{
-			if (StreamBorder != null) StreamBorder.color = Color.red;
+			SetStreamBorder(StreamBorderRed);
 			string ipAddress = netConfig != null ? netConfig.netConfig.IPAddress : null;
 			bool hasIP = !string.IsNullOrEmpty(ipAddress) && ipAddress != "undefined";
 			if (!hasIP)
@@ -301,7 +334,7 @@ public class GestureDetectorXR : MonoBehaviour
 		yield return new WaitForSeconds(2f);
 
 		bool success = NetMQController.Instance.AreSocketsConnected();
-		if (StreamBorder != null) StreamBorder.color = success ? Color.green : Color.red;
+		SetStreamBorder(success ? StreamBorderGreen : StreamBorderRed);
 		ToggleMenuButton(!success);
 		connectionAttemptInProgress = false;
 	}
@@ -331,7 +364,7 @@ public class GestureDetectorXR : MonoBehaviour
 			// 中指捏合：绝对数据模式
 			StreamRelativeData = false;
 			StreamAbsoluteData = true;
-			if (StreamBorder != null) StreamBorder.color = Color.blue;
+			SetStreamBorder(StreamBorderBlue);
 			ToggleMenuButton(false);
 			ShouldContinueArmTeleop = true;
 		}
@@ -341,7 +374,7 @@ public class GestureDetectorXR : MonoBehaviour
 			// 食指捏合：相对数据模式
 			StreamRelativeData = true;
 			StreamAbsoluteData = false;
-			if (StreamBorder != null) StreamBorder.color = Color.green;
+			SetStreamBorder(StreamBorderGreen);
 			ToggleMenuButton(false);
 			ShouldContinueArmTeleop = true;
 		}
@@ -351,7 +384,7 @@ public class GestureDetectorXR : MonoBehaviour
 			// 无名指捏合：停止遥操作
 			StreamRelativeData = false;
 			StreamAbsoluteData = false;
-			if (StreamBorder != null) StreamBorder.color = Color.red;
+			SetStreamBorder(StreamBorderRed);
 			ToggleMenuButton(true);
 			ShouldContinueArmTeleop = false;
 		}
@@ -565,7 +598,7 @@ public class GestureDetectorXR : MonoBehaviour
 			StreamRelativeData = true;
 			StreamAbsoluteData = false;
 			ShouldContinueArmTeleop = true;
-			if (StreamBorder != null) StreamBorder.color = Color.green;
+			SetStreamBorder(StreamBorderGreen);
 			return;
 		}
 
@@ -575,7 +608,7 @@ public class GestureDetectorXR : MonoBehaviour
 		ShouldContinueArmTeleop = false;
 		ResetLastSentHandFrame("RightHand");
 		ResetLastSentHandFrame("LeftHand");
-		if (StreamBorder != null) StreamBorder.color = Color.red;
+		SetStreamBorder(StreamBorderRed);
 		NetMQController.Instance.SendMessage("Pause", "Low");
 	}
 
@@ -953,13 +986,13 @@ public class GestureDetectorXR : MonoBehaviour
 			{
 				StreamRelativeData = false;
 				StreamAbsoluteData = true;
-				if (StreamBorder != null) StreamBorder.color = Color.blue;
+				SetStreamBorder(StreamBorderBlue);
 			}
 			else
 			{
 				StreamRelativeData = true;
 				StreamAbsoluteData = false;
-				if (StreamBorder != null) StreamBorder.color = Color.green;
+				SetStreamBorder(StreamBorderGreen);
 			}
 			ToggleMenuButton(false);
 			ShouldContinueArmTeleop = true;
@@ -983,7 +1016,7 @@ public class GestureDetectorXR : MonoBehaviour
 			ShouldContinueArmTeleop = false;
 			ResetLastSentHandFrame("RightHand");
 			ResetLastSentHandFrame("LeftHand");
-			if (StreamBorder != null) StreamBorder.color = Color.red;
+			SetStreamBorder(StreamBorderRed);
 			ToggleMenuButton(true);
 			NetMQController.Instance.SendMessage("Pause", "Low");
 		}

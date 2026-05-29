@@ -51,6 +51,7 @@ SYSMO32_LEFT_PORT_OFFSET = 4
 @dataclass
 class Sysmo32RobotCfg:
     """SYSMO-32单臂机器人接口配置"""
+
     host: str = network.HOST_ADDRESS
     robot_ip: str = "127.0.0.1"
     is_right_arm: bool = True
@@ -94,6 +95,7 @@ class Sysmo32RobotCfg:
 @dataclass
 class Sysmo32OperatorCfg:
     """SYSMO-32单臂Operator配置"""
+
     host: str = network.HOST_ADDRESS
     transformed_keypoints_port: int = ports.KEYPOINT_TRANSFORM_PORT
     stream_configs: dict[str, Any] = field(
@@ -198,6 +200,7 @@ class Sysmo32Config:
     使用@TeleopRobotConfig.register_subclass装饰器注册，
     可通过 --robot_name=sysmo32 参数启动。
     """
+
     robot_name: str = ROBOT_NAME_SYSMO32
     laterality: Laterality = Laterality.BIMANUAL
 
@@ -265,7 +268,7 @@ class Sysmo32Config:
                 port=ports.SIM_IMAGE_PORT,
                 camera_name="front",
                 camera_type="opencv",
-                camera_index=0,
+                camera_index=6,
                 fps=30,
                 width=640,
                 height=480,
@@ -378,7 +381,7 @@ class Sysmo32Config:
                 )
             )
 
-        # Environment配置（MuJoCo仿真）
+        # # Environment配置（MuJoCo仿真）
         self.environment = [
             MuJoCoSimConfig(
                 host=network.HOST_ADDRESS,

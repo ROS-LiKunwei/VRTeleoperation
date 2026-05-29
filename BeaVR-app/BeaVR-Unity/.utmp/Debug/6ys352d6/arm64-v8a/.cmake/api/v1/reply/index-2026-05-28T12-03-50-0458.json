@@ -1,19 +1,19 @@
 {
-	"cmake" : 
+	"cmake" :
 	{
-		"generator" : 
+		"generator" :
 		{
 			"multiConfig" : false,
 			"name" : "Ninja"
 		},
-		"paths" : 
+		"paths" :
 		{
 			"cmake" : "/home/whx/Unity/Hub/Editor/6000.2.2f1/Editor/Data/PlaybackEngines/AndroidPlayer/SDK/cmake/3.22.1/bin/cmake",
 			"cpack" : "/home/whx/Unity/Hub/Editor/6000.2.2f1/Editor/Data/PlaybackEngines/AndroidPlayer/SDK/cmake/3.22.1/bin/cpack",
 			"ctest" : "/home/whx/Unity/Hub/Editor/6000.2.2f1/Editor/Data/PlaybackEngines/AndroidPlayer/SDK/cmake/3.22.1/bin/ctest",
 			"root" : "/home/whx/Unity/Hub/Editor/6000.2.2f1/Editor/Data/PlaybackEngines/AndroidPlayer/SDK/cmake/3.22.1/share/cmake-3.22"
 		},
-		"version" : 
+		"version" :
 		{
 			"isDirty" : false,
 			"major" : 3,
@@ -23,65 +23,65 @@
 			"suffix" : "g37088a8"
 		}
 	},
-	"objects" : 
+	"objects" :
 	[
 		{
 			"jsonFile" : "codemodel-v2-cb9084ac5e1fd278bda3.json",
 			"kind" : "codemodel",
-			"version" : 
+			"version" :
 			{
 				"major" : 2,
 				"minor" : 3
 			}
 		},
 		{
-			"jsonFile" : "cache-v2-df73e0c6ea055e0b852e.json",
+			"jsonFile" : "cache-v2-018f6e15824eb3044951.json",
 			"kind" : "cache",
-			"version" : 
+			"version" :
 			{
 				"major" : 2,
 				"minor" : 0
 			}
 		},
 		{
-			"jsonFile" : "cmakeFiles-v1-6b1673807c39bc33576d.json",
+			"jsonFile" : "cmakeFiles-v1-eab22c01b195e05fb281.json",
 			"kind" : "cmakeFiles",
-			"version" : 
+			"version" :
 			{
 				"major" : 1,
 				"minor" : 0
 			}
 		}
 	],
-	"reply" : 
+	"reply" :
 	{
-		"client-agp" : 
+		"client-agp" :
 		{
-			"cache-v2" : 
+			"cache-v2" :
 			{
-				"jsonFile" : "cache-v2-df73e0c6ea055e0b852e.json",
+				"jsonFile" : "cache-v2-018f6e15824eb3044951.json",
 				"kind" : "cache",
-				"version" : 
+				"version" :
 				{
 					"major" : 2,
 					"minor" : 0
 				}
 			},
-			"cmakeFiles-v1" : 
+			"cmakeFiles-v1" :
 			{
-				"jsonFile" : "cmakeFiles-v1-6b1673807c39bc33576d.json",
+				"jsonFile" : "cmakeFiles-v1-eab22c01b195e05fb281.json",
 				"kind" : "cmakeFiles",
-				"version" : 
+				"version" :
 				{
 					"major" : 1,
 					"minor" : 0
 				}
 			},
-			"codemodel-v2" : 
+			"codemodel-v2" :
 			{
 				"jsonFile" : "codemodel-v2-cb9084ac5e1fd278bda3.json",
 				"kind" : "codemodel",
-				"version" : 
+				"version" :
 				{
 					"major" : 2,
 					"minor" : 3

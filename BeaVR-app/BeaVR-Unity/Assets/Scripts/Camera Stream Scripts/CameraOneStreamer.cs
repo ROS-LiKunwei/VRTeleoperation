@@ -16,6 +16,7 @@ public class CameraOneStreamer : MonoBehaviour
     private bool hasNewImage;
 
     public RawImage image;
+    public RawImage statusBackground;
     private Texture2D texture;
 
     [Header("VR Display")]
@@ -24,6 +25,7 @@ public class CameraOneStreamer : MonoBehaviour
     public float viewDistance = 1.6f;
     public Vector2 maxDisplaySizeMeters = new Vector2(1.25f, 0.8f);
     public Vector3 viewOffsetMeters = Vector3.zero;
+    public Vector2 statusBackgroundPaddingPixels = new Vector2(180f, 180f);
 
     //public NetworkConfigs netConf;
     private bool connectionEstablished = false;
@@ -162,6 +164,7 @@ public class CameraOneStreamer : MonoBehaviour
         image.texture = texture;
         image.raycastTarget = false;
 
+        ResolveStatusBackground();
         ConfigureDisplayRect(16f / 9f);
         ResolveViewTransform();
         PlaceDisplayInViewCenter();
@@ -292,6 +295,43 @@ public class CameraOneStreamer : MonoBehaviour
             heightMeters / rectTransform.sizeDelta.y,
             1f
         );
+
+        // ConfigureStatusBackground(rectTransform);
+    }
+
+    private void ResolveStatusBackground()
+    {
+        if (statusBackground != null)
+        {
+            return;
+        }
+
+        Transform parent = image != null ? image.transform.parent : transform;
+        Transform candidate = parent != null ? parent.Find("ControlIndicatorRawImage") : null;
+        if (candidate != null)
+        {
+            statusBackground = candidate.GetComponent<RawImage>();
+        }
+    }
+
+    private void ConfigureStatusBackground(RectTransform cameraRect)
+    {
+        ResolveStatusBackground();
+        if (statusBackground == null)
+        {
+            return;
+        }
+
+        RectTransform backgroundRect = statusBackground.rectTransform;
+        backgroundRect.anchorMin = cameraRect.anchorMin;
+        backgroundRect.anchorMax = cameraRect.anchorMax;
+        backgroundRect.pivot = cameraRect.pivot;
+        backgroundRect.anchoredPosition = cameraRect.anchoredPosition;
+        backgroundRect.localRotation = cameraRect.localRotation;
+        backgroundRect.sizeDelta = cameraRect.sizeDelta + statusBackgroundPaddingPixels;
+        backgroundRect.localScale = cameraRect.localScale;
+        statusBackground.raycastTarget = false;
+        statusBackground.transform.SetAsFirstSibling();
     }
 
     // Add these methods for NetworkManager integration
