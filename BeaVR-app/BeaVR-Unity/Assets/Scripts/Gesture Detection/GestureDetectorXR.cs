@@ -233,7 +233,7 @@ public class GestureDetectorXR : MonoBehaviour
 	void SetStreamBorder(Color color)
 	{
 		if (StreamBorder != null)
-			StreamBorder.color = color;
+			StreamBorder.color = Color.clear;
 
 		ResolveStreamBorderOutline();
 		if (StreamBorderOutline != null)
