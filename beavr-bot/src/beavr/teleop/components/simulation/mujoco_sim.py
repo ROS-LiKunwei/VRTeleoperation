@@ -29,7 +29,7 @@ import re
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 import mujoco
 import mujoco.viewer
@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 
 
 class MicrosecondFormatter(logging.Formatter):
-    def formatTime(self, record, datefmt=None):
+    def formatTime(self, record, datefmt=None):  # noqa: N802
         dt = datetime.fromtimestamp(record.created)
         if datefmt:
             return dt.strftime(datefmt)
@@ -182,6 +182,7 @@ class MuJoCoSysmoSimulator(Component):
         self._ik_approx_max_iter = 120
         self._ik_tolerance = 1e-3
         self._ik_orientation_tolerance = 0.03
+        self._ik_fallback_orientation_weight = 0.25
         self._ik_singularity_condition_threshold = 1e4
         self._ik_joint_step_limit = 0.08
         self._ik_fallback_position_tolerance = 0.03
@@ -196,6 +197,7 @@ class MuJoCoSysmoSimulator(Component):
                 f"approx_max_iter={self._ik_approx_max_iter}, "
                 f"tolerance={self._ik_tolerance}, "
                 f"orientation_tolerance={self._ik_orientation_tolerance}, "
+                f"fallback_orientation_weight={self._ik_fallback_orientation_weight}, "
                 f"reject_position_tolerance={self._ik_reject_position_tolerance}, "
                 f"singularity_condition_threshold={self._ik_singularity_condition_threshold}"
             )
@@ -295,7 +297,7 @@ class MuJoCoSysmoSimulator(Component):
 
     def _insert_site_into_body(self, xml_string, body_name, site_xml):
         pattern = rf'(<body name="{re.escape(body_name)}"[^>]*>)'
-        replacement = rf'\1\n        {site_xml}'
+        replacement = rf"\1\n        {site_xml}"
         updated_xml, count = re.subn(pattern, replacement, xml_string, count=1)
         if count != 1:
             raise ValueError(f"未找到MuJoCo body，无法添加site: {body_name}")
@@ -373,10 +375,7 @@ class MuJoCoSysmoSimulator(Component):
         except Exception:
             self._right_endeff_site_id = None
 
-        logger.info(
-            f"关节ID缓存完成: 左手{len(self._left_joint_ids)}个, "
-            f"右手{len(self._right_joint_ids)}个"
-        )
+        logger.info(f"关节ID缓存完成: 左手{len(self._left_joint_ids)}个, 右手{len(self._right_joint_ids)}个")
 
     def _cache_actuator_ids(self):
         self._joint_actuator_ids = {}
@@ -385,9 +384,7 @@ class MuJoCoSysmoSimulator(Component):
 
         for joint_name in self.LEFT_JOINT_NAMES + self.RIGHT_JOINT_NAMES:
             actuator_name = self._actuator_name_for_joint(joint_name)
-            actuator_id = mujoco.mj_name2id(
-                self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, actuator_name
-            )
+            actuator_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, actuator_name)
             if actuator_id >= 0:
                 self._joint_actuator_ids[joint_name] = actuator_id
             else:
@@ -478,10 +475,7 @@ class MuJoCoSysmoSimulator(Component):
             pos, quat = self._get_endeff_pose(joint_ids, site_id)
             self._initial_endeff_poses[side] = (pos, quat)
             self._ik_logger.info(
-                (
-                    f"MuJoCo初始末端位姿[{side}]: "
-                    f"pos={self._fmt_array(pos)}, quat_wxyz={self._fmt_array(quat)}"
-                )
+                (f"MuJoCo初始末端位姿[{side}]: pos={self._fmt_array(pos)}, quat_wxyz={self._fmt_array(quat)}")
             )
 
     def _get_endeff_pose(self, joint_ids, endeff_site_id):
@@ -543,7 +537,7 @@ class MuJoCoSysmoSimulator(Component):
 
     def _clamp_joint_qpos(self, joint_ids, qpos_addrs):
         hit_limit = False
-        for jid, addr in zip(joint_ids, qpos_addrs):
+        for jid, addr in zip(joint_ids, qpos_addrs, strict=False):
             low = self.model.jnt_range[jid, 0]
             high = self.model.jnt_range[jid, 1]
             before = self.data.qpos[addr]
@@ -664,9 +658,10 @@ class MuJoCoSysmoSimulator(Component):
             current_end_pos = current_pos.copy()
             current_end_quat = current_quat.copy()
 
+            inv_current_quat = np.zeros(4)
             quat_error = np.zeros(4)
-            mujoco.mju_negQuat(quat_error, target_quat)
-            mujoco.mju_mulQuat(quat_error, quat_error, current_quat)
+            mujoco.mju_negQuat(inv_current_quat, current_quat)
+            mujoco.mju_mulQuat(quat_error, target_quat, inv_current_quat)
             axis_angle = np.zeros(3)
             mujoco.mju_quat2Vel(axis_angle, quat_error, 1.0)
             ori_error_norm = np.linalg.norm(axis_angle)
@@ -811,11 +806,11 @@ class MuJoCoSysmoSimulator(Component):
             target_pos,
             target_quat,
             endeff_site_id,
-            orientation_weight=0.0,
+            orientation_weight=self._ik_fallback_orientation_weight,
             max_iter=self._ik_approx_max_iter,
             side=side,
         )
-        self._log_ik_diagnostics(side, "approx_position_only", approx_diag, level=logging.WARNING)
+        self._log_ik_diagnostics(side, "approx_position_priority", approx_diag, level=logging.WARNING)
         self._warn_ik_fallback(side)
 
         if (
@@ -860,7 +855,9 @@ class MuJoCoSysmoSimulator(Component):
 
         try:
             if not self._is_valid_target(target):
-                logger.warning(f"跳过 {target.hand_side} 手无效目标: pos/orientation 包含 NaN/Inf 或四元数退化")
+                logger.warning(
+                    f"跳过 {target.hand_side} 手无效目标: pos/orientation 包含 NaN/Inf 或四元数退化"
+                )
                 return
 
             target_pos, target_quat = self._cartesian_to_mujoco_pos(
@@ -1017,9 +1014,9 @@ class MuJoCoSysmoSimulator(Component):
     def cleanup(self):
         """清理资源。"""
         try:
-            if hasattr(self, '_right_endeff_subscriber'):
+            if hasattr(self, "_right_endeff_subscriber"):
                 self._right_endeff_subscriber.stop()
-            if hasattr(self, '_left_endeff_subscriber'):
+            if hasattr(self, "_left_endeff_subscriber"):
                 self._left_endeff_subscriber.stop()
             cleanup_zmq_resources()
             logger.info("MuJoCo仿真器资源清理完成")

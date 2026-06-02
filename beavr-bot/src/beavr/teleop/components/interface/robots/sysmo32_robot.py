@@ -25,6 +25,7 @@ import time
 
 import numpy as np
 
+from beavr.teleop.common.math.orientation import quat_to_axis_angle
 from beavr.teleop.common.network.handshake import HandshakeCoordinator
 from beavr.teleop.common.network.publisher import ZMQPublisherManager
 from beavr.teleop.common.network.subscriber import ZMQSubscriber
@@ -132,7 +133,11 @@ class MockSysmo32Control:
     def move_arm_cartesian(self, cartesian_pos, duration=3):
         if len(cartesian_pos) == 7:
             pos_m = np.asarray(cartesian_pos[0:3], dtype=np.float32)
+            quat_xyzw = np.asarray(cartesian_pos[3:7], dtype=np.float32)
             self._cartesian_position[:3] = pos_m * SYSMO32_SCALE_FACTOR
+            self._cartesian_position[3:6] = quat_to_axis_angle(quat_xyzw)
+        elif len(cartesian_pos) == 6:
+            self._cartesian_position = np.asarray(cartesian_pos, dtype=np.float32)
         return 0
 
     def arm_control(self, cartesian_pos):
@@ -149,6 +154,7 @@ class MockSysmo32Control:
         class MockRobot:
             def set_mode_and_state(self, mode, state):
                 return True
+
         return MockRobot()
 
 
