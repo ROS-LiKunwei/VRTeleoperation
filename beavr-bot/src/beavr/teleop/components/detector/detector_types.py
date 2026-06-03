@@ -48,6 +48,7 @@ class InputFrame:
     - is_relative: whether keypoints are relative to wrist (1) or absolute (0),
       matching current detector output semantics.
     - frame_vectors: optional 3 orthonormal vectors (x,y,z) in absolute mode.
+    - hand_command: optional dexterous hand command from Unity; 1=open, 2=grasp.
     """
 
     timestamp_s: float
@@ -61,6 +62,7 @@ class InputFrame:
             Tuple[float, float, float],
         ]
     ] = None
+    hand_command: Optional[int] = None
 
 
 __all__ = [

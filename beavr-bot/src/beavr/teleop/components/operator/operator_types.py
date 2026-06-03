@@ -22,6 +22,7 @@ class CartesianTarget:
     - linear_velocity_ff: optional feedforward linear velocity (m/s).
     - angular_velocity_ff: optional feedforward angular velocity (rad/s).
     - stiffness and damping can be scalar or per-axis tuples when supported.
+    - hand_command carries optional dexterous hand command; 1=open, 2=grasp.
     """
 
     timestamp_s: float
@@ -33,6 +34,7 @@ class CartesianTarget:
     angular_velocity_ff: Optional[Tuple[float, float, float]] = None
     stiffness: Optional[Tuple[float, float, float]] = None
     damping: Optional[Tuple[float, float, float]] = None
+    hand_command: Optional[int] = None
 
 
 @dataclass(frozen=True)

@@ -49,7 +49,9 @@ public class NetMQController : MonoBehaviour
     private Dictionary<string, int> _sendCounts = new Dictionary<string, int>();
     private Dictionary<string, float> _lastSendFreqLogTime = new Dictionary<string, float>();
     private Dictionary<string, float> _sendFrequencies = new Dictionary<string, float>();
+    private Dictionary<string, float> _lastSendFailureLogTime = new Dictionary<string, float>();
     private const float NETMQ_FREQ_CALC_INTERVAL = 1.0f;
+    private const float SEND_FAILURE_LOG_INTERVAL = 1.0f;
     private float _lastForwardLogTime = 0f;
     private const float FORWARD_LOG_INTERVAL = 2.0f;
     private float _lastWristLogTime = 0f;
@@ -101,14 +103,15 @@ public class NetMQController : MonoBehaviour
             // 解析JSON
             var configJson = JsonUtility.FromJson<NetworkSettings>(configFile.text);
 
-            // 存储配置值（包括IP地址）
-            ipAddress = configJson.IPAddress;
+            // 存储配置值（包括IP地址）。运行时IP以UI保存的ServerIP为准。
+            string prefsIP = PlayerPrefs.GetString("ServerIP", string.Empty);
+            ipAddress = !string.IsNullOrEmpty(prefsIP) ? prefsIP : configJson.IPAddress;
             rightKeypointPort = configJson.rightkeyptPortNum;
             leftKeypointPort = configJson.leftkeyptPortNum;
             resolutionPort = configJson.resolutionPortNum;
             pausePort = configJson.PausePortNum;
 
-            Debug.Log($"NetMQController: 从JSON加载网络配置 - IP: {ipAddress}");
+            Debug.Log($"NetMQController: 加载网络配置 - IP: {ipAddress}, JSON IP: {configJson.IPAddress}, PlayerPrefs IP: {prefsIP}");
         }
         catch (Exception e)
         {
@@ -218,19 +221,20 @@ public class NetMQController : MonoBehaviour
         {
             Debug.Log("NetMQController: 创建标准套接字...");
 
-            // 优先使用JSON配置中的IP地址，如果没有则使用PlayerPrefs中的IP
-            if (string.IsNullOrEmpty(ipAddress) || ipAddress == "undefined")
+            // 优先使用UI保存的IP，避免Network.json里的旧地址覆盖用户输入。
+            string prefsIP = PlayerPrefs.GetString("ServerIP", string.Empty);
+            if (!string.IsNullOrEmpty(prefsIP) && prefsIP != "undefined")
             {
-                string prefsIP = PlayerPrefs.GetString("ServerIP", string.Empty);
-                if (!string.IsNullOrEmpty(prefsIP))
-                {
-                    ipAddress = prefsIP;
-                    Debug.Log($"NetMQController: 使用PlayerPrefs中的IP地址: {ipAddress}");
-                }
+                ipAddress = prefsIP;
+                Debug.Log($"NetMQController: 使用PlayerPrefs中的IP地址: {ipAddress}");
+            }
+            else if (string.IsNullOrEmpty(ipAddress) || ipAddress == "undefined")
+            {
+                Debug.LogWarning("NetMQController: IP地址未定义。必须手动建立连接。");
             }
             else
             {
-                Debug.Log($"NetMQController: 使用JSON配置中的IP地址: {ipAddress}");
+                Debug.Log($"NetMQController: 使用当前配置中的IP地址: {ipAddress}");
             }
 
             // 检查IP是否不可用，跳过套接字创建
@@ -286,12 +290,14 @@ public class NetMQController : MonoBehaviour
         {
             if (!sockets.ContainsKey(socketName))
             {
+                LogSendFailure(socketName, $"套接字 '{socketName}' 尚未创建");
                 return false;
             }
 
             var socket = sockets[socketName];
             if (socket == null)
             {
+                LogSendFailure(socketName, $"套接字 '{socketName}' 为空");
                 return false;
             }
 
@@ -300,6 +306,7 @@ public class NetMQController : MonoBehaviour
 
             if (!sent)
             {
+                LogSendFailure(socketName, $"发送超时，消息长度={message?.Length ?? 0}");
                 // 如果发送超时，将此套接字标记为可能断开连接
                 socketFailCounts[socketName] = socketFailCounts.GetValueOrDefault(socketName, 0) + 1;
 
@@ -379,6 +386,19 @@ public class NetMQController : MonoBehaviour
             }
             return false;
         }
+    }
+
+    private void LogSendFailure(string socketName, string reason)
+    {
+        float currentTime = Time.time;
+        if (_lastSendFailureLogTime.TryGetValue(socketName, out float lastTime) &&
+            currentTime - lastTime < SEND_FAILURE_LOG_INTERVAL)
+        {
+            return;
+        }
+
+        _lastSendFailureLogTime[socketName] = currentTime;
+        Debug.LogWarning($"NetMQController: 发送失败 [{socketName}] {reason}");
     }
 
     /// <summary>

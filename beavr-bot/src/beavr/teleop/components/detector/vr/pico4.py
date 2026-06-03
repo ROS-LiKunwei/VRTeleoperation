@@ -124,6 +124,7 @@ class PICO4VRHandDetector(Component):
         self._last_wrist_log_time = 0.0
         self._last_full_joint_log_time = 0.0
         self._last_invalid_frame_log_time = {}
+        self._last_no_socket_data_log_time = {}
         self._freq_calc_interval = 1.0  # 1秒计算一次频率
         self._frame_index = 0  # 帧索引，用于匹配三个环节的数据
 
@@ -181,14 +182,16 @@ class PICO4VRHandDetector(Component):
             data: 原始字节数据
 
         Returns:
-            tuple: (values, send_timestamp)
+            tuple: (values, send_timestamp, hand_command)
                    values: 扁平化的坐标值列表，长度应为78（26个关节×3个坐标），解析失败时返回空列表。
                    send_timestamp: 发送时间戳字符串，格式为 "HH:MM:SS.ffffff"，无时间戳时返回None。
+                   hand_command: 灵巧手命令，1=松开，2=抓取；旧格式无此字段时返回None。
         """
         try:
             data_str = data.decode().strip()
             values = []
             send_timestamp = None
+            hand_command = None
 
             # 新格式：时间戳包含冒号，格式为 HH:MM:SS.ffffff:type_marker:coords
             # 需要找到第三个冒号来分割时间戳和类型标记
@@ -221,11 +224,12 @@ class PICO4VRHandDetector(Component):
 
             if not coords_part:
                 logger.warning(f"_process_keypoints: 坐标部分为空: {data_str}")
-                return [], send_timestamp
+                return [], send_timestamp, hand_command
 
             # Unity's SerializeVector3List terminates the payload with ":".
             # Strip that protocol marker before splitting, otherwise the final
             # z value becomes e.g. "0.4563943:" and fails float conversion.
+            coords_part, hand_command = self._split_coords_and_hand_command(coords_part)
             coords_part = coords_part.strip().rstrip(":")
             coords = coords_part.split("|")
             skipped_coords = []
@@ -256,10 +260,26 @@ class PICO4VRHandDetector(Component):
                     f"原始坐标数={len(coords)}, send_timestamp={send_timestamp}"
                 )
 
-            return values, send_timestamp
+            return values, send_timestamp, hand_command
         except Exception as e:
             logger.error(f"_process_keypoints: 处理数据时出错: {e}")
-            return [], None
+            return [], None, None
+
+    def _split_coords_and_hand_command(self, coords_part):
+        """Split optional Unity metadata appended as '<coords>:hand_command=1|2'."""
+        parts = coords_part.strip().split(":")
+        coords = parts[0]
+        hand_command = None
+        for meta in parts[1:]:
+            meta = meta.strip()
+            if not meta:
+                continue
+            if meta.startswith("hand_command="):
+                try:
+                    hand_command = int(meta.split("=", 1)[1])
+                except ValueError:
+                    logger.warning(f"_process_keypoints: hand_command 无法解析: {meta}")
+        return coords, hand_command
 
     def _is_relative_frame(self, data):
         """Return whether the incoming PICO4 frame is marked relative."""
@@ -318,6 +338,25 @@ class PICO4VRHandDetector(Component):
             self._last_invalid_frame_log_time[hand_side] = current_time
             logger.warning(f"PICO4: 跳过 {hand_side} 手无效帧: {reason}")
 
+    def _log_no_socket_data(self, socket_name):
+        current_time = time.time()
+        last_time = self._last_no_socket_data_log_time.get(socket_name, 0.0)
+        if current_time - last_time < 1.0:
+            return
+        self._last_no_socket_data_log_time[socket_name] = current_time
+
+        port = None
+        if socket_name == "RightHand":
+            port = self.hand_ports.get(robots.RIGHT)
+        elif socket_name == "LeftHand":
+            port = self.hand_ports.get(robots.LEFT)
+        elif socket_name == robots.BUTTON:
+            port = self.button_port
+        elif socket_name == robots.PAUSE:
+            port = self.teleop_reset_port
+
+        logger.info(f"PICO4: 暂未收到Unity原始数据 socket={socket_name} host={self.host} port={port}")
+
     def _receive_data(self, socket_name):
         """
         从指定ZMQ套接字接收数据（非阻塞模式）。
@@ -335,6 +374,7 @@ class PICO4VRHandDetector(Component):
             self.last_received[socket_name] = int(time.time())
             return data
         except zmq.Again:
+            self._log_no_socket_data(socket_name)
             return None
 
     def _extract_coords_part(self, data_str):
@@ -490,7 +530,7 @@ class PICO4VRHandDetector(Component):
 
                 if keypoint_data is not None:
                     # 处理并发布此手的关键点（包含时间戳解析）
-                    keypoints, send_timestamp = self._process_keypoints(keypoint_data)
+                    keypoints, send_timestamp, hand_command = self._process_keypoints(keypoint_data)
 
                     # 计算延迟
                     delay_ms = self._calculate_delay(send_timestamp)
@@ -514,6 +554,7 @@ class PICO4VRHandDetector(Component):
                             keypoints=keypoints,
                             is_relative=is_relative,
                             frame_vectors=None,
+                            hand_command=hand_command,
                         ),
                     )
 

@@ -64,6 +64,11 @@ class Sysmo32RobotCfg:
     teleoperation_state_port: int = ports.XARM_TELEOPERATION_STATE_PORT
     hand_side: str = robots.RIGHT
     simulation_mode: bool = True
+    enable_ros2_bridge: bool = False
+    left_hand_topic: str = "/left_topic_to_hand"
+    right_hand_topic: str = "/right_topic_to_hand"
+    arm_command_topic: str = "/sysmo_left_arm_controller/commands"
+    ik_urdf_path: str = "robots/sysmo_description/urdf/sysmo32.urdf"
     recorder_config: dict[str, Any] = field(
         default_factory=lambda: {
             "robot_identifier": "right_sysmo32",
@@ -82,6 +87,11 @@ class Sysmo32RobotCfg:
             robot_ip=self.robot_ip,
             is_right_arm=self.is_right_arm,
             simulation_mode=self.simulation_mode,
+            enable_ros2_bridge=self.enable_ros2_bridge,
+            left_hand_topic=self.left_hand_topic,
+            right_hand_topic=self.right_hand_topic,
+            arm_command_topic=self.arm_command_topic,
+            ik_urdf_path=self.ik_urdf_path,
             endeff_publish_port=self.endeff_publish_port,
             endeff_subscribe_port=self.endeff_subscribe_port,
             joint_subscribe_port=self.joint_subscribe_port,
@@ -386,8 +396,8 @@ class Sysmo32Config:
             MuJoCoSimConfig(
                 host=network.HOST_ADDRESS,
                 urdf_path="robots/sysmo_description/urdf/sysmo32.urdf",
-                right_endeff_subscribe_port=ports.XARM_ENDEFF_SUBSCRIBE_PORT + SYSMO32_RIGHT_PORT_OFFSET,
-                left_endeff_subscribe_port=ports.XARM_ENDEFF_SUBSCRIBE_PORT + SYSMO32_LEFT_PORT_OFFSET,
+                right_endeff_subscribe_port=ports.XARM_ENDEFF_PUBLISH_PORT + SYSMO32_RIGHT_PORT_OFFSET,
+                left_endeff_subscribe_port=ports.XARM_ENDEFF_PUBLISH_PORT + SYSMO32_LEFT_PORT_OFFSET,
                 render=True,
                 simulation_mode=True,
             )

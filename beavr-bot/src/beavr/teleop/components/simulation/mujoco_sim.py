@@ -39,6 +39,8 @@ from beavr.teleop.common.network.subscriber import ZMQSubscriber
 from beavr.teleop.common.network.utils import cleanup_zmq_resources
 from beavr.teleop.common.time.timer import FrequencyTimer
 from beavr.teleop.components import Component
+from beavr.teleop.components.interface.interface_types import Sysmo32JointCommand
+from beavr.teleop.components.interface.robots.sysmo32_robot import SYSMO32_JOINT_COMMAND_TOPIC
 from beavr.teleop.components.operator.operator_types import CartesianTarget
 from beavr.teleop.configs.constants import robots
 
@@ -143,19 +145,19 @@ class MuJoCoSysmoSimulator(Component):
         self.data = None
         self._load_model()
 
-        # 初始化ZMQ订阅者
+        # 初始化ZMQ订阅者: 接收robot层IK后的关节命令
         self._right_endeff_subscriber = ZMQSubscriber(
             host=host,
             port=right_endeff_subscribe_port,
-            topic="endeff_coords",
-            message_type=CartesianTarget,
+            topic=SYSMO32_JOINT_COMMAND_TOPIC,
+            message_type=Sysmo32JointCommand,
         )
 
         self._left_endeff_subscriber = ZMQSubscriber(
             host=host,
             port=left_endeff_subscribe_port,
-            topic="endeff_coords",
-            message_type=CartesianTarget,
+            topic=SYSMO32_JOINT_COMMAND_TOPIC,
+            message_type=Sysmo32JointCommand,
         )
 
         # 计时器
@@ -173,9 +175,13 @@ class MuJoCoSysmoSimulator(Component):
         self._cache_actuator_ids()
         self._configure_position_servos()
 
-        # 目标位姿缓存
-        self._left_target: Optional[CartesianTarget] = None
-        self._right_target: Optional[CartesianTarget] = None
+        # robot层IK后的关节命令缓存
+        self._left_target: Optional[Sysmo32JointCommand] = None
+        self._right_target: Optional[Sysmo32JointCommand] = None
+        self._last_no_joint_command_log_time = {
+            robots.LEFT: 0.0,
+            robots.RIGHT: 0.0,
+        }
 
         # IK参数
         self._ik_full_max_iter = 25
@@ -902,38 +908,75 @@ class MuJoCoSysmoSimulator(Component):
             and np.linalg.norm(quat) > 1e-6
         )
 
+    def _is_valid_joint_command(self, command: Sysmo32JointCommand, expected_side: str) -> bool:
+        if command is None or command.hand_side != expected_side:
+            return False
+        joints = np.asarray(command.arm_joint_positions_rad, dtype=np.float64)
+        return joints.shape == (len(self.RIGHT_JOINT_NAMES),) and np.all(np.isfinite(joints))
+
+    def _apply_joint_command(self, command: Sysmo32JointCommand, joint_ids):
+        if command is None or not joint_ids:
+            return
+
+        joint_angles = np.asarray(command.arm_joint_positions_rad, dtype=np.float64)
+        for i, jid in enumerate(joint_ids):
+            qpos_addr = self.model.jnt_qposadr[jid]
+            low = self.model.jnt_range[jid, 0]
+            high = self.model.jnt_range[jid, 1]
+            clamped = np.clip(joint_angles[i], low, high)
+            joint_name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_JOINT, jid)
+            actuator_id = self._joint_actuator_ids.get(joint_name)
+            if actuator_id is not None:
+                self.data.ctrl[actuator_id] = clamped
+            if self._joint_hold_qpos is not None:
+                self._joint_hold_qpos[qpos_addr] = clamped
+            self.data.qpos[qpos_addr] = clamped
+            self.data.qvel[self.model.jnt_dofadr[jid]] = 0.0
+
     def _receive_targets(self):
         """
-        从ZMQ订阅者接收笛卡尔空间目标命令。
+        从ZMQ订阅者接收robot层IK后的关节目标命令。
 
-        分别接收右手和左手的CartesianTarget命令，
+        分别接收右手和左手的Sysmo32JointCommand命令，
         并缓存到_left_target和_right_target。
         """
         # 接收右手目标
         right_msg = self._right_endeff_subscriber.recv_keypoints()
         if right_msg is not None:
-            if right_msg.hand_side != robots.RIGHT or not self._is_valid_target(right_msg):
-                logger.warning("MuJoCo: 跳过右手无效或错侧目标")
+            if not self._is_valid_joint_command(right_msg, robots.RIGHT):
+                logger.warning("MuJoCo: 跳过右手无效或错侧关节目标")
                 right_msg = None
         if right_msg is not None:
             self._right_target = right_msg
             logger.debug(
-                f"右手目标: pos=({right_msg.position_m[0]:.3f}, "
-                f"{right_msg.position_m[1]:.3f}, {right_msg.position_m[2]:.3f})"
+                f"右手IK关节目标: {np.array2string(np.asarray(right_msg.arm_joint_positions_rad), precision=4)}"
             )
+        elif self._right_target is None:
+            self._log_no_joint_command(robots.RIGHT, self._right_endeff_subscriber._port)
 
         # 接收左手目标
         left_msg = self._left_endeff_subscriber.recv_keypoints()
         if left_msg is not None:
-            if left_msg.hand_side != robots.LEFT or not self._is_valid_target(left_msg):
-                logger.warning("MuJoCo: 跳过左手无效或错侧目标")
+            if not self._is_valid_joint_command(left_msg, robots.LEFT):
+                logger.warning("MuJoCo: 跳过左手无效或错侧关节目标")
                 left_msg = None
         if left_msg is not None:
             self._left_target = left_msg
             logger.debug(
-                f"左手目标: pos=({left_msg.position_m[0]:.3f}, "
-                f"{left_msg.position_m[1]:.3f}, {left_msg.position_m[2]:.3f})"
+                f"左手IK关节目标: {np.array2string(np.asarray(left_msg.arm_joint_positions_rad), precision=4)}"
             )
+        elif self._left_target is None:
+            self._log_no_joint_command(robots.LEFT, self._left_endeff_subscriber._port)
+
+    def _log_no_joint_command(self, hand_side, port):
+        current_time = time.time()
+        if current_time - self._last_no_joint_command_log_time.get(hand_side, 0.0) < 1.0:
+            return
+        self._last_no_joint_command_log_time[hand_side] = current_time
+        logger.info(
+            f"MuJoCo: 暂未收到{hand_side}手robot层IK关节命令，等待 "
+            f"topic={SYSMO32_JOINT_COMMAND_TOPIC}, port={port}"
+        )
 
     def stream(self):
         """
@@ -959,18 +1002,16 @@ class MuJoCoSysmoSimulator(Component):
                     # 接收目标命令
                     self._receive_targets()
 
-                    # 应用右手目标
-                    self._apply_endeff_target(
+                    # 应用右手robot层IK关节目标
+                    self._apply_joint_command(
                         self._right_target,
                         self._right_joint_ids,
-                        self._right_endeff_site_id,
                     )
 
-                    # 应用左手目标
-                    self._apply_endeff_target(
+                    # 应用左手robot层IK关节目标
+                    self._apply_joint_command(
                         self._left_target,
                         self._left_joint_ids,
-                        self._left_endeff_site_id,
                     )
 
                     self._apply_joint_position_holds()
@@ -991,16 +1032,14 @@ class MuJoCoSysmoSimulator(Component):
 
                 self._receive_targets()
 
-                self._apply_endeff_target(
+                self._apply_joint_command(
                     self._right_target,
                     self._right_joint_ids,
-                    self._right_endeff_site_id,
                 )
 
-                self._apply_endeff_target(
+                self._apply_joint_command(
                     self._left_target,
                     self._left_joint_ids,
-                    self._left_endeff_site_id,
                 )
 
                 self._apply_joint_position_holds()
