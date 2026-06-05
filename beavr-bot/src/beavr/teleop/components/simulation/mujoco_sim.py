@@ -973,7 +973,7 @@ class MuJoCoSysmoSimulator(Component):
         if current_time - self._last_no_joint_command_log_time.get(hand_side, 0.0) < 1.0:
             return
         self._last_no_joint_command_log_time[hand_side] = current_time
-        logger.info(
+        logger.debug(
             f"MuJoCo: 暂未收到{hand_side}手robot层IK关节命令，等待 "
             f"topic={SYSMO32_JOINT_COMMAND_TOPIC}, port={port}"
         )

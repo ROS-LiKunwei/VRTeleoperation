@@ -278,7 +278,7 @@ class Sysmo32Config:
                 port=ports.SIM_IMAGE_PORT,
                 camera_name="front",
                 camera_type="opencv",
-                camera_index=6,
+                camera_index=0,
                 fps=30,
                 width=640,
                 height=480,

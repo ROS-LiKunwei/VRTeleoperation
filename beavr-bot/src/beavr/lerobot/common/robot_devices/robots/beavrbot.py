@@ -18,6 +18,7 @@ from beavr.teleop.common.network.handshake import (
 )
 from beavr.teleop.common.network.publisher import ZMQPublisherManager
 from beavr.teleop.common.network.subscriber import ZMQSubscriber
+from beavr.teleop.components.detector.detector_types import SessionCommand
 from beavr.teleop.configs.constants import robots
 
 
@@ -372,15 +373,17 @@ class BeavrBot(Robot):
             # If we reach here we did not manage to append any data for this robot.
             missing_robots.append(name)
 
-            if config["robot_type"] == "arm":
-                combined_state.extend(np.array(robots.ROBOT_HOME_JS, dtype=np.float32))
-            elif config["robot_type"] == "hand":
-                combined_state.extend(np.array(robots.LEAP_HOME_JS, dtype=np.float32))
+            if config["robot_type"] == "hand":
+                fallback_state = np.array(robots.LEAP_HOME_JS, dtype=np.float32)
+                if fallback_state.size != config["joint_count"]:
+                    fallback_state = np.zeros(config["joint_count"], dtype=np.float32)
+            else:
+                fallback_state = np.zeros(config["joint_count"], dtype=np.float32)
+            combined_state.extend(fallback_state)
 
         # Attach error flags if any
         if missing_robots:
-            observation["error.missing_states"] = missing_robots
-            logging.warning(f"Missing states for robots: {missing_robots}")
+            logging.debug(f"Missing states for robots: {missing_robots}")
 
         # Convert to torch tensor and store
         if combined_state:
@@ -414,20 +417,21 @@ class BeavrBot(Robot):
         for config in self._sorted_configs:
             name = config["name"]
             command_cache = self.robot_command_caches.get(name)
+            expected_action_dim = 7 if config["robot_type"] == "arm" else config["joint_count"]
 
             if command_cache is not None:
+                if command_cache.size != expected_action_dim:
+                    logging.warning(
+                        "Action dim mismatch for robot '%s': expected %s values but got %s.",
+                        name,
+                        expected_action_dim,
+                        command_cache.size,
+                    )
+                    return observation_frame, None
                 combined_action.extend(command_cache)
             else:
-                # If no command cache, use current state as action
-                robot_data = self.robot_state_caches.get(name)
-                if robot_data is not None:
-                    joint_data = self._get_nested_value(robot_data, config["joint_state_path"])
-                    if joint_data is not None:
-                        if not isinstance(joint_data, np.ndarray):
-                            joint_data = np.array(joint_data, dtype=np.float32)
-                        if joint_data.ndim == 0:
-                            joint_data = joint_data.reshape(1)
-                        combined_action.extend(joint_data)
+                logging.debug("No command cache available for robot '%s'; skipping frame.", name)
+                return observation_frame, None
 
         action_dict = {"action": np.asarray(combined_action, dtype=np.float32)} if combined_action else None
 
@@ -445,7 +449,7 @@ class BeavrBot(Robot):
             host=self.op_state_publish_info["host"],
             port=self.op_state_publish_info["port"],
             topic=self.op_state_publish_info["topic"],
-            data=robots.ARM_TELEOP_STOP,
+            data=SessionCommand(timestamp_s=time.time(), command="pause"),
             subscriber_ids=registered_subscribers,
             handshake_timeout=3.0,
             require_all_acks=False,  # Allow partial success for robustness
@@ -474,7 +478,7 @@ class BeavrBot(Robot):
             host=self.op_state_publish_info["host"],
             port=self.op_state_publish_info["port"],
             topic=self.op_state_publish_info["topic"],
-            data=robots.ARM_TELEOP_CONT,
+            data=SessionCommand(timestamp_s=time.time(), command="resume"),
             subscriber_ids=registered_subscribers,
             handshake_timeout=3.0,
             require_all_acks=False,  # Allow partial success for robustness

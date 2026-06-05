@@ -145,7 +145,7 @@ class Sysmo32RosBridge:
 
         msg = self._hand_msg_type()
         msg.data = command
-        logger.info(
+        logger.debug(
             f"[真实机器人发送前] ROS2 hand msg topic={self._hand_topic}, type=std_msgs/Int32, data={msg.data}"
         )
         self._hand_publisher.publish(msg)
@@ -172,7 +172,7 @@ class Sysmo32RosBridge:
         )
         msg = self._arm_msg_type()
         msg.data = full_command
-        logger.info(
+        logger.debug(
             f"[真实机器人发送前] ROS2 arm msg topic={self._arm_command_topic}, "
             f"type=std_msgs/Float64MultiArray, data={msg.data}"
         )
@@ -599,7 +599,6 @@ class Sysmo32Robot(RobotWrapper):
             host=host,
             port=home_subscribe_port,
             topic="home",
-            message_type=SessionCommand,
         )
 
         self._arm_teleop_state_subscriber = Ops(
@@ -648,7 +647,7 @@ class Sysmo32Robot(RobotWrapper):
         self._handshake_coordinator.start_server(
             subscriber_id=self._handshake_server_id,
             bind_host="*",
-            port=robots.TELEOP_HANDSHAKE_PORT + (3 if self._is_right_arm else 4),
+            port=robots.TELEOP_HANDSHAKE_PORT + (103 if self._is_right_arm else 104),
         )
         logger.info(f"Handshake server started for {self.name}")
 
@@ -948,7 +947,7 @@ class Sysmo32Robot(RobotWrapper):
         if current_time - self._last_no_cartesian_cmd_log_time < 1.0:
             return
         self._last_no_cartesian_cmd_log_time = current_time
-        logger.info(
+        logger.debug(
             f"{self.name}: 暂未收到operator 7维位姿命令，等待 topic=endeff_coords, "
             f"port={self._cartesian_coords_subscriber._port}"
         )
@@ -969,7 +968,7 @@ class Sysmo32Robot(RobotWrapper):
 
         self._last_real_robot_command_log_time = current_time
         joints = np.array2string(np.asarray(joint_angles, dtype=np.float32), precision=5, separator=", ")
-        logger.info(
+        logger.debug(
             f"[真实机器人发送前] {self.name} IK joint command "
             f"arm_joint_positions_rad={joints}, full_command={list(command.full_command)}, "
             f"hand_command={command.hand_command}, timestamp_s={command.timestamp_s:.6f}"

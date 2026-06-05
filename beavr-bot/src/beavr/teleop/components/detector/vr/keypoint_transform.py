@@ -200,7 +200,7 @@ class TransformHandPositionCoords(Component):
         current_time = time.time()
         if current_time - self._last_no_raw_input_log_time >= 1.0:
             self._last_no_raw_input_log_time = current_time
-            logger.info(
+            logger.debug(
                 f"{self.hand_side}_hand_keypoint_transform: 暂未收到PICO/Unity原始手部数据, "
                 f"订阅 topic={self.hand_side} port={self.keypoint_sub_port}"
             )
@@ -209,7 +209,7 @@ class TransformHandPositionCoords(Component):
         current_time = time.time()
         if current_time - self._last_receive_raw_input_log_time >= 1.0:
             self._last_receive_raw_input_log_time = current_time
-            logger.info(
+            logger.debug(
                 f"{self.hand_side}_hand_keypoint_transform: 已收到PICO/Unity原始手部数据 "
                 f"topic={self.hand_side} port={self.keypoint_sub_port} "
                 f"frame_hand={input_frame.hand_side} wrist={reshaped_keypoints[0].tolist()} "
@@ -221,7 +221,7 @@ class TransformHandPositionCoords(Component):
         if current_time - self._last_publish_frame_log_time >= 1.0:
             self._last_publish_frame_log_time = current_time
             origin = np.asarray(coordinate_frame[0], dtype=np.float64).tolist()
-            logger.info(
+            logger.debug(
                 f"{self.hand_side}_hand_keypoint_transform: 已发布变换后手部方向帧 "
                 f"topic={self.frame_topic} port={self.keypoint_transform_pub_port} "
                 f"origin={origin} hand_command={hand_command}"

@@ -814,3 +814,67 @@ class LeapOnlyAdapterConfig(BeavrBotConfig):
                 "teleop_port": ports.XARM_TELEOPERATION_STATE_PORT,
             }
         ]
+
+
+@RobotConfig.register_subclass("sysmo32_adapter")
+@dataclass
+class Sysmo32AdapterConfig(BeavrBotConfig):
+    """SYSMO-32 bimanual adapter for LeRobot recording and policy control.
+
+    The adapter only subscribes to the state topics already published by the
+    teleop robot interfaces. It does not sit in the command path while recording.
+    """
+
+    cameras: dict[str, CameraConfig] = field(
+        default_factory=lambda: {
+            "front": OpenCVCameraConfig(
+                camera_index=0,
+                fps=30,
+                width=640,
+                height=480,
+            ),
+        }
+    )
+    robot_type: str = "sysmo32"
+
+    def __post_init__(self):
+        self.robot_configs = [
+            {
+                "name": "sysmo32_right",
+                "host": network.HOST_ADDRESS,
+                "state_port": ports.XARM_STATE_PUBLISH_PORT + 2,
+                "state_topic": "sysmo32_right",
+                "robot_type": "arm",
+                "observation_key": "right_arm_state",
+                "action_key": "right_arm_action",
+                "joint_count": 6,
+                "joint_state_path": ["joint_states", "joint_position"],
+                "command_state_path": [
+                    "commanded_cartesian_state",
+                    "commanded_cartesian_position",
+                ],
+                "endeff_publish_port": ports.XARM_ENDEFF_SUBSCRIBE_PORT + 2,
+                "command_topic": "endeff_coords",
+                "home_subscribe_port": ports.XARM_HOME_SUBSCRIBE_PORT,
+                "teleop_port": ports.XARM_TELEOPERATION_STATE_PORT,
+            },
+            {
+                "name": "sysmo32_left",
+                "host": network.HOST_ADDRESS,
+                "state_port": ports.XARM_STATE_PUBLISH_PORT + 4,
+                "state_topic": "sysmo32_left",
+                "robot_type": "arm",
+                "observation_key": "left_arm_state",
+                "action_key": "left_arm_action",
+                "joint_count": 6,
+                "joint_state_path": ["joint_states", "joint_position"],
+                "command_state_path": [
+                    "commanded_cartesian_state",
+                    "commanded_cartesian_position",
+                ],
+                "endeff_publish_port": ports.XARM_ENDEFF_SUBSCRIBE_PORT + 4,
+                "command_topic": "endeff_coords",
+                "home_subscribe_port": ports.XARM_HOME_SUBSCRIBE_PORT,
+                "teleop_port": ports.XARM_TELEOPERATION_STATE_PORT,
+            },
+        ]

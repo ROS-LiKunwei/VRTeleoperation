@@ -355,7 +355,7 @@ class PICO4VRHandDetector(Component):
         elif socket_name == robots.PAUSE:
             port = self.teleop_reset_port
 
-        logger.info(f"PICO4: 暂未收到Unity原始数据 socket={socket_name} host={self.host} port={port}")
+        logger.debug(f"PICO4: 暂未收到Unity原始数据 socket={socket_name} host={self.host} port={port}")
 
     def _receive_data(self, socket_name):
         """
@@ -578,7 +578,7 @@ class PICO4VRHandDetector(Component):
                         self._receive_counts[socket_key] = 0
                         self._last_receive_freq_log_time[socket_key] = current_time
                         delay_str = f", 平均延迟={delay_ms:.1f}ms" if delay_ms else ""
-                        logger.info(
+                        logger.debug(
                             f"[Bot接收] {socket_key} 接收频率: {self._receive_frequencies[socket_key]:.1f} Hz{delay_str}"
                         )
 
@@ -587,7 +587,7 @@ class PICO4VRHandDetector(Component):
                         self._last_wrist_log_time = current_time
                         wrist_data = self._parse_wrist_data(keypoint_data)
                         delay_str = f", 延迟={delay_ms:.1f}ms" if delay_ms else ""
-                        logger.info(
+                        logger.debug(
                             f"[Bot接收] index={self._frame_index} {socket_key} 手腕数据: {wrist_data}{delay_str}"
                         )
                         self._frame_index += 1
@@ -596,7 +596,7 @@ class PICO4VRHandDetector(Component):
                     if current_time - getattr(self, "_last_full_joint_log_time", 0) >= 5.0:
                         self._last_full_joint_log_time = current_time
                         full_joint_data = self._parse_full_joint_data(keypoint_data)
-                        logger.info(
+                        logger.debug(
                             f"[Bot接收] index={self._frame_index} {socket_key} 26关节数据: {full_joint_data}"
                         )
                         self._frame_index += 1
@@ -605,7 +605,7 @@ class PICO4VRHandDetector(Component):
                     if current_time - self._last_receive_time.get(socket_key, 0) >= 3.0:
                         self._last_receive_time[socket_key] = current_time
                         pose_sample = keypoints[:9] if len(keypoints) >= 9 else keypoints
-                        logger.info(f"[Bot接收] {socket_key} 位姿样本: {pose_sample}")
+                        logger.debug(f"[Bot接收] {socket_key} 位姿样本: {pose_sample}")
 
                     delay_str = f", 延迟={delay_ms:.1f}ms" if delay_ms else ""
                     logger.debug(

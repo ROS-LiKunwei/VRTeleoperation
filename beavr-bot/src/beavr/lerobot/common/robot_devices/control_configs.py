@@ -84,7 +84,7 @@ class RecordControlConfig(ControlConfig):
     # Display all cameras on screen
     display_data: bool = False
     # Use vocal synthesis to read events.
-    play_sounds: bool = True
+    play_sounds: bool = False
     # Resume recording on an existing dataset.
     resume: bool = False
 
@@ -109,7 +109,7 @@ class ReplayControlConfig(ControlConfig):
     # Limit the frames per second. By default, uses the dataset fps.
     fps: int | None = None
     # Use vocal synthesis to read events.
-    play_sounds: bool = True
+    play_sounds: bool = False
 
 
 @ControlConfig.register_subclass("remote_robot")
@@ -137,7 +137,9 @@ class TeleopOverrides:
     ``--teleop.robot_name=leap,xarm7  --teleop.operate=false``
     """
 
+    start: bool = True
     robot_name: str | None = None
+    laterality: str | None = None
     operate: bool | None = None
 
 

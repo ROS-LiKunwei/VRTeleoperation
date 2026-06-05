@@ -170,6 +170,7 @@ _teleop_processes: list[multiprocessing.Process] | None = None  # Populated at r
 def start_teleop_process(
     *,
     robot_name: str | None = None,
+    laterality: str | None = None,
     operate: bool | None = None,
     wait_for_exit: bool = False,
 ):
@@ -218,6 +219,15 @@ def start_teleop_process(
         # Ultimate fallback – use new multi-robot syntax
         robot_name = "leap,xarm7"
 
+    if laterality is None:
+        laterality = parser.parse_arg("teleop.laterality")
+
+    if laterality is None:
+        laterality = parser.parse_arg("teleop_laterality")
+
+    if laterality is None:
+        laterality = "right"
+
     # ------------------------------------------------------------------
     # Resolve *operate*
     # ------------------------------------------------------------------
@@ -234,14 +244,15 @@ def start_teleop_process(
         operate = not (has_policy_path or has_policy_type)
 
     logging.info(
-        "Starting teleoperation helper with robot_name='%s', operate=%s",
+        "Starting teleoperation helper with robot_name='%s', laterality='%s', operate=%s",
         robot_name,
+        laterality,
         operate,
     )
 
     # Build the configuration for the selected robot combo using the new structured config.
     # Create MainConfig with robot_name and set operate flag in teleop.flags
-    main_config = MainConfig(robot_name=robot_name)
+    main_config = MainConfig(robot_name=robot_name, laterality=laterality)
     main_config.teleop.flags.operate = operate
 
     logging.info("Instantiating TeleOperator (Draccus version)…")
@@ -421,12 +432,16 @@ def control_robot(cfg: ControlPipelineConfig):
     init_logging()
     logging.info(pformat(asdict(cfg)))
 
-    # Determine whether the teleoperation helper needs to run.
-    start_teleop = isinstance(cfg.control, (TeleoperateControlConfig, RecordControlConfig))
+    # Determine whether the teleoperation helper needs to run. Set
+    # --teleop.start=false when an external teleop.py stack is already running.
+    start_teleop = (
+        isinstance(cfg.control, (TeleoperateControlConfig, RecordControlConfig)) and cfg.teleop.start
+    )
 
     if start_teleop:
         start_teleop_process(
             robot_name=getattr(cfg.teleop, "robot_name", None),
+            laterality=getattr(cfg.teleop, "laterality", None),
             operate=getattr(cfg.teleop, "operate", None),
         )
         logging.info("Waiting 5s for teleoperation system to initialize before robot connection...")

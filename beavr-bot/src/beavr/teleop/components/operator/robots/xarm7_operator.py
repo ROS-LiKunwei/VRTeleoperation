@@ -328,7 +328,7 @@ class XArmOperator(Operator):
         current_time = time.time()
         if current_time - self._last_reset_hand_wait_log_time >= 1.0:
             self._last_reset_hand_wait_log_time = current_time
-            logger.info(
+            logger.debug(
                 f"{self.operator_name}: 等待有效VR手部初始帧, "
                 f"订阅 topic={self._transformed_frame_topic} "
                 f"port={self._port}"
@@ -338,7 +338,7 @@ class XArmOperator(Operator):
         current_time = time.time()
         if current_time - self._last_no_hand_frame_log_time >= 1.0:
             self._last_no_hand_frame_log_time = current_time
-            logger.warning(
+            logger.debug(
                 f"{self.operator_name}: 暂未收到有效VR手部运动帧，跳过本周期, "
                 f"订阅 topic={self._transformed_frame_topic} "
                 f"port={self._port}"
@@ -348,7 +348,7 @@ class XArmOperator(Operator):
         current_time = time.time()
         if current_time - self._last_publish_command_log_time >= 1.0:
             self._last_publish_command_log_time = current_time
-            logger.info(
+            logger.debug(
                 f"{self.operator_name}: 已发布operator 7维位姿命令 "
                 f"topic=endeff_coords port={self._publisher_port} "
                 f"position={cartesian_cmd.position_m} "

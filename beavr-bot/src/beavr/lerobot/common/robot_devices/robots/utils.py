@@ -26,6 +26,7 @@ from beavr.lerobot.common.robot_devices.robots.configs import (
     So100RobotConfig,
     So101RobotConfig,
     StretchRobotConfig,
+    Sysmo32AdapterConfig,
 )
 
 
@@ -73,6 +74,8 @@ def make_robot_config(robot_type: str, **kwargs) -> RobotConfig:
         return LeKiwiRobotConfig(**kwargs)
     elif robot_type == "multi_robot_adapter":
         return BeavrBotConfig(**kwargs)
+    elif robot_type == "sysmo32_adapter":
+        return Sysmo32AdapterConfig(**kwargs)
     else:
         raise ValueError(f"Robot type '{robot_type}' is not available.")
 
