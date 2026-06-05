@@ -14,7 +14,6 @@ from beavr.teleop.components.detector.vr.keypoint_transform import (
 )
 from beavr.teleop.components.detector.vr.oculus import OculusVRHandDetector
 from beavr.teleop.components.detector.vr.pico4 import PICO4VRHandDetector
-from beavr.teleop.components.visualizer.visualizer_2d import Hand2DVisualizer
 from beavr.teleop.configs.constants import network, ports, robots
 
 logger = logging.getLogger(__name__)
@@ -320,6 +319,8 @@ class Hand2DVisualizerCfg:
                 raise ValueError(f"{port_name} out of valid range: {port_value}")
 
     def build(self):
+        from beavr.teleop.components.visualizer.visualizer_2d import Hand2DVisualizer
+
         return Hand2DVisualizer(
             host=self.host,
             transformed_keypoint_port=self.transformed_keypoint_port,

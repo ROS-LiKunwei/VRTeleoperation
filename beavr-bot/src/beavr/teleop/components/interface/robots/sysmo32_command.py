@@ -107,7 +107,7 @@ class Sysmo32ArmSafetyConfig:
     joint_lower_limits_rad: Tuple[float, ...] = field(default_factory=lambda: tuple([-3.14] * 12))
     joint_upper_limits_rad: Tuple[float, ...] = field(default_factory=lambda: tuple([3.14] * 12))
     max_joint_velocity_rad_s: Tuple[float, ...] = field(default_factory=lambda: tuple([0.8] * 12))
-    max_joint_jump_rad: float = 0.2 # 最大跳转角度，单个控制周期内的最大角度变化
+    max_joint_jump_rad: float = 0.2  # 最大跳转角度，单个控制周期内的最大角度变化
     max_translation_step_m: float = 0.02
     max_rotation_step_rad: float = 0.08
     workspace_limits: Dict[str, Tuple[float, float]] = field(
@@ -178,7 +178,9 @@ class Sysmo32CommandLimiter:
             self._last_command = builder.build(joints[:6], joints[6:], timestamp_s=time.time())
             self._last_publish_time_s = self._last_command.timestamp_s
 
-    def limit(self, command: Sysmo32ArmCommand, now_s: Optional[float] = None) -> tuple[Optional[Sysmo32ArmCommand], str]:
+    def limit(
+        self, command: Sysmo32ArmCommand, now_s: Optional[float] = None
+    ) -> tuple[Optional[Sysmo32ArmCommand], str]:
         now = now_s or time.time()
         raw = np.asarray(command.values[:12], dtype=np.float64)
         # NaN/Inf 检查
@@ -240,7 +242,9 @@ class Sysmo32JointStateCache:
     def snapshot(self) -> Optional[Sysmo32JointStateSnapshot]:
         return self._snapshot
 
-    def update_from_joint_state_msg(self, msg, now_s: Optional[float] = None) -> Optional[Sysmo32JointStateSnapshot]:
+    def update_from_joint_state_msg(
+        self, msg, now_s: Optional[float] = None
+    ) -> Optional[Sysmo32JointStateSnapshot]:
         # 构建关节名 -> 关节位置的映射字典
         name_to_position = dict(zip(list(msg.name), list(msg.position), strict=False))
         try:
@@ -273,7 +277,11 @@ class Sysmo32JointStateCache:
 
 
 class Sysmo32HandGestureMapper:
-    """Map 26 hand keypoints to fixed LinkerHand actions with hysteresis."""
+    """Map VR hand frames to fixed LinkerHand actions with hysteresis.
+
+    The mapper derives grasp/release from the 26 hand keypoints.  The output is
+    always the real SYSMO-32 hand contract: 1 = release, 2 = grasp.
+    """
 
     def __init__(
         self,
@@ -302,20 +310,17 @@ class Sysmo32HandGestureMapper:
         arr = np.asarray(keypoints, dtype=np.float64).reshape(-1, 3)
         if arr.shape[0] < robots.OCULUS_NUM_KEYPOINTS or not np.all(np.isfinite(arr)):
             return self.force_release(hand_side)
-        
-        # 提取拇指尖(索引5)和食指尖(索引10)
-        thumb_tip = arr[5]
-        index_tip = arr[10]
-        distance = float(np.linalg.norm(index_tip - thumb_tip))
+
+        inferred_action, distance = self._infer_action_from_keypoints(arr)
         self._last_frame_time[hand_side] = now
-        
+
         # 迟滞判断（防抖）
         if self._actions[hand_side] == self.grasp_action:
-            if distance > self.grasp_exit_threshold_m:
+            if inferred_action == self.default_action and distance > self.grasp_exit_threshold_m:
                 self._actions[hand_side] = self.default_action
                 self._confirm_counts[hand_side] = 0
         else:
-            if distance < self.grasp_enter_threshold_m:
+            if inferred_action == self.grasp_action:
                 self._confirm_counts[hand_side] += 1
                 if self._confirm_counts[hand_side] >= self.confirm_frames:
                     self._actions[hand_side] = self.grasp_action
@@ -323,6 +328,35 @@ class Sysmo32HandGestureMapper:
                 self._confirm_counts[hand_side] = 0
 
         return self._actions[hand_side]
+
+    def _infer_action_from_keypoints(self, arr: np.ndarray) -> tuple[int, float]:
+        joints = robots.OCULUS_JOINTS
+        thumb_tip = arr[joints["thumb"][-1]]
+        index_tip = arr[joints["index"][-1]]
+        pinch_distance = float(np.linalg.norm(index_tip - thumb_tip))
+        curl_action = self._action_from_finger_curl(arr)
+        if pinch_distance < self.grasp_enter_threshold_m or curl_action == self.grasp_action:
+            return self.grasp_action, pinch_distance
+        if pinch_distance > self.grasp_exit_threshold_m:
+            return self.default_action, pinch_distance
+        return self.default_action, pinch_distance
+
+    def _action_from_finger_curl(self, arr: np.ndarray) -> int:
+        wrist = arr[0]
+        curled = 0
+        usable = 0
+        for finger in ("index", "middle", "ring", "pinky"):
+            chain = robots.OCULUS_JOINTS[finger]
+            base = arr[chain[0]]
+            tip = arr[chain[-1]]
+            base_len = float(np.linalg.norm(base - wrist))
+            tip_len = float(np.linalg.norm(tip - wrist))
+            if base_len < 1e-6 or tip_len < 1e-6:
+                continue
+            usable += 1
+            if tip_len < base_len * 1.25:
+                curled += 1
+        return self.grasp_action if usable >= 3 and curled >= 3 else self.default_action
 
     def action_for(self, hand_side: str, now_s: Optional[float] = None) -> int:
         now = now_s or time.time()
@@ -371,6 +405,7 @@ def quaternion_angle_delta_rad(q1_xyzw: Sequence[float], q2_xyzw: Sequence[float
     dot = min(1.0, max(-1.0, dot))
     # 计算角度差：θ = 2 * arccos(|q1 · q2|)
     return 2.0 * math.acos(dot)
+
 
 # __all__ 是 Python 的 模块公共接口声明 ，定义了当使用 from module import * 时会被导入的符号列表。
 # __all__ 相当于模块的 公开接口文档 ，告诉使用者哪些是可以安全使用的公共 API，哪些是内部实现细节（如以下划线开头的 _as_joint_vector ）。

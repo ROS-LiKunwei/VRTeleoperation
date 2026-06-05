@@ -385,13 +385,6 @@ class Sysmo32Config:
         self.robots = [
             Sysmo32RealControlCfg(
                 host=network.HOST_ADDRESS,
-                port=ports.SIM_IMAGE_PORT,
-                camera_name="front",
-                camera_type="opencv",
-                camera_index=0,
-                fps=30,
-                width=640,
-                height=480,
                 control_backend=self.control_backend,
                 right_target_port=ports.XARM_ENDEFF_SUBSCRIBE_PORT + SYSMO32_RIGHT_PORT_OFFSET,
                 left_target_port=ports.XARM_ENDEFF_SUBSCRIBE_PORT + SYSMO32_LEFT_PORT_OFFSET,

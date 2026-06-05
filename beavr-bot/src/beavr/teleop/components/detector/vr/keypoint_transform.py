@@ -163,6 +163,8 @@ class TransformHandPositionCoords(Component):
             self.frame_topic = f"{robots.LEFT}_{robots.TRANSFORMED_HAND_FRAME}"
             self.absolute_mode = robots.ABSOLUTE
             self.relative_mode = robots.RELATIVE
+        self.publisher_manager.register_topic(self.host, self.keypoint_transform_pub_port, self.coords_topic)
+        self.publisher_manager.register_topic(self.host, self.keypoint_transform_pub_port, self.frame_topic)
 
         self.timer = FrequencyTimer(robots.VR_FREQ)  # 30Hz频率
 

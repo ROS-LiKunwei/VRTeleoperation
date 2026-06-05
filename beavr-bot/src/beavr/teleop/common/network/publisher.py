@@ -5,7 +5,7 @@ import pickle
 import queue
 import threading
 import time
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Set, Tuple
 
 import cv2
 import numpy as np
@@ -201,6 +201,7 @@ class ZMQPublisherManager:
 
     _instance: Optional["ZMQPublisherManager"] = None
     _publishers: Dict[Tuple[str, int], PublisherThread] = {}
+    _registered_topics: Dict[Tuple[str, int], Set[str]] = {}
     _lock = threading.Lock()
     _monitor_thread: Optional[threading.Thread] = None
     _running = True
@@ -268,9 +269,21 @@ class ZMQPublisherManager:
         """
         try:
             publisher_thread = self.get_publisher_thread(host, port)
+            self._register_topic_name(host, port, topic)
             publisher_thread.send(topic, data)
         except Exception as e:
             logger.error(f"Unexpected error in publish: {e}")
+            raise
+
+    def register_topic(self, host: str, port: int, topic: str) -> None:
+        """Create the publisher socket and register a topic without sending data."""
+
+        try:
+            self.get_publisher_thread(host, port)
+            self._register_topic_name(host, port, topic)
+            logger.debug("Registered publisher topic %s on %s:%d", topic, host, port)
+        except Exception as e:
+            logger.error(f"Unexpected error in register_topic: {e}")
             raise
 
     def get_publisher_thread(self, host: str, port: int) -> PublisherThread:
@@ -292,6 +305,11 @@ class ZMQPublisherManager:
                 self._publishers[key] = self._create_publisher_thread(host, port)
             return self._publishers[key]
 
+    def _register_topic_name(self, host: str, port: int, topic: str) -> None:
+        key = (host, port)
+        with self._lock:
+            self._registered_topics.setdefault(key, set()).add(topic)
+
     def _close_publisher(self, key: Tuple[str, int]) -> None:
         """Close a specific publisher thread.
 
@@ -305,6 +323,7 @@ class ZMQPublisherManager:
                 except Exception as e:
                     logger.error(f"Error stopping publisher at {key[0]}:{key[1]}: {e}")
                 del self._publishers[key]
+                self._registered_topics.pop(key, None)
 
     def get_bound_ports(self) -> Dict[Tuple[str, int], str]:
         """Get the endpoint for each currently bound publisher.
@@ -317,6 +336,12 @@ class ZMQPublisherManager:
                 key: f"tcp://*:{key[1]}"  # key is (host, port), so key[1] is port
                 for key in self._publishers
             }
+
+    def get_registered_topics(self) -> Dict[Tuple[str, int], Tuple[str, ...]]:
+        """Get topics that have been registered or published for each bound port."""
+
+        with self._lock:
+            return {key: tuple(sorted(topics)) for key, topics in self._registered_topics.items()}
 
     def _start_monitor(self) -> None:
         """Start the monitoring thread for publisher health checks."""
@@ -358,3 +383,4 @@ class ZMQPublisherManager:
                 except Exception as e:
                     logger.error(f"Error stopping publisher at {key[0]}:{key[1]}: {e}")
             self._publishers.clear()
+            self._registered_topics.clear()

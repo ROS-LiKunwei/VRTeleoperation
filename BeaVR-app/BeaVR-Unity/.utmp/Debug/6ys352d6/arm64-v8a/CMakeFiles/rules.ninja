@@ -42,7 +42,7 @@ rule CXX_SHARED_LIBRARY_LINKER__swappywrapper_Debug
 # Rule for re-running cmake.
 
 rule RERUN_CMAKE
-  command = /home/whx/Unity/Hub/Editor/6000.2.2f1/Editor/Data/PlaybackEngines/AndroidPlayer/SDK/cmake/3.22.1/bin/cmake --regenerate-during-build -S/home/whx/VRTeleoperation/BeaVR-app/BeaVR-Unity/Library/Bee/Android/Prj/IL2CPP/Gradle/unityLibrary/src/main/cpp -B/home/whx/VRTeleoperation/BeaVR-app/BeaVR-Unity/.utmp/Debug/6ys352d6/arm64-v8a
+  command = /usr/bin/cmake --regenerate-during-build -S/home/whx/VRTeleoperation/BeaVR-app/BeaVR-Unity/Library/Bee/Android/Prj/IL2CPP/Gradle/unityLibrary/src/main/cpp -B/home/whx/VRTeleoperation/BeaVR-app/BeaVR-Unity/.utmp/Debug/6ys352d6/arm64-v8a
   description = Re-running CMake...
   generator = 1
 
@@ -61,4 +61,3 @@ rule CLEAN
 rule HELP
   command = /home/whx/Unity/Hub/Editor/6000.2.2f1/Editor/Data/PlaybackEngines/AndroidPlayer/SDK/cmake/3.22.1/bin/ninja -t targets
   description = All primary targets available:
-

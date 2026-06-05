@@ -46,6 +46,7 @@ class FakeZMQPublisherManager:
     def __init__(self, bus: InMemoryBus) -> None:
         self._bus = bus
         self._threads: Dict[Tuple[str, int], FakeZMQPublisherThread] = {}
+        self._registered_topics: Dict[Tuple[str, int], set[str]] = {}
 
     def get_publisher_thread(self, host: str, port: int) -> FakeZMQPublisherThread:
         key = (host, port)
@@ -55,11 +56,20 @@ class FakeZMQPublisherManager:
 
     # keep signature parity with real manager
     def publish(self, host: str, port: int, topic: str, data: Any) -> None:
+        self.register_topic(host, port, topic)
         self.get_publisher_thread(host, port).send(topic, data)
+
+    def register_topic(self, host: str, port: int, topic: str) -> None:
+        self.get_publisher_thread(host, port)
+        self._registered_topics.setdefault((host, port), set()).add(topic)
+
+    def get_registered_topics(self) -> Dict[Tuple[str, int], Tuple[str, ...]]:
+        return {key: tuple(sorted(topics)) for key, topics in self._registered_topics.items()}
 
     def close_all(self) -> None:
         """Clean up all publisher threads."""
         self._threads.clear()
+        self._registered_topics.clear()
 
 
 class FakeHandshakeCoordinator:

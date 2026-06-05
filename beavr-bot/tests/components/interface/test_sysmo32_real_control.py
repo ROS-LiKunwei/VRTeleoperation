@@ -1,4 +1,4 @@
-import logging
+import time
 from types import SimpleNamespace
 
 import numpy as np
@@ -33,6 +33,17 @@ def _hand_keypoints(distance: float) -> np.ndarray:
     keypoints = np.zeros((26, 3), dtype=np.float64)
     keypoints[5] = np.array([0.0, 0.0, 0.0])
     keypoints[10] = np.array([distance, 0.0, 0.0])
+    return keypoints
+
+
+def _curled_hand_keypoints() -> np.ndarray:
+    keypoints = np.zeros((26, 3), dtype=np.float64)
+    keypoints[0] = np.array([0.0, 0.0, 0.0])
+    for finger in ("index", "middle", "ring", "pinky"):
+        chain = robots.OCULUS_JOINTS[finger]
+        keypoints[chain[0]] = np.array([0.05, 0.0, 0.0])
+        keypoints[chain[-1]] = np.array([0.04, 0.0, 0.0])
+    keypoints[robots.OCULUS_JOINTS["thumb"][-1]] = np.array([0.0, 0.08, 0.0])
     return keypoints
 
 
@@ -149,6 +160,20 @@ def test_hand_gesture_mapper_hysteresis_pause_and_timeout_release():
     assert not mapper.has_fresh_frame(robots.LEFT, now_s=now + 1.0)
 
 
+def test_hand_gesture_mapper_recognizes_curled_keypoints():
+    mapper = Sysmo32HandGestureMapper(confirm_frames=2, hand_frame_timeout_s=0.3)
+    now = 20.0
+
+    assert (
+        mapper.update_from_keypoints(robots.RIGHT, _curled_hand_keypoints(), now_s=now)
+        == SYSMO32_HAND_ACTION_RELEASE
+    )
+    assert (
+        mapper.update_from_keypoints(robots.RIGHT, _curled_hand_keypoints(), now_s=now + 0.01)
+        == SYSMO32_HAND_ACTION_GRASP
+    )
+
+
 def test_joint_state_cache_parses_and_rejects_stale_state():
     cache = Sysmo32JointStateCache(joint_state_timeout_s=0.5)
     names = list(SYSMO32_LEFT_JOINT_NAMES) + list(SYSMO32_RIGHT_JOINT_NAMES)
@@ -163,7 +188,7 @@ def test_joint_state_cache_parses_and_rejects_stale_state():
     assert not cache.is_fresh(now_s=10.6)
 
 
-def test_pause_immediately_publishes_release_without_new_hand_frame(monkeypatch, bus):
+def test_hand_action_not_published_before_first_hand_frame(monkeypatch, bus):
     import beavr.teleop.components.interface.robots.sysmo32_real_control as real_mod
 
     class FakeSubscriber:
@@ -201,6 +226,102 @@ def test_pause_immediately_publishes_release_without_new_hand_frame(monkeypatch,
         transformed_left_port=ports.LEFT_KEYPOINT_TRANSFORM_PORT,
     )
 
+    controller._publish_hand_actions_for_current_state()
+    controller._enter_pause("unit-test pause")
+
+    assert bus.recv_latest(ports.SYSMO32_HAND_ACTION_MIRROR_PORT, SYSMO32_LEFT_HAND_ACTION_TOPIC) is None
+    assert bus.recv_latest(ports.SYSMO32_HAND_ACTION_MIRROR_PORT, SYSMO32_RIGHT_HAND_ACTION_TOPIC) is None
+    assert not controller._teleop_active
+    controller.cleanup()
+
+
+def test_hand_action_publishes_after_first_hand_frame(monkeypatch, bus):
+    import beavr.teleop.components.interface.robots.sysmo32_real_control as real_mod
+
+    class FakeSubscriber:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def recv_keypoints(self):
+            return None
+
+        def stop(self):
+            return None
+
+    class FakeKinematics:
+        available = False
+
+        def __init__(self, urdf_path):
+            self.urdf_path = urdf_path
+
+        def placeholder_ik(self, hand_side, target, current_joints):
+            return np.zeros(6)
+
+    monkeypatch.setattr(real_mod, "ZMQSubscriber", FakeSubscriber)
+    monkeypatch.setattr(real_mod, "Sysmo32MujocoKinematics", FakeKinematics)
+    monkeypatch.setattr(real_mod, "cleanup_zmq_resources", lambda: None)
+
+    controller = Sysmo32RealControl(
+        host="127.0.0.1",
+        control_backend="mujoco",
+        right_target_port=10011,
+        left_target_port=10013,
+        right_state_publish_port=10012,
+        left_state_publish_port=10014,
+        teleoperation_state_port=ports.KEYPOINT_STREAM_PORT,
+        transformed_right_port=ports.KEYPOINT_TRANSFORM_PORT,
+        transformed_left_port=ports.LEFT_KEYPOINT_TRANSFORM_PORT,
+    )
+
+    controller._hand_mapper.update_from_keypoints(robots.RIGHT, _hand_keypoints(0.02), now_s=time.time())
+    controller._hand_frame_started[robots.RIGHT] = True
+    controller._publish_hand_actions_for_current_state()
+
+    assert bus.recv_latest(ports.SYSMO32_HAND_ACTION_MIRROR_PORT, SYSMO32_LEFT_HAND_ACTION_TOPIC) is None
+    right_action = bus.recv_latest(ports.SYSMO32_HAND_ACTION_MIRROR_PORT, SYSMO32_RIGHT_HAND_ACTION_TOPIC)
+    assert right_action.action_id == SYSMO32_HAND_ACTION_RELEASE
+    controller.cleanup()
+
+
+def test_pause_publishes_release_after_hand_frame_started(monkeypatch, bus):
+    import beavr.teleop.components.interface.robots.sysmo32_real_control as real_mod
+
+    class FakeSubscriber:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def recv_keypoints(self):
+            return None
+
+        def stop(self):
+            return None
+
+    class FakeKinematics:
+        available = False
+
+        def __init__(self, urdf_path):
+            self.urdf_path = urdf_path
+
+        def placeholder_ik(self, hand_side, target, current_joints):
+            return np.zeros(6)
+
+    monkeypatch.setattr(real_mod, "ZMQSubscriber", FakeSubscriber)
+    monkeypatch.setattr(real_mod, "Sysmo32MujocoKinematics", FakeKinematics)
+    monkeypatch.setattr(real_mod, "cleanup_zmq_resources", lambda: None)
+
+    controller = Sysmo32RealControl(
+        host="127.0.0.1",
+        control_backend="mujoco",
+        right_target_port=10011,
+        left_target_port=10013,
+        right_state_publish_port=10012,
+        left_state_publish_port=10014,
+        teleoperation_state_port=ports.KEYPOINT_STREAM_PORT,
+        transformed_right_port=ports.KEYPOINT_TRANSFORM_PORT,
+        transformed_left_port=ports.LEFT_KEYPOINT_TRANSFORM_PORT,
+    )
+    controller._hand_frame_started[robots.LEFT] = True
+    controller._hand_frame_started[robots.RIGHT] = True
     controller._enter_pause("unit-test pause")
 
     left_action = bus.recv_latest(ports.SYSMO32_HAND_ACTION_MIRROR_PORT, SYSMO32_LEFT_HAND_ACTION_TOPIC)
@@ -211,15 +332,21 @@ def test_pause_immediately_publishes_release_without_new_hand_frame(monkeypatch,
     controller.cleanup()
 
 
-def test_mujoco_hand_action_callback_prints_only(caplog):
+def test_mujoco_hand_action_callback_prints_only(monkeypatch):
+    import beavr.teleop.components.simulation.sysmo32_mujoco_command_sim as sim_mod
+
     mirror = Sysmo32MujocoCommandMirror.__new__(Sysmo32MujocoCommandMirror)
+    messages = []
 
-    with caplog.at_level(logging.INFO):
-        mirror.on_left_hand_action(SYSMO32_HAND_ACTION_RELEASE)
-        mirror.on_right_hand_action(SYSMO32_HAND_ACTION_GRASP)
+    def fake_info(message, *args):
+        messages.append(message % args)
 
-    assert "left action=1, print only, no execution" in caplog.text
-    assert "right action=2, print only, no execution" in caplog.text
+    monkeypatch.setattr(sim_mod.logger, "info", fake_info)
+    mirror.on_left_hand_action(SYSMO32_HAND_ACTION_RELEASE)
+    mirror.on_right_hand_action(SYSMO32_HAND_ACTION_GRASP)
+
+    assert any("left action=1, print only, no execution" in message for message in messages)
+    assert any("right action=2, print only, no execution" in message for message in messages)
 
 
 def test_sysmo32_config_routes_backends():

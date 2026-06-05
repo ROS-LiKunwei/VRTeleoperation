@@ -60,28 +60,29 @@ class Sysmo32Ros2Topics:
 
 @dataclass
 class Sysmo32HandConfig:
-    default_action: int = SYSMO32_HAND_ACTION_RELEASE # 默认动作：手释放
-    grasp_action: int = SYSMO32_HAND_ACTION_GRASP # 抓取动作：手抓取
-    publish_on_change_only: bool = True # 仅在动作变化时发布，避免重复发布
-    heartbeat_hz: float = 3.0 # 心跳频率：3Hz
-    grasp_enter_threshold_m: float = 0.035 # 抓取进入阈值：0.035m
-    grasp_exit_threshold_m: float = 0.055 # 抓取退出阈值：0.055m
-    confirm_frames: int = 3 # 确认帧数：3帧
-    force_release_on_pause: bool = True # 暂停时强制释放手
-    force_release_on_timeout: bool = True # 超时后强制释放手
+    default_action: int = SYSMO32_HAND_ACTION_RELEASE  # 默认动作：手释放
+    grasp_action: int = SYSMO32_HAND_ACTION_GRASP  # 抓取动作：手抓取
+    publish_on_change_only: bool = True  # 仅在动作变化时发布，避免重复发布
+    heartbeat_hz: float = 3.0  # 心跳频率：3Hz
+    grasp_enter_threshold_m: float = 0.035  # 抓取进入阈值：0.035m
+    grasp_exit_threshold_m: float = 0.055  # 抓取退出阈值：0.055m
+    confirm_frames: int = 3  # 确认帧数：3帧
+    force_release_on_pause: bool = True  # 暂停时强制释放手
+    force_release_on_timeout: bool = True  # 超时后强制释放手
 
 
 @dataclass
 class Sysmo32RealControlConfig:
-    control_backend: str = "mujoco" # 控制后端：real/mujoco/real_with_mujoco
-    ros2: Sysmo32Ros2Topics = field(default_factory=Sysmo32Ros2Topics) # ROS2 配置
-    arm: Sysmo32ArmSafetyConfig = field(default_factory=Sysmo32ArmSafetyConfig) # 手臂安全配置
-    hand: Sysmo32HandConfig = field(default_factory=Sysmo32HandConfig)# 手部配置
-    hand_frame_timeout_s: float = 0.3 # 手部帧超时时间：0.3s
-    safety_hold_arm_on_pause: bool = True # 暂停时保持手臂位置
-    allow_placeholder_ik_for_mujoco: bool = False # 允许降级 IK
+    control_backend: str = "mujoco"  # 控制后端：real/mujoco/real_with_mujoco
+    ros2: Sysmo32Ros2Topics = field(default_factory=Sysmo32Ros2Topics)  # ROS2 配置
+    arm: Sysmo32ArmSafetyConfig = field(default_factory=Sysmo32ArmSafetyConfig)  # 手臂安全配置
+    hand: Sysmo32HandConfig = field(default_factory=Sysmo32HandConfig)  # 手部配置
+    hand_frame_timeout_s: float = 0.3  # 手部帧超时时间：0.3s
+    safety_hold_arm_on_pause: bool = True  # 暂停时保持手臂位置
+    allow_placeholder_ik_for_mujoco: bool = False  # 允许降级 IK
     allow_mujoco_mirror_without_joint_state: bool = True
     mujoco_mirror_max_joint_velocity_rad_s: float = 3.0
+
 
 # ROS2 桥接类,负责 ROS2 通信
 class Sysmo32Ros2Bridge:
@@ -91,14 +92,14 @@ class Sysmo32Ros2Bridge:
         self.topics = topics
         self.require_ros = require_ros
         self.available = False
-        self.joint_cache = Sysmo32JointStateCache(topics.joint_state_timeout_s) # 关节状态缓存
+        self.joint_cache = Sysmo32JointStateCache(topics.joint_state_timeout_s)  # 关节状态缓存
         self._rclpy = None
         self._node = None
         self._arm_pub = None
         self._left_hand_pub = None
         self._right_hand_pub = None
         if require_ros:
-            self._init_ros2() # 初始化发布器和订阅器
+            self._init_ros2()  # 初始化发布器和订阅器
 
     def _init_ros2(self) -> None:
         try:
@@ -207,6 +208,19 @@ class Sysmo32RealControl(Component):
         self._hand_action_mirror_port = hand_action_mirror_port
         self._right_state_publish_port = right_state_publish_port
         self._left_state_publish_port = left_state_publish_port
+        self._publisher_manager.register_topic(
+            self.host, self._arm_command_mirror_port, SYSMO32_ARM_COMMAND_TOPIC
+        )
+        self._publisher_manager.register_topic(
+            self.host,
+            self._hand_action_mirror_port,
+            SYSMO32_LEFT_HAND_ACTION_TOPIC,
+        )
+        self._publisher_manager.register_topic(
+            self.host,
+            self._hand_action_mirror_port,
+            SYSMO32_RIGHT_HAND_ACTION_TOPIC,
+        )
 
         self._right_target_subscriber = ZMQSubscriber(
             host, right_target_port, "endeff_coords", message_type=CartesianTarget
@@ -274,6 +288,7 @@ class Sysmo32RealControl(Component):
             robots.LEFT: self.config.hand.default_action,
             robots.RIGHT: self.config.hand.default_action,
         }
+        self._hand_frame_started = {robots.LEFT: False, robots.RIGHT: False}
         self._last_hand_publish_time = {robots.LEFT: 0.0, robots.RIGHT: 0.0}
         self._last_safety_log_time: Dict[str, float] = {}
         self._last_session_command: Optional[str] = None
@@ -282,14 +297,13 @@ class Sysmo32RealControl(Component):
     def _validate_backend(self) -> None:
         if self.control_backend not in ("real", "mujoco", "real_with_mujoco"):
             raise ValueError(
-                "control_backend must be one of: real, mujoco, real_with_mujoco; "
-                f"got {self.control_backend}"
+                f"control_backend must be one of: real, mujoco, real_with_mujoco; got {self.control_backend}"
             )
 
     def _make_mujoco_arm_safety_config(self) -> Sysmo32ArmSafetyConfig:
         """
-            限幅使用真实机器人配置,但MuJoCo-only / mirror-only 模式下允许关节速度更大一点，
-            否则仿真里动作太慢，看起来像没跟随
+        限幅使用真实机器人配置,但MuJoCo-only / mirror-only 模式下允许关节速度更大一点，
+        否则仿真里动作太慢，看起来像没跟随
         """
 
         mirror_velocity = tuple(
@@ -303,12 +317,12 @@ class Sysmo32RealControl(Component):
         while True:
             start = time.time()
             self._ros2.spin_once()
-            self._handle_session_command() # 处理暂停/恢复
-            self._receive_hand_frames() # 接收手部关键点
-            self._publish_hand_actions_for_current_state() # 发布手部动作
-            self._handle_reset_requests() # 处理重置请求
-            self._receive_cartesian_targets() # 接收笛卡尔目标
-            self._publish_arm_command_if_safe() # 发布安全的手臂命令
+            self._handle_session_command()  # 处理暂停/恢复
+            self._receive_hand_frames()  # 接收手部关键点
+            self._publish_hand_actions_for_current_state()  # 发布手部动作
+            self._handle_reset_requests()  # 处理重置请求
+            self._receive_cartesian_targets()  # 接收笛卡尔目标
+            self._publish_arm_command_if_safe()  # 发布安全的手臂命令
             elapsed = time.time() - start
             time.sleep(max(0.0, (1.0 / robots.VR_FREQ) - elapsed))
 
@@ -325,8 +339,10 @@ class Sysmo32RealControl(Component):
             self._last_session_command = robots.RESUME
             self._teleop_active = True
             self._needs_reset = True
-            self._real_reset_ready = self.control_backend == "mujoco" # 没有真实 /joint_states 依赖，resume 后可以先认为 reset ready；其余情况不能直接 ready，必须等 fresh /joint_states + reset 成功后，才允许真实机械臂发命令
-            self._last_accepted_targets = {robots.LEFT: None, robots.RIGHT: None} # 清掉上一次接受过的目标
+            self._real_reset_ready = (
+                self.control_backend == "mujoco"
+            )  # 没有真实 /joint_states 依赖，resume 后可以先认为 reset ready；其余情况不能直接 ready，必须等 fresh /joint_states + reset 成功后，才允许真实机械臂发命令
+            self._last_accepted_targets = {robots.LEFT: None, robots.RIGHT: None}  # 清掉上一次接受过的目标
             logger.info("SYSMO-32 resume received: next targets require reset/rebaseline")
 
     def _enter_pause(self, reason: str) -> None:
@@ -338,8 +354,10 @@ class Sysmo32RealControl(Component):
         self._latest_targets = {robots.LEFT: None, robots.RIGHT: None}
         self._last_accepted_targets = {robots.LEFT: None, robots.RIGHT: None}
         self._hand_mapper.force_release()
-        self._publish_hand_action(robots.LEFT, self.config.hand.default_action, reason, force=True)
-        self._publish_hand_action(robots.RIGHT, self.config.hand.default_action, reason, force=True)
+        if self.config.hand.force_release_on_pause:
+            for hand_side in (robots.LEFT, robots.RIGHT):
+                if self._hand_frame_started[hand_side]:
+                    self._publish_hand_action(hand_side, self.config.hand.default_action, reason, force=True)
         snapshot = self._current_joint_snapshot()
         if snapshot is not None:
             self._limiter.reset(snapshot.all_joints)
@@ -354,8 +372,15 @@ class Sysmo32RealControl(Component):
             frame = subscriber.recv_keypoints()
             if frame is None:
                 continue
+            if getattr(frame, "hand_side", hand_side) != hand_side:
+                self._warn_safety(
+                    f"{hand_side}_hand_wrong_side",
+                    f"{hand_side} hand frame ignored: frame side={getattr(frame, 'hand_side', None)}",
+                )
+                continue
             try:
                 self._hand_mapper.update_from_keypoints(hand_side, frame.keypoints, now_s=time.time())
+                self._hand_frame_started[hand_side] = True
             except Exception as exc:
                 self._warn_safety(f"{hand_side}_hand_invalid", f"{hand_side} hand invalid: {exc}")
                 self._hand_mapper.force_release(hand_side)
@@ -363,10 +388,14 @@ class Sysmo32RealControl(Component):
     def _publish_hand_actions_for_current_state(self) -> None:
         now = time.time()
         for hand_side in (robots.LEFT, robots.RIGHT):
+            if not self._hand_frame_started[hand_side]:
+                continue
             if not self._teleop_active:
                 action = self.config.hand.default_action
                 reason = "pause"
             elif not self._hand_mapper.has_fresh_frame(hand_side, now_s=now):
+                if not self.config.hand.force_release_on_timeout:
+                    continue
                 action = self._hand_mapper.force_release(hand_side)
                 reason = "hand frame timeout"
             else:
@@ -389,7 +418,11 @@ class Sysmo32RealControl(Component):
                 self._warn_safety("ros_hand_unavailable", f"ROS2 hand publisher unavailable for {hand_side}")
 
         if self.control_backend in ("mujoco", "real_with_mujoco"):
-            topic = SYSMO32_LEFT_HAND_ACTION_TOPIC if hand_side == robots.LEFT else SYSMO32_RIGHT_HAND_ACTION_TOPIC
+            topic = (
+                SYSMO32_LEFT_HAND_ACTION_TOPIC
+                if hand_side == robots.LEFT
+                else SYSMO32_RIGHT_HAND_ACTION_TOPIC
+            )
             self._publisher_manager.publish(self.host, self._hand_action_mirror_port, topic, action)
 
         self._last_hand_actions[hand_side] = action.action_id
@@ -504,12 +537,9 @@ class Sysmo32RealControl(Component):
         if not any_target:
             return
         # 构建命令并限幅
-        mirror_only = (
-            self.control_backend == "mujoco"
-            or (
-                self.control_backend == "real_with_mujoco"
-                and not (real_joint_state_fresh and self._real_reset_ready)
-            )
+        mirror_only = self.control_backend == "mujoco" or (
+            self.control_backend == "real_with_mujoco"
+            and not (real_joint_state_fresh and self._real_reset_ready)
         )
         try:
             command = self._builder.build(desired_left, desired_right, timestamp_s=time.time())
@@ -526,10 +556,14 @@ class Sysmo32RealControl(Component):
             if real_joint_state_fresh and self._real_reset_ready:
                 published_real = self._ros2.publish_arm_command(limited)
                 if not published_real:
-                    self._warn_safety("ros_arm_unavailable", "ROS2 arm publisher unavailable; not publishing real command")
+                    self._warn_safety(
+                        "ros_arm_unavailable", "ROS2 arm publisher unavailable; not publishing real command"
+                    )
                     return
             elif self.control_backend == "real":
-                self._warn_safety("real_reset_required", "real arm held until reset succeeds with fresh /joint_states")
+                self._warn_safety(
+                    "real_reset_required", "real arm held until reset succeeds with fresh /joint_states"
+                )
                 return
             else:
                 self._warn_safety(
@@ -538,7 +572,9 @@ class Sysmo32RealControl(Component):
                 )
         # 发布命令镜像（用于可视化/调试）
         if self.control_backend in ("mujoco", "real_with_mujoco"):
-            self._publisher_manager.publish(self.host, self._arm_command_mirror_port, SYSMO32_ARM_COMMAND_TOPIC, limited)
+            self._publisher_manager.publish(
+                self.host, self._arm_command_mirror_port, SYSMO32_ARM_COMMAND_TOPIC, limited
+            )
         # 模拟模式下更新关节状态缓存
         if self.control_backend in ("mujoco", "real_with_mujoco"):
             self._dry_joint_cache.update(limited.left_arm, limited.right_arm, now_s=limited.timestamp_s)
@@ -604,7 +640,9 @@ class Sysmo32RealControl(Component):
             return homo
         return None
 
-    def _solve_ik(self, hand_side: str, target: CartesianTarget, current_joints: Sequence[float]) -> Optional[np.ndarray]:
+    def _solve_ik(
+        self, hand_side: str, target: CartesianTarget, current_joints: Sequence[float]
+    ) -> Optional[np.ndarray]:
         if self._kinematics.available:
             return self._kinematics.solve_ik(hand_side, target, current_joints)
         if (
@@ -619,11 +657,18 @@ class Sysmo32RealControl(Component):
         timestamp_s = getattr(target, "timestamp_s", 0.0) or 0.0
         return time.time() - timestamp_s <= self.config.hand_frame_timeout_s
 
-    def _sanitize_cartesian_target(self, hand_side: str, target: CartesianTarget) -> Optional[CartesianTarget]:
+    def _sanitize_cartesian_target(
+        self, hand_side: str, target: CartesianTarget
+    ) -> Optional[CartesianTarget]:
         pos = np.asarray(target.position_m, dtype=np.float64)
         quat = np.asarray(target.orientation_xyzw, dtype=np.float64)
         # 1. NaN/Inf 检查
-        if pos.shape != (3,) or quat.shape != (4,) or not np.all(np.isfinite(pos)) or not np.all(np.isfinite(quat)):
+        if (
+            pos.shape != (3,)
+            or quat.shape != (4,)
+            or not np.all(np.isfinite(pos))
+            or not np.all(np.isfinite(quat))
+        ):
             self._warn_safety(f"{hand_side}_target_nan", f"{hand_side} target rejected: NaN/Inf")
             return None
 
@@ -660,7 +705,9 @@ class Sysmo32RealControl(Component):
                 rotation_step = quaternion_angle_delta_rad(tuple(last_quat), tuple(quat))
                 max_rotation_step = float(self.config.arm.max_rotation_step_rad)
                 if rotation_step > max_rotation_step > 0.0:
-                    quat = self._interpolate_quaternion_xyzw(last_quat, quat, max_rotation_step / rotation_step)
+                    quat = self._interpolate_quaternion_xyzw(
+                        last_quat, quat, max_rotation_step / rotation_step
+                    )
                     self._warn_safety(
                         f"{hand_side}_rotation_clamped",
                         f"{hand_side} target rotation step {rotation_step:.3f}rad clamped to {max_rotation_step:.3f}rad",
@@ -703,7 +750,7 @@ class Sysmo32RealControl(Component):
         now = time.time()
         # 检查距离上次记录该警告是否超过1秒
         if now - self._last_safety_log_time.get(key, 0.0) < 1.0:
-            return # 未超过1秒，跳过本次记录
+            return  # 未超过1秒，跳过本次记录
         # 更新最后记录时间
         self._last_safety_log_time[key] = now
         # 记录警告日志
