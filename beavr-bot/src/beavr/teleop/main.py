@@ -49,6 +49,9 @@ class MainConfig:
     # 机器人配置的侧别设置(Laterality setting)
     laterality: str = "right"  # Options: "right", "left", "bimanual"
 
+    # SYSMO-32 backend mode: real, mujoco, or real_with_mujoco.
+    control_backend: str = "mujoco"
+
     # 可选的配置文件覆盖项
     config_file: str = "configs/environment/dev.yaml"
 
@@ -75,7 +78,12 @@ class MainConfig:
         simulation_mode = self.teleop.flags.sim_env
 
         # 使用工具函数加载机器人配置（可多个）
-        self.robot = load_robot_config(self.robot_name, self.laterality_enum, simulation_mode)
+        self.robot = load_robot_config(
+            self.robot_name,
+            self.laterality_enum,
+            simulation_mode,
+            control_backend=self.control_backend,
+        )
 
     # TODO: 当完全迁移到新的结构化配置后移除这部分
     # 为向后兼容提供便捷的属性委托(attribute delegation)

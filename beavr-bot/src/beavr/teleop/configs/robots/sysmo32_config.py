@@ -33,13 +33,19 @@ from beavr.lerobot.common.robot_devices.cameras.configs import (
     OpenCVCameraConfig,
 )
 from beavr.teleop.common.configs.loader import Laterality, log_laterality_configuration
-from beavr.teleop.components.camera.real_camera_streamer import RealCameraStreamer
+from beavr.teleop.components.interface.robots.sysmo32_command import Sysmo32ArmSafetyConfig
+from beavr.teleop.components.interface.robots.sysmo32_real_control import (
+    Sysmo32HandConfig,
+    Sysmo32RealControl,
+    Sysmo32RealControlConfig,
+    Sysmo32Ros2Topics,
+)
 from beavr.teleop.components.interface.robots.sysmo32_robot import Sysmo32Robot
 from beavr.teleop.components.operator.robots.sysmo32_operator import Sysmo32Operator
 from beavr.teleop.configs.constants import network, ports, robots
 from beavr.teleop.configs.robots import TeleopRobotConfig
 from beavr.teleop.configs.robots.shared_components import SharedComponentRegistry
-from beavr.teleop.configs.robots.sysmo_mujoco_config import MuJoCoSimConfig
+from beavr.teleop.configs.robots.sysmo_mujoco_config import Sysmo32MujocoCommandMirrorCfg
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +67,7 @@ class Sysmo32RobotCfg:
     reset_subscribe_port: int = ports.XARM_RESET_SUBSCRIBE_PORT + SYSMO32_RIGHT_PORT_OFFSET
     state_publish_port: int = ports.XARM_STATE_PUBLISH_PORT + SYSMO32_RIGHT_PORT_OFFSET
     home_subscribe_port: int = ports.XARM_HOME_SUBSCRIBE_PORT
-    teleoperation_state_port: int = ports.XARM_TELEOPERATION_STATE_PORT
+    teleoperation_state_port: int = ports.KEYPOINT_STREAM_PORT
     hand_side: str = robots.RIGHT
     simulation_mode: bool = True
     enable_ros2_bridge: bool = False
@@ -103,6 +109,86 @@ class Sysmo32RobotCfg:
 
 
 @dataclass
+class Sysmo32RealControlCfg:
+    """SYSMO-32真实接口控制层配置。
+
+    单个组件同时处理左右臂，因为真实机械臂接口是一条18维双臂命令。
+    """
+
+    host: str = network.HOST_ADDRESS  # 网络通信配置
+    control_backend: str = "mujoco"  # 控制后端：real/mujoco/real_with_mujoco
+    # ZMQ 端口配置（用于接收目标、发布状态等）
+    right_target_port: int = ports.XARM_ENDEFF_SUBSCRIBE_PORT + SYSMO32_RIGHT_PORT_OFFSET
+    left_target_port: int = ports.XARM_ENDEFF_SUBSCRIBE_PORT + SYSMO32_LEFT_PORT_OFFSET
+    right_state_publish_port: int = ports.XARM_ENDEFF_PUBLISH_PORT + SYSMO32_RIGHT_PORT_OFFSET
+    left_state_publish_port: int = ports.XARM_ENDEFF_PUBLISH_PORT + SYSMO32_LEFT_PORT_OFFSET
+    teleoperation_state_port: int = ports.KEYPOINT_STREAM_PORT
+    transformed_right_port: int = ports.KEYPOINT_TRANSFORM_PORT
+    transformed_left_port: int = ports.LEFT_KEYPOINT_TRANSFORM_PORT
+    arm_command_mirror_port: int = ports.SYSMO32_ARM_COMMAND_MIRROR_PORT
+    hand_action_mirror_port: int = ports.SYSMO32_HAND_ACTION_MIRROR_PORT
+    # URDF 模型路径
+    urdf_path: str = "robots/sysmo_description/urdf/sysmo32.urdf"
+    # 嵌套配置对象
+    config: Sysmo32RealControlConfig = field(
+        default_factory=lambda: Sysmo32RealControlConfig(
+            control_backend="mujoco",
+            ros2=Sysmo32Ros2Topics(
+                joint_state_topic="/joint_states",
+                arm_command_topic="/sysmo_left_arm_controller/commands",
+                left_hand_topic="/left_topic_to_hand",
+                right_hand_topic="/right_topic_to_hand",
+                arm_command_queue_size=60,
+                hand_command_queue_size=10,
+                joint_state_timeout_s=0.5,
+            ),
+            arm=Sysmo32ArmSafetyConfig(
+                speed_mode=0.0,
+                reserved=(0.0, 0.0, 0.0, 0.0),
+                neck_joint=0.0,
+                max_joint_velocity_rad_s=tuple([0.8] * 12),
+                max_translation_step_m=0.02,
+                max_rotation_step_rad=0.08,
+            ),
+            hand=Sysmo32HandConfig(
+                default_action=1,
+                grasp_action=2,
+                publish_on_change_only=True,
+                heartbeat_hz=3.0,
+                grasp_enter_threshold_m=0.035,
+                grasp_exit_threshold_m=0.055,
+                confirm_frames=3,
+                force_release_on_pause=True,
+                force_release_on_timeout=True,
+            ),
+            hand_frame_timeout_s=0.3,
+            safety_hold_arm_on_pause=True,
+            allow_placeholder_ik_for_mujoco=True,
+            allow_mujoco_mirror_without_joint_state=True,
+            mujoco_mirror_max_joint_velocity_rad_s=3.0,
+        )
+    )
+
+    def build(self):
+        self.config.control_backend = self.control_backend
+        return Sysmo32RealControl(
+            host=self.host,
+            control_backend=self.control_backend,
+            right_target_port=self.right_target_port,
+            left_target_port=self.left_target_port,
+            right_state_publish_port=self.right_state_publish_port,
+            left_state_publish_port=self.left_state_publish_port,
+            teleoperation_state_port=self.teleoperation_state_port,
+            transformed_right_port=self.transformed_right_port,
+            transformed_left_port=self.transformed_left_port,
+            arm_command_mirror_port=self.arm_command_mirror_port,
+            hand_action_mirror_port=self.hand_action_mirror_port,
+            urdf_path=self.urdf_path,
+            config=self.config,
+        )
+
+
+@dataclass
 class Sysmo32OperatorCfg:
     """SYSMO-32单臂Operator配置"""
 
@@ -120,7 +206,9 @@ class Sysmo32OperatorCfg:
     moving_average_limit: int = 3
     arm_resolution_port: int = ports.KEYPOINT_STREAM_PORT
     use_filter: bool = False
-    teleoperation_state_port: int = ports.XARM_TELEOPERATION_STATE_PORT
+    teleoperation_state_port: int = ports.KEYPOINT_STREAM_PORT
+    hand_frame_timeout_s: float = 0.3
+    rotation_delta_frame: str = "base"
     logging_config: dict[str, Any] = field(
         default_factory=lambda: {
             "enabled": False,
@@ -146,6 +234,8 @@ class Sysmo32OperatorCfg:
             teleoperation_state_port=self.teleoperation_state_port,
             logging_config=self.logging_config,
             hand_side=self.hand_side,
+            hand_frame_timeout_s=self.hand_frame_timeout_s,
+            rotation_delta_frame=self.rotation_delta_frame,
         )
 
 
@@ -167,6 +257,8 @@ class Sysmo32RealCameraStreamerCfg:
     color_mode: str = "rgb"
 
     def build(self):
+        from beavr.teleop.components.camera.real_camera_streamer import RealCameraStreamer
+
         if self.camera_type == "opencv":
             camera_config = OpenCVCameraConfig(
                 camera_index=self.camera_index,
@@ -213,6 +305,7 @@ class Sysmo32Config:
 
     robot_name: str = ROBOT_NAME_SYSMO32
     laterality: Laterality = Laterality.BIMANUAL
+    control_backend: str = "mujoco"
 
     detector: list = field(default_factory=list)
     transforms: list = field(default_factory=list)
@@ -223,6 +316,8 @@ class Sysmo32Config:
     camera_streamers: list = field(default_factory=list)
 
     def __post_init__(self):
+        if self.control_backend not in ("real", "mujoco", "real_with_mujoco"):
+            raise ValueError("sysmo32 control_backend must be one of: real, mujoco, real_with_mujoco")
         log_laterality_configuration(self.laterality, ROBOT_NAME_SYSMO32)
         self._configure_for_laterality()
 
@@ -270,10 +365,25 @@ class Sysmo32Config:
                 )
             )
 
-        # Real camera stream for VR visual feedback.
-        # Unity subscribes to tcp://<bot_pc_ip>:10005 and displays this feed in the headset.
-        self.camera_streamers = [
-            Sysmo32RealCameraStreamerCfg(
+        # MuJoCo dry-run/mirror should not require a physical camera.
+        self.camera_streamers = []
+        if self.control_backend == "real":
+            self.camera_streamers = [
+                Sysmo32RealCameraStreamerCfg(
+                    host=network.HOST_ADDRESS,
+                    port=ports.SIM_IMAGE_PORT,
+                    camera_name="front",
+                    camera_type="opencv",
+                    camera_index=6,
+                    fps=30,
+                    width=640,
+                    height=480,
+                )
+            ]
+
+        # Robot配置：sysmo32真实接口是一条双臂18维命令，因此只启动一个双臂控制层。
+        self.robots = [
+            Sysmo32RealControlCfg(
                 host=network.HOST_ADDRESS,
                 port=ports.SIM_IMAGE_PORT,
                 camera_name="front",
@@ -282,60 +392,18 @@ class Sysmo32Config:
                 fps=30,
                 width=640,
                 height=480,
+                control_backend=self.control_backend,
+                right_target_port=ports.XARM_ENDEFF_SUBSCRIBE_PORT + SYSMO32_RIGHT_PORT_OFFSET,
+                left_target_port=ports.XARM_ENDEFF_SUBSCRIBE_PORT + SYSMO32_LEFT_PORT_OFFSET,
+                right_state_publish_port=ports.XARM_ENDEFF_PUBLISH_PORT + SYSMO32_RIGHT_PORT_OFFSET,
+                left_state_publish_port=ports.XARM_ENDEFF_PUBLISH_PORT + SYSMO32_LEFT_PORT_OFFSET,
+                teleoperation_state_port=ports.KEYPOINT_STREAM_PORT,
+                transformed_right_port=ports.KEYPOINT_TRANSFORM_PORT,
+                transformed_left_port=ports.LEFT_KEYPOINT_TRANSFORM_PORT,
+                arm_command_mirror_port=ports.SYSMO32_ARM_COMMAND_MIRROR_PORT,
+                hand_action_mirror_port=ports.SYSMO32_HAND_ACTION_MIRROR_PORT,
             )
         ]
-
-        # Robot配置
-        self.robots = []
-        if self.laterality in [Laterality.RIGHT, Laterality.BIMANUAL]:
-            self.robots.append(
-                Sysmo32RobotCfg(
-                    host=network.HOST_ADDRESS,
-                    is_right_arm=True,
-                    endeff_publish_port=ports.XARM_ENDEFF_PUBLISH_PORT + SYSMO32_RIGHT_PORT_OFFSET,
-                    endeff_subscribe_port=ports.XARM_ENDEFF_SUBSCRIBE_PORT + SYSMO32_RIGHT_PORT_OFFSET,
-                    reset_subscribe_port=ports.XARM_RESET_SUBSCRIBE_PORT + SYSMO32_RIGHT_PORT_OFFSET,
-                    state_publish_port=ports.XARM_STATE_PUBLISH_PORT + SYSMO32_RIGHT_PORT_OFFSET,
-                    home_subscribe_port=ports.XARM_HOME_SUBSCRIBE_PORT,
-                    teleoperation_state_port=ports.XARM_TELEOPERATION_STATE_PORT,
-                    hand_side=robots.RIGHT,
-                    simulation_mode=True,
-                    recorder_config={
-                        "robot_identifier": "right_sysmo32",
-                        "recorded_data": [
-                            robots.RECORDED_DATA_JOINT_STATES,
-                            robots.RECORDED_DATA_XARM_CARTESIAN_STATES,
-                            robots.RECORDED_DATA_COMMANDED_CARTESIAN_STATE,
-                            robots.RECORDED_DATA_JOINT_ANGLES_RAD,
-                        ],
-                    },
-                )
-            )
-
-        if self.laterality in [Laterality.LEFT, Laterality.BIMANUAL]:
-            self.robots.append(
-                Sysmo32RobotCfg(
-                    host=network.HOST_ADDRESS,
-                    is_right_arm=False,
-                    endeff_publish_port=ports.XARM_ENDEFF_PUBLISH_PORT + SYSMO32_LEFT_PORT_OFFSET,
-                    endeff_subscribe_port=ports.XARM_ENDEFF_SUBSCRIBE_PORT + SYSMO32_LEFT_PORT_OFFSET,
-                    reset_subscribe_port=ports.XARM_RESET_SUBSCRIBE_PORT + SYSMO32_LEFT_PORT_OFFSET,
-                    state_publish_port=ports.XARM_STATE_PUBLISH_PORT + SYSMO32_LEFT_PORT_OFFSET,
-                    home_subscribe_port=ports.XARM_HOME_SUBSCRIBE_PORT,
-                    teleoperation_state_port=ports.XARM_TELEOPERATION_STATE_PORT,
-                    hand_side=robots.LEFT,
-                    simulation_mode=True,
-                    recorder_config={
-                        "robot_identifier": "left_sysmo32",
-                        "recorded_data": [
-                            robots.RECORDED_DATA_JOINT_STATES,
-                            robots.RECORDED_DATA_XARM_CARTESIAN_STATES,
-                            robots.RECORDED_DATA_COMMANDED_CARTESIAN_STATE,
-                            robots.RECORDED_DATA_JOINT_ANGLES_RAD,
-                        ],
-                    },
-                )
-            )
 
         # Operator配置
         self.operators = []
@@ -354,7 +422,7 @@ class Sysmo32Config:
                     moving_average_limit=3,
                     arm_resolution_port=ports.KEYPOINT_STREAM_PORT,
                     use_filter=False,
-                    teleoperation_state_port=ports.XARM_TELEOPERATION_STATE_PORT,
+                    teleoperation_state_port=ports.KEYPOINT_STREAM_PORT,
                     hand_side=robots.RIGHT,
                     logging_config={
                         "enabled": False,
@@ -380,7 +448,7 @@ class Sysmo32Config:
                     moving_average_limit=3,
                     arm_resolution_port=ports.KEYPOINT_STREAM_PORT,
                     use_filter=False,
-                    teleoperation_state_port=ports.XARM_TELEOPERATION_STATE_PORT,
+                    teleoperation_state_port=ports.KEYPOINT_STREAM_PORT,
                     hand_side=robots.LEFT,
                     logging_config={
                         "enabled": False,
@@ -391,17 +459,21 @@ class Sysmo32Config:
                 )
             )
 
-        # # Environment配置（MuJoCo仿真）
-        self.environment = [
-            MuJoCoSimConfig(
-                host=network.HOST_ADDRESS,
-                urdf_path="robots/sysmo_description/urdf/sysmo32.urdf",
-                right_endeff_subscribe_port=ports.XARM_ENDEFF_PUBLISH_PORT + SYSMO32_RIGHT_PORT_OFFSET,
-                left_endeff_subscribe_port=ports.XARM_ENDEFF_PUBLISH_PORT + SYSMO32_LEFT_PORT_OFFSET,
-                render=True,
-                simulation_mode=True,
-            )
-        ]
+        # Environment配置：独立MuJoCo层接收真实接口格式的18维命令。
+        self.environment = []
+        if self.control_backend in ("mujoco", "real_with_mujoco"):
+            self.environment = [
+                Sysmo32MujocoCommandMirrorCfg(
+                    host=network.HOST_ADDRESS,
+                    arm_command_port=ports.SYSMO32_ARM_COMMAND_MIRROR_PORT,
+                    hand_action_port=ports.SYSMO32_HAND_ACTION_MIRROR_PORT,
+                    urdf_path="robots/sysmo_description/urdf/sysmo32.urdf",
+                    control_dt=0.01,
+                    render=True,
+                    load_model=True,
+                    print_hand_action_only=True,
+                )
+            ]
 
     def build(self):
         return {

@@ -243,7 +243,12 @@ class CompositeRobotConfig:
         }
 
 
-def load_robot_config(robot_name: str, laterality: Laterality, simulation_mode: bool = False) -> Any:
+def load_robot_config(
+    robot_name: str,
+    laterality: Laterality,
+    simulation_mode: bool = False,
+    control_backend: str = "mujoco",
+) -> Any:
     """
     根据机器人名称（可多个）和侧别(laterality)加载机器人配置.
     同时支持单机器人以及用逗号分隔的多机器人.
@@ -265,13 +270,18 @@ def load_robot_config(robot_name: str, laterality: Laterality, simulation_mode: 
 
     if len(robot_names) == 1:
         # Single robot - use existing logic
-        return _load_single_robot(robot_names[0], laterality, simulation_mode)
+        return _load_single_robot(robot_names[0], laterality, simulation_mode, control_backend)
     else:
         # Multiple robots - create composite config
-        return _load_multiple_robots(robot_names, laterality, simulation_mode)
+        return _load_multiple_robots(robot_names, laterality, simulation_mode, control_backend)
 
 
-def _load_single_robot(robot_name: str, laterality: Laterality, simulation_mode: bool = False) -> Any:
+def _load_single_robot(
+    robot_name: str,
+    laterality: Laterality,
+    simulation_mode: bool = False,
+    control_backend: str = "mujoco",
+) -> Any:
     """Load configuration for a single robot."""
     logger.info(f"📦 Loading single robot config: {robot_name}")
 
@@ -296,6 +306,8 @@ def _load_single_robot(robot_name: str, laterality: Laterality, simulation_mode:
         cfg_kwargs["laterality"] = laterality
     if "simulation_mode" in getattr(cfg_cls, "__dataclass_fields__", {}):
         cfg_kwargs["simulation_mode"] = simulation_mode
+    if "control_backend" in getattr(cfg_cls, "__dataclass_fields__", {}):
+        cfg_kwargs["control_backend"] = control_backend
 
     robot_config = cfg_cls(**cfg_kwargs)
 
@@ -303,7 +315,12 @@ def _load_single_robot(robot_name: str, laterality: Laterality, simulation_mode:
     return robot_config
 
 
-def _load_multiple_robots(robot_names: List[str], laterality: Laterality, simulation_mode: bool = False) -> CompositeRobotConfig:
+def _load_multiple_robots(
+    robot_names: List[str],
+    laterality: Laterality,
+    simulation_mode: bool = False,
+    control_backend: str = "mujoco",
+) -> CompositeRobotConfig:
     """为多个机器人加载并合并配置"""
     logger.info(f"📦 Loading composite robot config: {','.join(robot_names)}")
 
@@ -311,7 +328,7 @@ def _load_multiple_robots(robot_names: List[str], laterality: Laterality, simula
 
     for robot_name in robot_names:
         # Load individual robot config
-        robot_config = _load_single_robot(robot_name, laterality, simulation_mode)
+        robot_config = _load_single_robot(robot_name, laterality, simulation_mode, control_backend)
         individual_configs.append(robot_config)
         logger.info(f"  ✅ Loaded {robot_name} config with laterality: {laterality.value}, simulation_mode: {simulation_mode}")
 

@@ -29,7 +29,6 @@ import re
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional
 
 import mujoco
 import mujoco.viewer
@@ -135,15 +134,50 @@ class MuJoCoSysmoSimulator(Component):
             render: 是否启用可视化渲染窗口。
         """
         self.notify_component_start("mujoco_sysmo_simulator")
-
         self.host = host
+        self.simulation_mode = simulation_mode
         self.render = render
-        self.urdf_path = urdf_path
+        path = Path(urdf_path)
+        if not path.is_absolute():
+            path = Path(__file__).resolve().parents[5] / urdf_path
+        self.urdf_path = str(path)
+
+        self._ik_tolerance = 0.01  # 位置误差收敛阈值
+        self._ik_orientation_tolerance = 0.15  # 姿态误差阈值
+        # 完整位姿 IK 不稳定时，进入 fallback，降低姿态误差权重，优先保证位置跟踪。
+        self._ik_fallback_orientation_weight = 0.05  # 进入姿态优化近似阈值
+        self._ik_fallback_position_tolerance = 0.02  # 进入位置优先近似阈值
+        self._ik_reject_position_tolerance = 0.08
+        self._ik_singularity_condition_threshold = (
+            250.0  # 雅可比矩阵条件数阈值。条件数过大说明接近奇异位形，IK 解可能不稳定
+        )
+        self._ik_joint_step_limit = 0.08  # 每次 IK 迭代允许的最大关节增量，单位 rad，防止单步求解跳太大
+        self._ik_full_max_iter = 80
+        self._ik_approx_max_iter = 80
+        self._last_ik_diag_log_time = {}
+        self._ik_reject_active = {
+            robots.LEFT: False,
+            robots.RIGHT: False,
+        }  # 记录左右臂当前是否处于 IK 拒绝状态
+        self._joint_actuator_ids = {}  # 缓存 MuJoCo actuator id，后面根据 joint name 找对应 actuator 控制关节
+        self._joint_hold_qpos = (
+            None  # 保存当前要保持的关节位置。没有新目标或 pause 时，可以让关节保持上一安全位置
+        )
+        self._initial_endeff_poses = {}  # 缓存左右臂初始末端位姿，用于 IK 诊断和相对目标分析。
+        self._ik_logger = self._setup_ik_logger()
 
         # 初始化MuJoCo模型
         self.model = None
         self.data = None
         self._load_model()
+        self._left_joint_ids = []
+        self._right_joint_ids = []
+        self._left_endeff_site_id = None
+        self._right_endeff_site_id = None
+        self._cache_joint_ids()
+        self._cache_actuator_ids()
+        self._configure_position_servos()
+        self._cache_initial_endeff_poses()
 
         # 初始化ZMQ订阅者: 接收robot层IK后的关节命令
         self._right_endeff_subscriber = ZMQSubscriber(
@@ -162,55 +196,18 @@ class MuJoCoSysmoSimulator(Component):
 
         # 计时器
         self.timer = FrequencyTimer(robots.VR_FREQ)  # 30Hz
-
-        # 关节索引缓存
-        self._left_joint_ids = []
-        self._right_joint_ids = []
-        self._joint_actuator_ids = {}
-        self._joint_hold_qpos = None
-        self._initial_endeff_poses = {}
-        self._left_endeff_site_id = None
-        self._right_endeff_site_id = None
-        self._cache_joint_ids()
-        self._cache_actuator_ids()
-        self._configure_position_servos()
-
-        # robot层IK后的关节命令缓存
-        self._left_target: Optional[Sysmo32JointCommand] = None
-        self._right_target: Optional[Sysmo32JointCommand] = None
-        self._last_no_joint_command_log_time = {
-            robots.LEFT: 0.0,
-            robots.RIGHT: 0.0,
-        }
-
-        # IK参数
-        self._ik_full_max_iter = 25
-        self._ik_approx_max_iter = 120
-        self._ik_tolerance = 1e-3
-        self._ik_orientation_tolerance = 0.03
-        self._ik_fallback_orientation_weight = 0.25
-        self._ik_singularity_condition_threshold = 1e4
-        self._ik_joint_step_limit = 0.08
-        self._ik_fallback_position_tolerance = 0.03
-        self._ik_reject_position_tolerance = 0.08
-        self._last_ik_diag_log_time: Dict[str, float] = {}
-        self._ik_reject_active: Dict[str, bool] = {}
-        self._ik_logger = self._setup_ik_logger()
         self._ik_logger.info(
-            (
-                "IK logger initialized: "
-                f"full_max_iter={self._ik_full_max_iter}, "
-                f"approx_max_iter={self._ik_approx_max_iter}, "
-                f"tolerance={self._ik_tolerance}, "
-                f"orientation_tolerance={self._ik_orientation_tolerance}, "
-                f"fallback_orientation_weight={self._ik_fallback_orientation_weight}, "
-                f"reject_position_tolerance={self._ik_reject_position_tolerance}, "
-                f"singularity_condition_threshold={self._ik_singularity_condition_threshold}"
-            )
+            "IK参数: tolerance=%s, orientation_tolerance=%s, "
+            "fallback_orientation_weight=%s, reject_position_tolerance=%s, "
+            "singularity_condition_threshold=%s",
+            self._ik_tolerance,
+            self._ik_orientation_tolerance,
+            self._ik_fallback_orientation_weight,
+            self._ik_reject_position_tolerance,
+            self._ik_singularity_condition_threshold,
         )
-        self._cache_initial_endeff_poses()
 
-        logger.info(f"MuJoCo SYSMO-32仿真器初始化完成, URDF: {urdf_path}")
+        logger.info(f"MuJoCo SYSMO-32仿真器初始化完成, URDF: {self.urdf_path}")
 
     def _setup_ik_logger(self):
         repo_root = Path(__file__).resolve().parents[5]
@@ -220,10 +217,9 @@ class MuJoCoSysmoSimulator(Component):
         timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M-%S.%f")[:-3]
         log_file = ik_log_dir / f"ik_run_{timestamp}_pid{os.getpid()}.log"
 
-        ik_logger = logging.getLogger(f"{__name__}.ik.{os.getpid()}")
+        ik_logger = logging.getLogger(f"{__name__}.ik.{id(self)}")
         ik_logger.setLevel(logging.DEBUG)
         ik_logger.propagate = False
-
         for handler in list(ik_logger.handlers):
             ik_logger.removeHandler(handler)
             handler.close()
@@ -998,57 +994,52 @@ class MuJoCoSysmoSimulator(Component):
             with mujoco.viewer.launch_passive(self.model, self.data) as viewer:
                 while viewer.is_running():
                     self.timer.start_loop()
-
                     # 接收目标命令
                     self._receive_targets()
-
-                    # 应用右手robot层IK关节目标
-                    self._apply_joint_command(
+                    # 应用右手目标
+                    self._apply_endeff_target(
                         self._right_target,
                         self._right_joint_ids,
                     )
-
-                    # 应用左手robot层IK关节目标
-                    self._apply_joint_command(
+                    # 应用左手目标
+                    self._apply_endeff_target(
                         self._left_target,
                         self._left_joint_ids,
                     )
-
+                    # 把关节保持在上一帧/当前目标位置，避免 MuJoCo 物理仿真把手臂自然带偏。 这里会设置：qpos、qvel=0、actuator ctrl
                     self._apply_joint_position_holds()
+                    # 给左右臂关节加重力补偿，让手臂不因为重力下垂
                     self._apply_arm_gravity_compensation()
-
                     # 步进仿真
                     mujoco.mj_step(self.model, self.data)
+                    # 因为 mj_step() 后物理状态可能有微小漂移，所以再把关节拉回目标保持位置
                     self._apply_joint_position_holds()
+                    # 根据当前 qpos/qvel/ctrl 重新计算 MuJoCo 派生状态，比如 link pose、site pose、传感器等。
                     mujoco.mj_forward(self.model, self.data)
-
                     # 更新渲染
                     viewer.sync()
-
                     self.timer.end_loop()
-        else:
-            while True:
-                self.timer.start_loop()
+            return
 
-                self._receive_targets()
-
-                self._apply_joint_command(
-                    self._right_target,
-                    self._right_joint_ids,
-                )
-
-                self._apply_joint_command(
-                    self._left_target,
-                    self._left_joint_ids,
-                )
-
-                self._apply_joint_position_holds()
-                self._apply_arm_gravity_compensation()
-                mujoco.mj_step(self.model, self.data)
-                self._apply_joint_position_holds()
-                mujoco.mj_forward(self.model, self.data)
-
-                self.timer.end_loop()
+        while True:
+            self.timer.start_loop()
+            self._receive_targets()
+            self._apply_endeff_target(
+                self._right_target,
+                self._right_joint_ids,
+                self._right_endeff_site_id,
+            )
+            self._apply_endeff_target(
+                self._left_target,
+                self._left_joint_ids,
+                self._left_endeff_site_id,
+            )
+            self._apply_joint_position_holds()
+            self._apply_arm_gravity_compensation()
+            mujoco.mj_step(self.model, self.data)
+            self._apply_joint_position_holds()
+            mujoco.mj_forward(self.model, self.data)
+            self.timer.end_loop()
 
     def cleanup(self):
         """清理资源。"""
