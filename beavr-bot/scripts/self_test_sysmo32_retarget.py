@@ -56,14 +56,14 @@ def retarget_like_xarm_operator(
     resolution_scale: float = 1.0,
 ) -> np.ndarray:
     """Same relative transform as XArmOperator._apply_retargeted_angles()."""
-    h_ht_hi = np.linalg.inv(hand_init_h) @ hand_moving_h
+    hand_rotation_delta_vr = hand_moving_h[:3, :3] @ hand_init_h[:3, :3].T
 
     h_robot_to_vr = H_R_V_SYSMO32
     r_robot_to_vr = h_robot_to_vr[:3, :3]
     r_vr_to_robot = np.linalg.inv(r_robot_to_vr)
 
     relative_affine_in_robot_frame = np.eye(4)
-    relative_affine_in_robot_frame[:3, :3] = r_vr_to_robot @ h_ht_hi[:3, :3] @ r_robot_to_vr
+    relative_affine_in_robot_frame[:3, :3] = r_vr_to_robot @ hand_rotation_delta_vr @ r_robot_to_vr
     relative_affine_in_robot_frame[:3, 3] = (
         r_vr_to_robot @ (hand_moving_h[:3, 3] - hand_init_h[:3, 3]) * resolution_scale
     )

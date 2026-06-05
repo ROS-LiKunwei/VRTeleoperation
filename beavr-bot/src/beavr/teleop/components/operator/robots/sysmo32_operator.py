@@ -102,6 +102,8 @@ class Sysmo32Operator(XArmOperator):
         teleoperation_state_port: int = None,
         logging_config: dict = None,
         hand_side: str = "right",
+        hand_frame_timeout_s: float = 0.3,
+        rotation_delta_frame: str = "base",
         **kwargs,
     ):
         h_r_v = H_R_V_SYSMO32
@@ -126,4 +128,6 @@ class Sysmo32Operator(XArmOperator):
             teleoperation_state_port=teleoperation_state_port,
             logging_config=logging_config,
             hand_side=hand_side,
+            hand_frame_timeout_s=hand_frame_timeout_s,
+            rotation_delta_frame=rotation_delta_frame,
         )

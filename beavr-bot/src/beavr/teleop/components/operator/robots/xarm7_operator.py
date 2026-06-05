@@ -54,6 +54,8 @@ class XArmOperator(Operator):
         teleoperation_state_port: Optional[int] = None,
         logging_config: Optional[Dict[str, Any]] = None,
         hand_side: str = robots.RIGHT,
+        hand_frame_timeout_s: float = 0.15,
+        rotation_delta_frame: str = "body",
     ):
         """
         Initializes the XArmOperator.
@@ -74,6 +76,8 @@ class XArmOperator(Operator):
             teleoperation_state_port: （可选）用于接收遥操作重置或暂停消息的端口.
             logging_config: （可选）用于姿态日志记录的配置字典.
             hand_side: 手侧（'left' 左手或 'right' 右手），用于确定关键点订阅的正确话题.
+            hand_frame_timeout_s: 允许复用上一帧手部数据的最长时间，超时后本周期不发布新目标.
+            rotation_delta_frame: 姿态增量表达坐标系，"body" 保留旧行为，"base" 使用世界/base增量.
         """
         # 初始化基础属性
         self.operator_name = operator_name
@@ -82,6 +86,9 @@ class XArmOperator(Operator):
         self._host, self._port = host, transformed_keypoints_port
 
         self.h_r_v = h_r_v
+        if rotation_delta_frame not in ("body", "base"):
+            raise ValueError(f"rotation_delta_frame must be 'body' or 'base', got {rotation_delta_frame}")
+        self.rotation_delta_frame = rotation_delta_frame
 
         # 初始化ZMQ上下文和订阅者
         self._context = get_global_context()
@@ -167,6 +174,7 @@ class XArmOperator(Operator):
         self.hand_init_t: Optional[np.ndarray] = None
         self.last_valid_hand_frame: Optional[np.ndarray] = None
         self._last_hand_data_time: float = 0.0
+        self.hand_frame_timeout_s = float(hand_frame_timeout_s)
         self._last_invalid_hand_frame_log_time: float = 0.0
 
         # Filter setup
@@ -285,8 +293,8 @@ class XArmOperator(Operator):
 
         # 如果没有新数据或处理失败，正常控制时可短暂复用缓存帧；reset时必须等待新帧。
         if use_cache and self.last_valid_hand_frame is not None:
-            if hasattr(self, "_last_hand_data_time") and (time.time() - self._last_hand_data_time) > 0.15:
-                logger.debug(f"{self.operator_name}: 手部数据超时(>{0.15:.2f}s),手臂保持原位")
+            if hasattr(self, "_last_hand_data_time") and (time.time() - self._last_hand_data_time) > self.hand_frame_timeout_s:
+                logger.debug(f"{self.operator_name}: 手部数据超时(>{self.hand_frame_timeout_s:.2f}s),手臂保持原位")
                 return None
             return self.last_valid_hand_frame
 
@@ -407,6 +415,12 @@ class XArmOperator(Operator):
         homo[:3, 3] = t  # 设置平移部分
         homo[:3, :3] = r_mat  # 设置旋转部分
         return homo
+
+    def _hand_rotation_delta_vr(self, body_relative_h: np.ndarray) -> np.ndarray:
+        """Return hand orientation delta expressed in the requested VR frame."""
+        if self.rotation_delta_frame == "base":
+            return self.hand_moving_h[:3, :3] @ self.hand_init_h[:3, :3].T
+        return body_relative_h[:3, :3]
 
     def project_to_rotation_matrix(self, r_mat: np.ndarray) -> np.ndarray:
         """
@@ -684,9 +698,10 @@ class XArmOperator(Operator):
             h_robot_to_vr = self.h_r_v
             r_robot_to_vr = h_robot_to_vr[:3, :3]
             r_vr_to_robot = np.linalg.inv(r_robot_to_vr)
+            hand_rotation_delta_vr = self._hand_rotation_delta_vr(h_ht_hi)
 
             relative_affine_in_robot_frame = np.eye(4)
-            relative_affine_in_robot_frame[:3, :3] = r_vr_to_robot @ h_ht_hi[:3, :3] @ r_robot_to_vr
+            relative_affine_in_robot_frame[:3, :3] = r_vr_to_robot @ hand_rotation_delta_vr @ r_robot_to_vr
             relative_affine_in_robot_frame[:3, 3] = (
                 r_vr_to_robot @ (self.hand_moving_h[:3, 3] - self.hand_init_h[:3, 3]) * self.resolution_scale
             )
