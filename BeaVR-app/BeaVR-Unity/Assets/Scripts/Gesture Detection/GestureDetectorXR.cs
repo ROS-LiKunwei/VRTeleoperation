@@ -50,6 +50,23 @@ public class GestureDetectorXR : MonoBehaviour
 	public float MinGestureSendDeltaMeters = 0.001f;
 	private readonly Dictionary<string, List<Vector3>> _lastSentHandFrames = new Dictionary<string, List<Vector3>>();
 	private readonly Dictionary<string, string> _lastSentHandModes = new Dictionary<string, string>();
+	private readonly Dictionary<string, int> _lastSentHandCommands = new Dictionary<string, int>();
+
+	// 抓取/松开手势识别：随关键点帧一起追加 hand_command，Python端 1=open, 2=grasp
+	[Header("抓取/松开识别")]
+	public bool EnableGrabReleaseDetection = true;
+	[Tooltip("食指/中指/无名指/小指中至少多少根弯曲时判定抓取。")]
+	[Range(1, 4)] public int GrabRequiredCurledFingers = 3;
+	[Tooltip("指尖到手掌距离小于该阈值时，该手指计为弯曲。单位：米。")]
+	public float GrabFingerTipToPalmThresholdMeters = 0.055f;
+	[Tooltip("指尖到手掌距离大于该阈值时，该手指计为伸直。单位：米。应大于抓取阈值以形成迟滞。")]
+	public float ReleaseFingerTipToPalmThresholdMeters = 0.075f;
+	[Tooltip("抓取/松开状态切换后，至少等待该时间才允许再次切换。单位：秒。")]
+	public float GrabReleaseStateCooldownSeconds = 0.12f;
+	private const int HAND_COMMAND_OPEN = 1;
+	private const int HAND_COMMAND_GRASP = 2;
+	private readonly Dictionary<string, int> _currentHandCommands = new Dictionary<string, int>();
+	private readonly Dictionary<string, float> _lastHandCommandChangeTimes = new Dictionary<string, float>();
 
 	// PICO 26个坐标系数据打印
     [Header("PICO 26个坐标系数据打印")]
@@ -141,6 +158,14 @@ public class GestureDetectorXR : MonoBehaviour
 		XRHandJointID.LittleProximal,
 		XRHandJointID.LittleIntermediate,
 		XRHandJointID.LittleDistal,
+		XRHandJointID.LittleTip
+	};
+
+	static readonly XRHandJointID[] k_GrabReleaseFingerTips = new XRHandJointID[]
+	{
+		XRHandJointID.IndexTip,
+		XRHandJointID.MiddleTip,
+		XRHandJointID.RingTip,
 		XRHandJointID.LittleTip
 	};
 
@@ -650,13 +675,17 @@ public class GestureDetectorXR : MonoBehaviour
 			{
 				ResetLastSentHandFrame("RightHand");
 			}
-			else if (ShouldSendHandFrame("RightHand", rightHandGestureData, typeMarker))
+			else
 			{
-				string rightHandDataString = SerializeVector3List(rightHandGestureData);
-				rightHandDataString = typeMarker + ":" + rightHandDataString;
-				sentRight = NetMQController.Instance.SendMessage("RightHand", rightHandDataString);
-				if (sentRight)
-					StoreLastSentHandFrame("RightHand", rightHandGestureData, typeMarker);
+				int rightHandCommand = UpdateGrabReleaseCommand("RightHand", _handSubsystem.rightHand);
+				if (ShouldSendHandFrame("RightHand", rightHandGestureData, typeMarker, rightHandCommand))
+				{
+					string rightHandDataString = SerializeVector3List(rightHandGestureData);
+					rightHandDataString = typeMarker + ":" + AppendHandCommandMetadata(rightHandDataString, rightHandCommand);
+					sentRight = NetMQController.Instance.SendMessage("RightHand", rightHandDataString);
+					if (sentRight)
+						StoreLastSentHandFrame("RightHand", rightHandGestureData, typeMarker, rightHandCommand);
+				}
 			}
 
 			// 左手
@@ -665,13 +694,17 @@ public class GestureDetectorXR : MonoBehaviour
 			{
 				ResetLastSentHandFrame("LeftHand");
 			}
-			else if (ShouldSendHandFrame("LeftHand", leftHandGestureData, typeMarker))
+			else
 			{
-				string leftHandDataString = SerializeVector3List(leftHandGestureData);
-				leftHandDataString = typeMarker + ":" + leftHandDataString;
-				sentLeft = NetMQController.Instance.SendMessage("LeftHand", leftHandDataString);
-				if (sentLeft)
-					StoreLastSentHandFrame("LeftHand", leftHandGestureData, typeMarker);
+				int leftHandCommand = UpdateGrabReleaseCommand("LeftHand", _handSubsystem.leftHand);
+				if (ShouldSendHandFrame("LeftHand", leftHandGestureData, typeMarker, leftHandCommand))
+				{
+					string leftHandDataString = SerializeVector3List(leftHandGestureData);
+					leftHandDataString = typeMarker + ":" + AppendHandCommandMetadata(leftHandDataString, leftHandCommand);
+					sentLeft = NetMQController.Instance.SendMessage("LeftHand", leftHandDataString);
+					if (sentLeft)
+						StoreLastSentHandFrame("LeftHand", leftHandGestureData, typeMarker, leftHandCommand);
+				}
 			}
 
 			// PICO发送频率统计
@@ -802,9 +835,76 @@ public class GestureDetectorXR : MonoBehaviour
 	}
 
 	/// <summary>
+	/// 根据四指弯曲程度更新当前手的抓取/松开命令。返回值：1=松开，2=抓取。
+	/// </summary>
+	int UpdateGrabReleaseCommand(string handKey, XRHand hand)
+	{
+		if (!_currentHandCommands.TryGetValue(handKey, out int previousCommand))
+			previousCommand = HAND_COMMAND_OPEN;
+
+		if (!EnableGrabReleaseDetection || !hand.isTracked)
+			return previousCommand;
+
+		var palm = hand.GetJoint(XRHandJointID.Palm);
+		if (!palm.TryGetPose(out Pose palmPose))
+			return previousCommand;
+
+		Vector3 palmPosition = ToWorldPosition(palmPose.position);
+		float grabThreshold = Mathf.Max(0.001f, GrabFingerTipToPalmThresholdMeters);
+		float releaseThreshold = Mathf.Max(grabThreshold, ReleaseFingerTipToPalmThresholdMeters);
+		int curledCount = 0;
+		int extendedCount = 0;
+
+		for (int i = 0; i < k_GrabReleaseFingerTips.Length; i++)
+		{
+			var tip = hand.GetJoint(k_GrabReleaseFingerTips[i]);
+			if (!tip.TryGetPose(out Pose tipPose))
+				continue;
+
+			float distance = Vector3.Distance(ToWorldPosition(tipPose.position), palmPosition);
+			if (distance <= grabThreshold)
+				curledCount++;
+			if (distance >= releaseThreshold)
+				extendedCount++;
+		}
+
+		int requiredCurled = Mathf.Clamp(GrabRequiredCurledFingers, 1, k_GrabReleaseFingerTips.Length);
+		int newCommand = previousCommand;
+		if (curledCount >= requiredCurled)
+			newCommand = HAND_COMMAND_GRASP;
+		else if (extendedCount >= requiredCurled)
+			newCommand = HAND_COMMAND_OPEN;
+
+		float currentTime = Time.time;
+		if (newCommand != previousCommand)
+		{
+			float lastChangeTime = _lastHandCommandChangeTimes.TryGetValue(handKey, out float t) ? t : -999f;
+			if (currentTime - lastChangeTime < Mathf.Max(0f, GrabReleaseStateCooldownSeconds))
+				return previousCommand;
+
+			_lastHandCommandChangeTimes[handKey] = currentTime;
+			Debug.Log($"GestureDetectorXR: {handKey} 手势命令切换为 {(newCommand == HAND_COMMAND_GRASP ? "抓取" : "松开")} ({newCommand})");
+		}
+
+		_currentHandCommands[handKey] = newCommand;
+		return newCommand;
+	}
+
+	/// <summary>
+	/// 将抓取/松开命令追加到Unity手部关键点协议尾部。
+	/// </summary>
+	string AppendHandCommandMetadata(string serializedHandData, int handCommand)
+	{
+		if (!EnableGrabReleaseDetection)
+			return serializedHandData;
+
+		return serializedHandData + "hand_command=" + handCommand;
+	}
+
+	/// <summary>
 	/// 判断当前手部帧是否应该发送。与上一次成功发送的帧相比，最大关节位移小于阈值时跳过。
 	/// </summary>
-	bool ShouldSendHandFrame(string handKey, List<Vector3> currentFrame, string typeMarker)
+	bool ShouldSendHandFrame(string handKey, List<Vector3> currentFrame, string typeMarker, int handCommand)
 	{
 		if (currentFrame == null || currentFrame.Count == 0)
 			return false;
@@ -818,6 +918,12 @@ public class GestureDetectorXR : MonoBehaviour
 		if (!_lastSentHandFrames.TryGetValue(handKey, out var lastFrame) ||
 			lastFrame == null ||
 			lastFrame.Count != currentFrame.Count)
+		{
+			return true;
+		}
+
+		if (!_lastSentHandCommands.TryGetValue(handKey, out int lastCommand) ||
+			lastCommand != handCommand)
 		{
 			return true;
 		}
@@ -838,10 +944,11 @@ public class GestureDetectorXR : MonoBehaviour
 	/// <summary>
 	/// 保存上一次成功发送的手部帧，避免后续被列表复用影响比较。
 	/// </summary>
-	void StoreLastSentHandFrame(string handKey, List<Vector3> frame, string typeMarker)
+	void StoreLastSentHandFrame(string handKey, List<Vector3> frame, string typeMarker, int handCommand)
 	{
 		_lastSentHandFrames[handKey] = new List<Vector3>(frame);
 		_lastSentHandModes[handKey] = typeMarker;
+		_lastSentHandCommands[handKey] = handCommand;
 	}
 
 	/// <summary>
@@ -853,6 +960,8 @@ public class GestureDetectorXR : MonoBehaviour
 			_lastSentHandFrames.Remove(handKey);
 		if (_lastSentHandModes.ContainsKey(handKey))
 			_lastSentHandModes.Remove(handKey);
+		if (_lastSentHandCommands.ContainsKey(handKey))
+			_lastSentHandCommands.Remove(handKey);
 	}
 
 	/// <summary>

@@ -98,6 +98,7 @@ class XArmOperator(Operator):
             frame_topic = f"{robots.RIGHT}_{robots.TRANSFORMED_HAND_FRAME}"
         else:  # LEFT
             frame_topic = f"{robots.LEFT}_{robots.TRANSFORMED_HAND_FRAME}"
+        self._transformed_frame_topic = frame_topic
 
         # 接收从 keypoint_transform.py 处理后发送过来的手部姿态数据,InputFrame 对象包含了手部在空间中的位置和方向向量
         self._arm_transformed_keypoint_subscriber = ZMQSubscriber(
@@ -173,9 +174,14 @@ class XArmOperator(Operator):
         self.hand_moving_h: Optional[np.ndarray] = None
         self.hand_init_t: Optional[np.ndarray] = None
         self.last_valid_hand_frame: Optional[np.ndarray] = None
+        self.latest_hand_command: Optional[int] = None
         self._last_hand_data_time: float = 0.0
         self.hand_frame_timeout_s = float(hand_frame_timeout_s)
         self._last_invalid_hand_frame_log_time: float = 0.0
+        self._last_reset_pose_wait_log_time: float = 0.0
+        self._last_reset_hand_wait_log_time: float = 0.0
+        self._last_no_hand_frame_log_time: float = 0.0
+        self._last_publish_command_log_time: float = 0.0
 
         # Filter setup
         self.use_filter = use_filter  # 是否使用滤波器
@@ -275,6 +281,7 @@ class XArmOperator(Operator):
         if data is not None:
             # 处理新数据 - 预期接收到包含 frame_vectors (帧向量) 的 InputFrame 对象
             try:
+                self.latest_hand_command = data.hand_command
                 if data.frame_vectors is not None:
                     # frame_vectors 应该是一个包含 4 个元组的序列 (origin + 3 basis vectors)
                     # Convert from Tuple[Tuple[float, float, float], ...] to numpy array (4, 3)
@@ -304,6 +311,7 @@ class XArmOperator(Operator):
     def _clear_hand_tracking_cache(self) -> None:
         """Clear hand-frame state so the next resume/reset cannot use stale VR data."""
         self.last_valid_hand_frame = None
+        self.latest_hand_command = None
         self._last_hand_data_time = 0.0
         self.hand_moving_h = None
         self.comp_filter = None
@@ -313,6 +321,48 @@ class XArmOperator(Operator):
         if current_time - self._last_invalid_hand_frame_log_time >= 1.0:
             self._last_invalid_hand_frame_log_time = current_time
             logger.warning(f"{self.operator_name}: 跳过无效手部帧: {reason}")
+
+    def _log_reset_pose_wait(self) -> None:
+        current_time = time.time()
+        if current_time - self._last_reset_pose_wait_log_time >= 1.0:
+            self._last_reset_pose_wait_log_time = current_time
+            logger.info(
+                f"{self.operator_name}: 等待robot当前位姿 endeff_homo, "
+                f"reset发布 topic=reset port={self._publisher_port}, "
+                f"订阅 topic=endeff_homo port={self.endeff_homo_subscriber._port}"
+            )
+
+    def _log_reset_hand_wait(self) -> None:
+        current_time = time.time()
+        if current_time - self._last_reset_hand_wait_log_time >= 1.0:
+            self._last_reset_hand_wait_log_time = current_time
+            logger.info(
+                f"{self.operator_name}: 等待有效VR手部初始帧, "
+                f"订阅 topic={self._transformed_frame_topic} "
+                f"port={self._port}"
+            )
+
+    def _log_no_hand_frame(self) -> None:
+        current_time = time.time()
+        if current_time - self._last_no_hand_frame_log_time >= 1.0:
+            self._last_no_hand_frame_log_time = current_time
+            logger.warning(
+                f"{self.operator_name}: 暂未收到有效VR手部运动帧，跳过本周期, "
+                f"订阅 topic={self._transformed_frame_topic} "
+                f"port={self._port}"
+            )
+
+    def _log_published_cartesian_command(self, cartesian_cmd: CartesianTarget) -> None:
+        current_time = time.time()
+        if current_time - self._last_publish_command_log_time >= 1.0:
+            self._last_publish_command_log_time = current_time
+            logger.info(
+                f"{self.operator_name}: 已发布operator 7维位姿命令 "
+                f"topic=endeff_coords port={self._publisher_port} "
+                f"position={cartesian_cmd.position_m} "
+                f"orientation_xyzw={cartesian_cmd.orientation_xyzw} "
+                f"hand_command={cartesian_cmd.hand_command}"
+            )
 
     def _sanitize_hand_frame(self, frame: np.ndarray) -> Optional[np.ndarray]:
         """Validate and orthonormalize frame_vectors before reset/control uses them."""
@@ -531,6 +581,7 @@ class XArmOperator(Operator):
 
         # Keep trying until we get a response
         while robot_frame_homo is None:
+            self._log_reset_pose_wait()
             self._publisher_manager.publish(
                 host=self._publisher_host,
                 port=self._publisher_port,
@@ -567,6 +618,7 @@ class XArmOperator(Operator):
         # 4. 获取手部的初始位姿
         first_hand_frame = None
         while first_hand_frame is None:
+            self._log_reset_hand_wait()
             # 阻塞等待直到获取到有效的 VR 手部追踪数据
             first_hand_frame = self._get_hand_frame(use_cache=False)  # 等待有效新手部帧
             time.sleep(0.01)
@@ -663,7 +715,7 @@ class XArmOperator(Operator):
 
         # 如果无法获取有效的手部帧（可能丢包或追踪丢失），跳过本轮循环
         if moving_hand_frame is None:
-            logger.warning(f"Warning ({self.operator_name}): No valid hand frame received, skipping cycle.")
+            self._log_no_hand_frame()
             return
 
         # 安全检查：确保重置阶段生成的初始位姿已存在
@@ -773,6 +825,7 @@ class XArmOperator(Operator):
                 float(orientation_quat[2]),
                 float(orientation_quat[3]),
             ),  # 目标姿态四元数
+            hand_command=self.latest_hand_command,
         )
 
         # 仅在系统处于运行模式CONT mode时，将指令通过 ZMQ 发布给下游
@@ -785,7 +838,7 @@ class XArmOperator(Operator):
                     topic="endeff_coords",  # 发布话题
                     data=cartesian_cmd,  # 发布数据
                 )
-                # logger.info(f"Published end-effector command: {command_data}")
+                self._log_published_cartesian_command(cartesian_cmd)
             except (ConnectionError, SerializationError) as e:
                 logger.error(f"Failed to publish end-effector command: {e}")
             except Exception as e:

@@ -70,6 +70,7 @@ def _safe_normalize(vector, min_norm=1e-6):
 
 class HandMode(IntEnum):
     """手部数据模式枚举"""
+
     ABSOLUTE = 1  # 绝对模式：关键点为世界坐标系下的绝对位置
     RELATIVE = 0  # 相对模式：关键点为相对于手腕的位置
 
@@ -185,12 +186,46 @@ class TransformHandPositionCoords(Component):
                 moving_average_limit=moving_average_limit,
             )
         self._last_invalid_frame_log_time = 0.0
+        self._last_no_raw_input_log_time = 0.0
+        self._last_receive_raw_input_log_time = 0.0
+        self._last_publish_frame_log_time = 0.0
 
     def _warn_invalid_frame(self, reason):
         current_time = time.time()
         if current_time - self._last_invalid_frame_log_time >= 1.0:
             self._last_invalid_frame_log_time = current_time
             logger.warning(f"{self.hand_side}_hand_keypoint_transform: 跳过无效手部帧: {reason}")
+
+    def _log_no_raw_input(self):
+        current_time = time.time()
+        if current_time - self._last_no_raw_input_log_time >= 1.0:
+            self._last_no_raw_input_log_time = current_time
+            logger.info(
+                f"{self.hand_side}_hand_keypoint_transform: 暂未收到PICO/Unity原始手部数据, "
+                f"订阅 topic={self.hand_side} port={self.keypoint_sub_port}"
+            )
+
+    def _log_receive_raw_input(self, input_frame, reshaped_keypoints):
+        current_time = time.time()
+        if current_time - self._last_receive_raw_input_log_time >= 1.0:
+            self._last_receive_raw_input_log_time = current_time
+            logger.info(
+                f"{self.hand_side}_hand_keypoint_transform: 已收到PICO/Unity原始手部数据 "
+                f"topic={self.hand_side} port={self.keypoint_sub_port} "
+                f"frame_hand={input_frame.hand_side} wrist={reshaped_keypoints[0].tolist()} "
+                f"is_relative={input_frame.is_relative} hand_command={input_frame.hand_command}"
+            )
+
+    def _log_publish_frame(self, coordinate_frame, hand_command):
+        current_time = time.time()
+        if current_time - self._last_publish_frame_log_time >= 1.0:
+            self._last_publish_frame_log_time = current_time
+            origin = np.asarray(coordinate_frame[0], dtype=np.float64).tolist()
+            logger.info(
+                f"{self.hand_side}_hand_keypoint_transform: 已发布变换后手部方向帧 "
+                f"topic={self.frame_topic} port={self.keypoint_transform_pub_port} "
+                f"origin={origin} hand_command={hand_command}"
+            )
 
     def _validate_hand_coords(self, hand_coords):
         if hand_coords is None or hand_coords.shape != (robots.OCULUS_NUM_KEYPOINTS, 3):
@@ -219,15 +254,17 @@ class TransformHandPositionCoords(Component):
         从pico4.py发布的InputFrame对象中提取关键点数据,并将其reshape为(26, 3)的形状。
 
         Returns:
-            tuple: (data_type, coordinates)
+            tuple: (data_type, coordinates, hand_command)
                 - data_type: HandMode.RELATIVE 或 HandMode.ABSOLUTE
                 - coordinates: numpy数组,形状为(26, 3),26个关节的xyz坐标
-                - 无数据时返回 (None, None)
+                - hand_command: 灵巧手命令，1=松开，2=抓取；无数据时为None。
+                - 无数据时返回 (None, None, None)
         """
         # 1. 接收数据：从 ZMQ 网络队列中非阻塞地拉取最新的一帧手部数据
         input_frame = self.keypoint_subscriber.recv_keypoints()
         if input_frame is None:
-            return None, None
+            self._log_no_raw_input()
+            return None, None, None
 
         # 2. 转换为 Numpy 数组：将接收到的通常是 Python List 格式的数据转化为高效的 numpy 数组
         keypoints = np.asanyarray(input_frame.keypoints)
@@ -236,7 +273,7 @@ class TransformHandPositionCoords(Component):
             f"_get_hand_coords: Received keypoints for {input_frame.hand_side} hand. "
             f"Length: {len(input_frame.keypoints)}, First 3 values: {input_frame.keypoints[:3] if len(input_frame.keypoints) > 0 else 'empty'}"
         )
-        
+
         # 3. 完整性校验
         expected_count = robots.OCULUS_NUM_KEYPOINTS * 3  # 26 * 3 = 78
         actual_count = keypoints.size
@@ -247,19 +284,20 @@ class TransformHandPositionCoords(Component):
                 f"Expected {expected_count} elements ({robots.OCULUS_NUM_KEYPOINTS} points × 3 coords), "
                 f"got {actual_count}. Skipping this frame."
             )
-            return None, None
+            return None, None, None
 
         # 4. 判断坐标系模式：根据传过来的标志位，判断这组坐标是绝对世界坐标 (ABSOLUTE) 还是相对坐标 (RELATIVE)
         data_type = self.relative_mode if input_frame.is_relative else self.absolute_mode
-        
+
         # 5. 重塑为 (26, 3) 形状：将 78 个元素的数组转换为 (26, 3) 的二维矩阵，每一行代表一个关节点的 [x, y, z]，方便后续做矩阵乘法和向量计算
         reshaped_keypoints = keypoints.reshape(robots.OCULUS_NUM_KEYPOINTS, 3)
+        self._log_receive_raw_input(input_frame, reshaped_keypoints)
         logger.debug(
             f"_get_hand_coords: Reshaped keypoints for {input_frame.hand_side} hand. "
             f"Shape: {reshaped_keypoints.shape}, Wrist position: {reshaped_keypoints[0]}"
         )
 
-        return data_type, reshaped_keypoints
+        return data_type, reshaped_keypoints, input_frame.hand_command
 
     def _orthogonalize_frame(self, x_vec, y_vec, z_vec):
         """
@@ -444,7 +482,7 @@ class TransformHandPositionCoords(Component):
         while True:
             self.timer.start_loop()
             # 1.从pico4.py订阅原始关键点数据
-            data_type, hand_coords = self._get_hand_coords()
+            data_type, hand_coords, hand_command = self._get_hand_coords()
 
             if hand_coords is None or data_type is None:
                 self.timer.end_loop()
@@ -453,7 +491,7 @@ class TransformHandPositionCoords(Component):
             # 2. 执行坐标变换
             (
                 transformed_keypoints,  # transformed_keypoints 是相对于手腕的
-                coordinate_frame,       #[wrist, x_vec, y_vec, z_vec],手腕在真实 VR 空间中的绝对坐标 + 手在世界坐标系下的绝对朝向
+                coordinate_frame,  # [wrist, x_vec, y_vec, z_vec],手腕在真实 VR 空间中的绝对坐标 + 手在世界坐标系下的绝对朝向
             ) = self.transform_keypoints(hand_coords)
             if transformed_keypoints is None or coordinate_frame is None:
                 self.timer.end_loop()
@@ -501,6 +539,7 @@ class TransformHandPositionCoords(Component):
                 keypoints=self.averaged_keypoints,
                 is_relative=data_type == self.relative_mode,
                 frame_vectors=self.averaged_coordinate_frame,
+                hand_command=hand_command,
             )
 
             # 7. 发布变换后的坐标给下游组件
@@ -519,6 +558,7 @@ class TransformHandPositionCoords(Component):
                 topic=self.frame_topic,
                 data=data,
             )
+            self._log_publish_frame(self.averaged_coordinate_frame, hand_command)
 
             self.timer.end_loop()
 

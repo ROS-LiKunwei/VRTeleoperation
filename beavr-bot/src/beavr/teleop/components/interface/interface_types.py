@@ -79,9 +79,26 @@ class CommandedCartesianState:
         }
 
 
-__all_ = [
+@dataclass(frozen=True)
+class Sysmo32JointCommand:
+    """SYSMO-32 joint-space command after robot-layer IK.
+
+    - arm_joint_positions_rad: six joint angles for the command side.
+    - full_command: ROS2 Float64MultiArray layout:
+      left arm 6, right arm 6, speed mode, four reserved zeros, neck.
+    """
+
+    timestamp_s: float
+    hand_side: str
+    arm_joint_positions_rad: Sequence[float]
+    full_command: Sequence[float]
+    hand_command: Optional[int] = None
+
+
+__all__ = [
     "RobotState",
     "ErrorEvent",
     "CartesianState",
     "CommandedCartesianState",
+    "Sysmo32JointCommand",
 ]
