@@ -80,9 +80,11 @@ class Sysmo32RealControlConfig:
     state_publish_fps: float = 30.0  # LeRobot录制状态发布频率
     hand_frame_timeout_s: float = 0.3  # 手部帧超时时间：0.3s
     safety_hold_arm_on_pause: bool = True  # 暂停时保持手臂位置
+    pause_hold_heartbeat_hz: float = 20.0  # 暂停保持命令心跳频率
     allow_placeholder_ik_for_mujoco: bool = False  # 允许降级 IK
     allow_mujoco_mirror_without_joint_state: bool = True
     mujoco_mirror_max_joint_velocity_rad_s: float = 3.0
+    publish_arm_command_topic_in_mujoco: bool = False
 
 
 # ROS2 桥接类,负责 ROS2 通信
@@ -139,7 +141,10 @@ class Sysmo32Ros2Bridge:
             logger.info("SYSMO-32 ROS2 bridge connected to %s", self.topics.joint_state_topic)
         except Exception as exc:
             self.available = False
-            logger.error("SYSMO-32 ROS2 bridge unavailable: %s", exc)
+            message = f"SYSMO-32 ROS2 bridge unavailable: {exc}"
+            logger.error(message)
+            if self.require_ros:
+                raise RuntimeError(message) from exc
 
     def _on_joint_state(self, msg) -> None:
         self.joint_cache.update_from_joint_state_msg(msg, now_s=time.time())
@@ -274,7 +279,9 @@ class Sysmo32RealControl(Component):
             self._left_hand_subscriber,
         ]
 
-        require_ros = self.control_backend in ("real", "real_with_mujoco")
+        require_ros = self.control_backend in ("real", "real_with_mujoco") or (
+            self.control_backend == "mujoco" and self.config.publish_arm_command_topic_in_mujoco
+        )
         self._ros2 = Sysmo32Ros2Bridge(self.config.ros2, require_ros=require_ros)
         self._dry_joint_cache = Sysmo32JointStateCache(self.config.ros2.joint_state_timeout_s)
         self._dry_joint_cache.update(np.zeros(6), np.zeros(6), now_s=time.time())
@@ -309,6 +316,8 @@ class Sysmo32RealControl(Component):
         self._last_session_command: Optional[str] = None
         self._real_reset_ready = self.control_backend == "mujoco"
         self._next_state_publish_time_s = 0.0
+        self._pause_hold_command: Optional[Sysmo32ArmCommand] = None
+        self._last_pause_hold_publish_time = 0.0
 
     def _validate_backend(self) -> None:
         if self.control_backend not in ("real", "mujoco", "real_with_mujoco"):
@@ -330,10 +339,18 @@ class Sysmo32RealControl(Component):
 
     def stream(self):
         logger.info("Starting SYSMO-32 real-interface controller backend=%s", self.control_backend)
+        if self.control_backend == "real_with_mujoco":
+            logger.info(
+                "SYSMO-32 real_with_mujoco requires fresh %s and a successful reset before "
+                "publishing %s; MuJoCo mirrors only commands that pass the real publish gate",
+                self.config.ros2.joint_state_topic,
+                self.config.ros2.arm_command_topic,
+            )
         while True:
             start = time.time()
             self._ros2.spin_once()
             self._handle_session_command()  # 处理暂停/恢复
+            self._publish_pause_hold_if_needed()
             self._receive_hand_frames()  # 接收手部关键点
             self._publish_hand_actions_for_current_state()  # 发布手部动作
             self._handle_reset_requests()  # 处理重置请求
@@ -360,6 +377,8 @@ class Sysmo32RealControl(Component):
                 self.control_backend == "mujoco"
             )  # 没有真实 /joint_states 依赖，resume 后可以先认为 reset ready；其余情况不能直接 ready，必须等 fresh /joint_states + reset 成功后，才允许真实机械臂发命令
             self._last_accepted_targets = {robots.LEFT: None, robots.RIGHT: None}  # 清掉上一次接受过的目标
+            self._pause_hold_command = None
+            self._last_pause_hold_publish_time = 0.0
             logger.info("SYSMO-32 resume received: next targets require reset/rebaseline")
 
     def _enter_pause(self, reason: str) -> None:
@@ -371,15 +390,59 @@ class Sysmo32RealControl(Component):
         self._latest_targets = {robots.LEFT: None, robots.RIGHT: None}
         self._last_accepted_targets = {robots.LEFT: None, robots.RIGHT: None}
         self._hand_mapper.force_release()
+        self._pause_hold_command = None
+        self._last_pause_hold_publish_time = 0.0
         if self.config.hand.force_release_on_pause:
             for hand_side in (robots.LEFT, robots.RIGHT):
                 if self._hand_frame_started[hand_side]:
                     self._publish_hand_action(hand_side, self.config.hand.default_action, reason, force=True)
-        snapshot = self._current_joint_snapshot()
+        snapshot = self._pause_hold_snapshot()
         if snapshot is not None:
             self._limiter.reset(snapshot.all_joints)
             self._mujoco_limiter.reset(snapshot.all_joints)
+            if self.config.safety_hold_arm_on_pause:
+                self._pause_hold_command = self._builder.build(
+                    snapshot.left_arm,
+                    snapshot.right_arm,
+                    timestamp_s=time.time(),
+                )
+                self._publish_pause_hold_if_needed(force=True, reason=reason)
         logger.info("SYSMO-32 paused immediately: %s", reason)
+
+    def _pause_hold_snapshot(self) -> Optional[Sysmo32JointStateSnapshot]:
+        if self.control_backend in ("real", "real_with_mujoco") and not self._real_joint_state_fresh():
+            self._warn_safety(
+                "pause_joint_state_stale",
+                "pause hold skipped: /joint_states is stale, refusing to publish a stale hold target",
+            )
+            return None
+        snapshot = self._current_joint_snapshot()
+        if snapshot is None:
+            self._warn_safety("pause_joint_state_missing", "pause hold skipped: missing joint state")
+        return snapshot
+
+    def _publish_pause_hold_if_needed(self, force: bool = False, reason: str = "pause hold") -> None:
+        if self._teleop_active or not self.config.safety_hold_arm_on_pause:
+            return
+        if self._pause_hold_command is None:
+            return
+
+        now = time.time()
+        heartbeat_period = 1.0 / max(0.1, float(self.config.pause_hold_heartbeat_hz))
+        if not force and now - self._last_pause_hold_publish_time < heartbeat_period:
+            return
+
+        command = Sysmo32ArmCommand(timestamp_s=now, values=self._pause_hold_command.values)
+        published = self._publish_arm_command_outputs(
+            command,
+            real_joint_state_fresh=self._real_joint_state_fresh(),
+            require_real_reset=False,
+            allow_stale_real_hold=True,
+        )
+        if published:
+            self._pause_hold_command = command
+            self._last_pause_hold_publish_time = now
+            logger.debug("SYSMO-32 pause hold command published reason=%s values=%s", reason, command.values)
 
     def _receive_hand_frames(self) -> None:
         for hand_side, subscriber in (
@@ -614,10 +677,7 @@ class Sysmo32RealControl(Component):
         if not any_target:
             return
         # 构建命令并限幅
-        mirror_only = self.control_backend == "mujoco" or (
-            self.control_backend == "real_with_mujoco"
-            and not (real_joint_state_fresh and self._real_reset_ready)
-        )
+        mirror_only = self.control_backend == "mujoco"
         try:
             command = self._builder.build(desired_left, desired_right, timestamp_s=time.time())
             limiter = self._mujoco_limiter if mirror_only else self._limiter
@@ -628,33 +688,12 @@ class Sysmo32RealControl(Component):
         if limited is None:
             self._warn_safety("command_limited_reject", f"arm command rejected: {reason}")
             return
-        # 发布命令
-        if self.control_backend in ("real", "real_with_mujoco"):
-            if real_joint_state_fresh and self._real_reset_ready:
-                published_real = self._ros2.publish_arm_command(limited)
-                if not published_real:
-                    self._warn_safety(
-                        "ros_arm_unavailable", "ROS2 arm publisher unavailable; not publishing real command"
-                    )
-                    return
-            elif self.control_backend == "real":
-                self._warn_safety(
-                    "real_reset_required", "real arm held until reset succeeds with fresh /joint_states"
-                )
-                return
-            else:
-                self._warn_safety(
-                    "mujoco_mirror_only",
-                    "/joint_states is stale or real reset is missing; publishing MuJoCo mirror only, not real arm command",
-                )
-        # 发布命令镜像（用于可视化/调试）
-        if self.control_backend in ("mujoco", "real_with_mujoco"):
-            self._publisher_manager.publish(
-                self.host, self._arm_command_mirror_port, SYSMO32_ARM_COMMAND_TOPIC, limited
-            )
-        # 模拟模式下更新关节状态缓存
-        if self.control_backend in ("mujoco", "real_with_mujoco"):
-            self._dry_joint_cache.update(limited.left_arm, limited.right_arm, now_s=limited.timestamp_s)
+        if not self._publish_arm_command_outputs(
+            limited,
+            real_joint_state_fresh=real_joint_state_fresh,
+            require_real_reset=True,
+        ):
+            return
 
         suffix = f" ({reason})" if reason else ""
         mode_suffix = " mirror_only" if mirror_only else ""
@@ -666,11 +705,63 @@ class Sysmo32RealControl(Component):
             limited.values,
         )
 
+    def _publish_arm_command_outputs(
+        self,
+        command: Sysmo32ArmCommand,
+        real_joint_state_fresh: bool,
+        require_real_reset: bool,
+        allow_stale_real_hold: bool = False,
+    ) -> bool:
+        if self.control_backend == "mujoco" and self.config.publish_arm_command_topic_in_mujoco:
+            published_real_topic = self._ros2.publish_arm_command(command)
+            if not published_real_topic:
+                self._warn_safety(
+                    "ros_arm_unavailable",
+                    "ROS2 arm command topic unavailable; not publishing MuJoCo command",
+                )
+                return False
+
+        if self.control_backend in ("real", "real_with_mujoco"):
+            real_state_gate_ready = real_joint_state_fresh or allow_stale_real_hold
+            reset_gate_ready = self._real_reset_ready or not require_real_reset
+            if real_state_gate_ready and reset_gate_ready:
+                published_real = self._ros2.publish_arm_command(command)
+                if not published_real:
+                    self._warn_safety(
+                        "ros_arm_unavailable", "ROS2 arm publisher unavailable; not publishing real command"
+                    )
+                    return False
+            elif self.control_backend == "real":
+                self._warn_safety(
+                    "real_reset_required", "real arm held until reset succeeds with fresh /joint_states"
+                )
+                return False
+            else:
+                self._warn_safety(
+                    "real_with_mujoco_reset_required",
+                    "/joint_states is stale or real reset is missing; holding both real command and MuJoCo mirror",
+                )
+                return False
+
+        if self.control_backend in ("mujoco", "real_with_mujoco"):
+            self._publisher_manager.publish(
+                self.host, self._arm_command_mirror_port, SYSMO32_ARM_COMMAND_TOPIC, command
+            )
+
+        if self.control_backend in ("mujoco", "real_with_mujoco"):
+            self._dry_joint_cache.update(command.left_arm, command.right_arm, now_s=command.timestamp_s)
+
+        return True
+
     def _current_joint_snapshot(self) -> Optional[Sysmo32JointStateSnapshot]:
         # 真实模式：通过 _ros2.joint_cache 获取关节状态（来自 ROS2）;
         # 模拟模式：使用 _dry_joint_cache 作为虚拟关节状态缓存
         if self.control_backend == "mujoco":
+            if self._real_joint_state_fresh():
+                return self._ros2.joint_cache.snapshot
             return self._dry_joint_cache.snapshot
+        if self.control_backend == "real_with_mujoco" and self._real_joint_state_fresh():
+            return self._ros2.joint_cache.snapshot
         if (
             self.control_backend == "real_with_mujoco"
             and not self._real_reset_ready

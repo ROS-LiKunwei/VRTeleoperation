@@ -1,0 +1,1565 @@
+
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+  <xacro:macro name="links">
+  <link
+    name="base_link">
+    <inertial>
+      <origin
+        xyz="0.0144314214562501 -0.000347294821231768 0.261753604614404"
+        rpy="0 0 0" />
+      <mass
+        value="15.0566884173139" />
+      <inertia
+        ixx="0.135073012328598"
+        ixy="0.000117407750574321"
+        ixz="3.88418765806531E-06"
+        iyy="0.0474385623535262"
+        iyz="-6.28403997828038E-05"
+        izz="0.109707347323975" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sysmo_description/meshes/base_link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.752941176470588 0.752941176470588 0.752941176470588 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sysmo_description/meshes/base_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+
+  <!-- Dummy root link to address KDL limitation -->
+  <link name="dummy_root"/>
+
+  <joint name="fixed_joint_dummy_root_to_base" type="fixed">
+    <parent link="dummy_root"/>
+    <child link="base_link"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+
+  <link
+    name="waist_J2_Link">
+    <inertial>
+      <origin
+        xyz="1.33761975567262E-05 -0.0465334306804325 -0.00550931479457389"
+        rpy="0 0 0" />
+      <mass
+        value="2.22276011825176" />
+      <inertia
+        ixx="0.00272162326889615"
+        ixy="7.07678426600203E-07"
+        ixz="-1.05317219371942E-06"
+        iyy="0.00247646659453452"
+        iyz="-0.000133244883793041"
+        izz="0.00282276650844463" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sysmo_description/meshes/waist_J2_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.898039215686275 0.917647058823529 0.929411764705882 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sysmo_description/meshes/waist_J2_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="waist_pitch_joint"
+    type="revolute">
+    <origin
+      xyz="0 0.0543 0.0637"
+      rpy="0 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="waist_J2_Link" />
+    <axis
+      xyz="0 1 0" />
+    <limit
+      lower="-1.57"
+      upper="1.57"
+      effort="0"
+      velocity="0" />
+  </joint>
+  <link
+    name="waist_J1_Link">
+    <inertial>
+      <origin
+        xyz="-0.0916770591219124 -1.41712462308093E-06 -0.0398011996077863"
+        rpy="0 0 0" />
+      <mass
+        value="9.1913773710765" />
+      <inertia
+        ixx="0.0456387103677188"
+        ixy="-3.82747072260048E-07"
+        ixz="-0.00153209586555433"
+        iyy="0.0131465038423416"
+        iyz="-1.22504561632229E-06"
+        izz="0.0483554573288105" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sysmo_description/meshes/waist_J1_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.796078431372549 0.823529411764706 0.937254901960784 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sysmo_description/meshes/waist_J1_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="waist_yaw_joint"
+    type="revolute">
+    <origin
+      xyz="0 -0.0543 -0.0637"
+      rpy="0 0 0" />
+    <parent
+      link="waist_J2_Link" />
+    <child
+      link="waist_J1_Link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-1.57"
+      upper="1.57"
+      effort="0"
+      velocity="0" />
+  </joint>
+  <link
+    name="left_leg_J1_Link">
+    <inertial>
+      <origin
+        xyz="0.0507545021499059 2.39175916150469E-05 -0.00158737579529088"
+        rpy="0 0 0" />
+      <mass
+        value="2.20359353016527" />
+      <inertia
+        ixx="0.00280503051693476"
+        ixy="-1.22544184434393E-06"
+        ixz="0.000120630195953336"
+        iyy="0.00265505522729326"
+        iyz="-2.28060819818124E-06"
+        izz="0.00262030977745761" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sysmo_description/meshes/left_leg_J1_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.898039215686275 0.917647058823529 0.929411764705882 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sysmo_description/meshes/left_leg_J1_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="left_hip_roll_joint"
+    type="revolute">
+    <origin
+      xyz="-0.0762 0.13 -0.0513"
+      rpy="0 0 0" />
+    <parent
+      link="waist_J1_Link" />
+    <child
+      link="left_leg_J1_Link" />
+    <axis
+      xyz="1 0 0" />
+    <limit
+      lower="-0.17"
+      upper="1.57"
+      effort="0"
+      velocity="0" />
+  </joint>
+  <link
+    name="left_leg_J2_Link">
+    <inertial>
+      <origin
+        xyz="-3.71412334070065E-06 -0.0646910295657058 -0.0649584080646664"
+        rpy="0 0 0" />
+      <mass
+        value="3.02546218178553" />
+      <inertia
+        ixx="0.0037122219360565"
+        ixy="-3.39517976873936E-07"
+        ixz="-8.40567388449068E-07"
+        iyy="0.00470426365640549"
+        iyz="-0.000112041588233299"
+        izz="0.00375689708420029" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sysmo_description/meshes/left_leg_J2_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.898039215686275 0.917647058823529 0.929411764705882 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sysmo_description/meshes/left_leg_J2_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="left_hip_yaw_joint"
+    type="revolute">
+    <origin
+      xyz="0.0552 0 -0.0473"
+      rpy="0 0 0" />
+    <parent
+      link="left_leg_J1_Link" />
+    <child
+      link="left_leg_J2_Link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-1.57"
+      upper="1.57"
+      effort="0"
+      velocity="0" />
+  </joint>
+  <link
+    name="left_leg_J3_Link">
+    <inertial>
+      <origin
+        xyz="-0.00103138656692779 -0.057848275457111 -0.110307006841488"
+        rpy="0 0 0" />
+      <mass
+        value="8.42417512422794" />
+      <inertia
+        ixx="0.0360296300746954"
+        ixy="-2.76768038563747E-05"
+        ixz="0.00103208696978129"
+        iyy="0.0371483071542214"
+        iyz="0.000280978999291478"
+        izz="0.00882665091056342" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sysmo_description/meshes/left_leg_J3_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.776470588235294 0.756862745098039 0.737254901960784 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sysmo_description/meshes/left_leg_J3_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="left_hip_pitch_joint"
+    type="revolute">
+    <origin
+      xyz="0 0.0738 -0.0702"
+      rpy="0 0 0" />
+    <parent
+      link="left_leg_J2_Link" />
+    <child
+      link="left_leg_J3_Link" />
+    <axis
+      xyz="0 1 0" />
+    <limit
+      lower="-1.57"
+      upper="1.48"
+      effort="0"
+      velocity="0" />
+  </joint>
+  <link
+    name="left_leg_J4_Link">
+    <inertial>
+      <origin
+        xyz="0.0166578798134145 -0.0549997867085384 -0.178592082634554"
+        rpy="0 0 0" />
+      <mass
+        value="1.49798799070375" />
+      <inertia
+        ixx="0.0137332883157404"
+        ixy="-4.85016529373644E-08"
+        ixz="-6.7263888247806E-06"
+        iyy="0.014066773285668"
+        iyz="1.68723863263392E-09"
+        izz="0.000473234837587742" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sysmo_description/meshes/left_leg_J4_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.898039215686275 0.917647058823529 0.929411764705882 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sysmo_description/meshes/left_leg_J4_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="left_knee_joint"
+    type="revolute">
+    <origin
+      xyz="0 -0.0188 -0.35"
+      rpy="0 0 0" />
+    <parent
+      link="left_leg_J3_Link" />
+    <child
+      link="left_leg_J4_Link" />
+    <axis
+      xyz="0 1 0" />
+    <limit
+      lower="0"
+      upper="2.44"
+      effort="0"
+      velocity="0" />
+  </joint>
+  <link
+    name="left_leg_J5_Link">
+    <inertial>
+      <origin
+        xyz="-0.0260000000000002 -5.05151476204446E-15 -5.55111512312578E-16"
+        rpy="0 0 0" />
+      <mass
+        value="0.412919473596287" />
+      <inertia
+        ixx="0.000252041012886791"
+        ixy="5.43931455420509E-21"
+        ixz="-1.46390559802717E-20"
+        iyy="5.32468594347276E-05"
+        iyz="-8.01286730883711E-19"
+        izz="0.000219791127972512" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sysmo_description/meshes/left_leg_J5_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.615686274509804 0.643137254901961 0.674509803921569 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sysmo_description/meshes/left_leg_J5_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="left_ankle_roll_joint"
+    type="revolute">
+    <origin
+      xyz="0.026 -0.055 -0.35"
+      rpy="0 0 0" />
+    <parent
+      link="left_leg_J4_Link" />
+    <child
+      link="left_leg_J5_Link" />
+    <axis
+      xyz="1 0 0" />
+    <limit
+      lower="-0.44"
+      upper="0.44"
+      effort="0"
+      velocity="0" />
+  </joint>
+  <link
+    name="left_leg_J6_Link">
+    <inertial>
+      <origin
+        xyz="0.0183340563447203 -0.0486848836965836 -0.0729281125985493"
+        rpy="0 0 0" />
+      <mass
+        value="2.41707445810748" />
+      <inertia
+        ixx="0.00169513649767957"
+        ixy="1.59466272752213E-05"
+        ixz="-0.000171376696657804"
+        iyy="0.00585044712599933"
+        iyz="-7.68610570535579E-06"
+        izz="0.00700948168995665" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sysmo_description/meshes/left_leg_J6_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sysmo_description/meshes/left_leg_J6_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="left_ankle_pitch_joint"
+    type="revolute">
+    <origin
+      xyz="-0.026 0.0485 0"
+      rpy="0 0 0" />
+    <parent
+      link="left_leg_J5_Link" />
+    <child
+      link="left_leg_J6_Link" />
+    <axis
+      xyz="0 1 0" />
+    <limit
+      lower="-0.52"
+      upper="0.52"
+      effort="0"
+      velocity="0" />
+  </joint>
+  <link
+    name="right_leg_J1_Link">
+    <inertial>
+      <origin
+        xyz="0.0507545021499089 2.39175916135759E-05 -0.00158737579528911"
+        rpy="0 0 0" />
+      <mass
+        value="2.20359353016547" />
+      <inertia
+        ixx="0.00280503051693501"
+        ixy="-1.22544184441681E-06"
+        ixz="0.00012063019595345"
+        iyy="0.00265505522729348"
+        iyz="-2.28060819822464E-06"
+        izz="0.0026203097774577" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sysmo_description/meshes/right_leg_J1_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.898039215686275 0.917647058823529 0.929411764705882 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sysmo_description/meshes/right_leg_J1_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="right_hip_roll_joint"
+    type="revolute">
+    <origin
+      xyz="-0.0762 -0.13 -0.0513"
+      rpy="0 0 0" />
+    <parent
+      link="waist_J1_Link" />
+    <child
+      link="right_leg_J1_Link" />
+    <axis
+      xyz="1 0 0" />
+    <limit
+      lower="-1.57"
+      upper="0.17"
+      effort="0"
+      velocity="0" />
+  </joint>
+  <link
+    name="right_leg_J2_Link">
+    <inertial>
+      <origin
+        xyz="3.71440338759257E-06 0.0646910278134628 -0.064958406576971"
+        rpy="0 0 0" />
+      <mass
+        value="3.02546253533489" />
+      <inertia
+        ixx="0.003712222245124"
+        ixy="-3.3950127111462E-07"
+        ixz="8.40620574913753E-07"
+        iyy="0.0047042639954682"
+        iyz="0.000112041726232223"
+        izz="0.00375689742544839" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sysmo_description/meshes/right_leg_J2_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.898039215686275 0.917647058823529 0.929411764705882 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sysmo_description/meshes/right_leg_J2_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="right_hip_yaw_joint"
+    type="revolute">
+    <origin
+      xyz="0.0552 0 -0.0473"
+      rpy="0 0 0" />
+    <parent
+      link="right_leg_J1_Link" />
+    <child
+      link="right_leg_J2_Link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-1.57"
+      upper="1.57"
+      effort="0"
+      velocity="0" />
+  </joint>
+  <link
+    name="right_leg_J3_Link">
+    <inertial>
+      <origin
+        xyz="-0.00103140196137399 0.0578859100758028 -0.110307476335036"
+        rpy="0 0 0" />
+      <mass
+        value="8.4241003370626" />
+      <inertia
+        ixx="0.0360291539074081"
+        ixy="2.77030502205455E-05"
+        ixz="0.0010320359903394"
+        iyy="0.0371479345825229"
+        iyz="-0.000281120106576525"
+        izz="0.00882656044871473" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sysmo_description/meshes/right_leg_J3_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sysmo_description/meshes/right_leg_J3_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="right_hip_pitch_joint"
+    type="revolute">
+    <origin
+      xyz="0 -0.0738 -0.0702"
+      rpy="0 0 0" />
+    <parent
+      link="right_leg_J2_Link" />
+    <child
+      link="right_leg_J3_Link" />
+    <axis
+      xyz="0 1 0" />
+    <limit
+      lower="-1.57"
+      upper="1.48"
+      effort="0"
+      velocity="0" />
+  </joint>
+  <link
+    name="right_leg_J4_Link">
+    <inertial>
+      <origin
+        xyz="0.0166578723940275 0.055016612788326 -0.178592407614476"
+        rpy="0 0 0" />
+      <mass
+        value="1.4979807522412" />
+      <inertia
+        ixx="0.0137330670952651"
+        ixy="2.83203449576709E-08"
+        ixz="-6.680589282013E-06"
+        iyy="0.0140664202927674"
+        iyz="7.66643154984529E-07"
+        izz="0.000473235697938606" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sysmo_description/meshes/right_leg_J4_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sysmo_description/meshes/right_leg_J4_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="right_knee_joint"
+    type="revolute">
+    <origin
+      xyz="0 0.0188 -0.35"
+      rpy="0 0 0" />
+    <parent
+      link="right_leg_J3_Link" />
+    <child
+      link="right_leg_J4_Link" />
+    <axis
+      xyz="0 1 0" />
+    <limit
+      lower="0"
+      upper="2.44"
+      effort="0"
+      velocity="0" />
+  </joint>
+  <link
+    name="right_leg_J5_Link">
+    <inertial>
+      <origin
+        xyz="-0.0259999999999999 4.96824803519758E-15 6.66133814775094E-16"
+        rpy="0 0 0" />
+      <mass
+        value="0.412919473596287" />
+      <inertia
+        ixx="0.000252041012886791"
+        ixy="-3.12027340782087E-19"
+        ixz="-4.19511041241069E-21"
+        iyy="5.32468594347275E-05"
+        iyz="3.49969757776675E-19"
+        izz="0.000219791127972512" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sysmo_description/meshes/right_leg_J5_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.615686274509804 0.643137254901961 0.674509803921569 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sysmo_description/meshes/right_leg_J5_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="right_ankle_roll_joint"
+    type="revolute">
+    <origin
+      xyz="0.026 0.055 -0.35"
+      rpy="0 0 0" />
+    <parent
+      link="right_leg_J4_Link" />
+    <child
+      link="right_leg_J5_Link" />
+    <axis
+      xyz="1 0 0" />
+    <limit
+      lower="-0.44"
+      upper="0.44"
+      effort="0"
+      velocity="0" />
+  </joint>
+  <link
+    name="right_leg_J6_Link">
+    <inertial>
+      <origin
+        xyz="0.0183340699762893 0.0487799976966433 -0.0729281203289631"
+        rpy="0 0 0" />
+      <mass
+        value="2.41707423312385" />
+      <inertia
+        ixx="0.0016951361875119"
+        ixy="-1.58956289101027E-05"
+        ixz="-0.00017137674665654"
+        iyy="0.00585044535105835"
+        iyz="7.70929720406026E-06"
+        izz="0.00700948014603171" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sysmo_description/meshes/right_leg_J6_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sysmo_description/meshes/right_leg_J6_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="right_ankle_pitch_joint"
+    type="revolute">
+    <origin
+      xyz="-0.026 -0.0485 0"
+      rpy="0 0 0" />
+    <parent
+      link="right_leg_J5_Link" />
+    <child
+      link="right_leg_J6_Link" />
+    <axis
+      xyz="0 1 0" />
+    <limit
+      lower="-0.52"
+      upper="0.52"
+      effort="0"
+      velocity="0" />
+  </joint>
+  <link
+    name="left_arm_J1_Link">
+    <inertial>
+      <origin
+        xyz="-0.00532780604258385 0.0527665721828579 9.03811364818541E-05"
+        rpy="0 0 0" />
+      <mass
+        value="0.938121874656346" />
+      <inertia
+        ixx="0.00130417583897302"
+        ixy="6.66782465527277E-05"
+        ixz="4.35297221553978E-07"
+        iyy="0.00066407528349803"
+        iyz="7.61220781217822E-08"
+        izz="0.000843093636212102" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sysmo_description/meshes/left_arm_J1_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.698039215686274 0.698039215686274 0.698039215686274 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sysmo_description/meshes/left_arm_J1_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="left_shoulder_pitch_joint"
+    type="revolute">
+    <origin
+      xyz="0 0.186 0.3477"
+      rpy="0 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="left_arm_J1_Link" />
+    <axis
+      xyz="0 1 0" />
+    <limit
+      lower="-3.14"
+      upper="3.14"
+      effort="0"
+      velocity="0" />
+  </joint>
+  <link
+    name="left_arm_J2_Link">
+    <inertial>
+      <origin
+        xyz="0.0210426276266833 0.0718154825473416 -0.000959311782347982"
+        rpy="0 0 0" />
+      <mass
+        value="1.11378221777506" />
+      <inertia
+        ixx="0.00178100862385823"
+        ixy="-0.000251874381263088"
+        ixz="-9.26927643903565E-07"
+        iyy="0.00124743105573476"
+        iyz="-1.10361412091995E-05"
+        izz="0.00159592706408981" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sysmo_description/meshes/left_arm_J2_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.898039215686275 0.917647058823529 0.929411764705882 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sysmo_description/meshes/left_arm_J2_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="left_shoulder_roll_joint"
+    type="revolute">         <!--******************************************-->
+    <origin
+      xyz="-0.02944 0.05815 0"
+      rpy="-1.39 0 0" />
+    <parent
+      link="left_arm_J1_Link" />
+    <child
+      link="left_arm_J2_Link" />
+    <axis
+      xyz="1 0 0" />
+    <limit
+      lower="-0.099"         
+      upper="2.8"
+      effort="0"
+      velocity="0" />     <!--***************lower has change***************************-->
+  </joint>
+  <link
+    name="left_arm_J3_Link">
+    <inertial>
+      <origin
+        xyz="3.10562518621984E-05 0.102342786099627 -0.00264247261177086"
+        rpy="0 0 0" />
+      <mass
+        value="0.895195056569754" />
+      <inertia
+        ixx="0.000751567143229303"
+        ixy="1.67276580501328E-07"
+        ixz="3.17694318208595E-08"
+        iyy="0.000541371587063331"
+        iyz="2.43049230857758E-06"
+        izz="0.00114037044272391" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sysmo_description/meshes/left_arm_J3_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.501960784313725 0.501960784313725 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sysmo_description/meshes/left_arm_J3_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="left_shoulder_yaw_joint"
+    type="revolute">
+    <origin
+      xyz="0.029436 0.123 0"
+      rpy="0 0 0" />
+    <parent
+      link="left_arm_J2_Link" />
+    <child
+      link="left_arm_J3_Link" />
+    <axis
+      xyz="0 1 0" />
+    <limit
+      lower="-3.14"
+      upper="3.14"
+      effort="0"
+      velocity="0" />
+  </joint>
+  <link
+    name="left_arm_J4_Link">
+    <inertial>
+      <origin
+        xyz="-7.02966239909263E-05 0.0756958680951756 0.0244574437134104"
+        rpy="0 0 0" />
+      <mass
+        value="0.792511161573107" />
+      <inertia
+        ixx="0.0011136809359783"
+        ixy="4.77904809199398E-07"
+        ixz="5.46154413633147E-08"
+        iyy="0.000649300178916576"
+        iyz="-0.000187586449532863"
+        izz="0.00128576875148252" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sysmo_description/meshes/left_arm_J4_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.698039215686274 0.698039215686274 0.698039215686274 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sysmo_description/meshes/left_arm_J4_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="left_elbow_joint"
+    type="revolute">
+    <origin
+      xyz="0 0.119 -0.03085"
+      rpy="0 0 0" />
+    <parent
+      link="left_arm_J3_Link" />
+    <child
+      link="left_arm_J4_Link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-1.57"
+      upper="1.57"
+      effort="0"
+      velocity="0" />
+  </joint>
+  <link
+    name="left_arm_J5_Link">
+    <inertial>
+      <origin
+        xyz="1.47591957806343E-06 0.0996487266973138 0.00282004856418866"
+        rpy="0 0 0" />
+      <mass
+        value="0.558974263793504" />
+      <inertia
+        ixx="0.000329529134240136"
+        ixy="1.66595219592807E-08"
+        ixz="-3.52523162590398E-08"
+        iyy="0.000182880475350491"
+        iyz="-6.95975069115441E-06"
+        izz="0.000445067506878439" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sysmo_description/meshes/left_arm_J5_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.501960784313725 0.501960784313725 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sysmo_description/meshes/left_arm_J5_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="left_wrist_yaw_joint"
+    type="revolute">
+    <origin
+      xyz="0 0.1225 0.03085"
+      rpy="0 0 0" />
+    <parent
+      link="left_arm_J4_Link" />
+    <child
+      link="left_arm_J5_Link" />
+    <axis
+      xyz="0 1 0" />
+    <limit
+      lower="-3.14"
+      upper="3.14"
+      effort="0"
+      velocity="0" />
+  </joint>
+  <link
+    name="left_arm_J6_Link">
+    <inertial>
+      <origin
+        xyz="0.000357579479259979 0.0718220206272152 -0.0135170051292183"
+        rpy="0 0 0" />
+      <mass
+        value="0.238240539263785" />
+      <inertia
+        ixx="7.02278136051616E-05"
+        ixy="2.92355214605289E-07"
+        ixz="3.34399967487846E-07"
+        iyy="4.05231874440088E-05"
+        iyz="5.48549258727466E-06"
+        izz="8.28101008919211E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sysmo_description/meshes/left_arm_J6_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.898039215686275 0.917647058823529 0.929411764705882 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sysmo_description/meshes/left_arm_J6_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="left_wrist_pitch_joint"
+    type="revolute">
+    <origin
+      xyz="0 0.1155 0.0285"
+      rpy="0 0 0" />
+    <parent
+      link="left_arm_J5_Link" />
+    <child
+      link="left_arm_J6_Link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-1.57"
+      upper="1.57"
+      effort="0"
+      velocity="0" />
+  </joint>
+  <link
+    name="right_arm_J1_Link">
+    <inertial>
+      <origin
+        xyz="-0.00532780528240282 -0.0527665690045425 -9.03785864807549E-05"
+        rpy="0 0 0" />
+      <mass
+        value="0.938121977924767" />
+      <inertia
+        ixx="0.00130417600537895"
+        ixy="-6.66782160691878E-05"
+        ixz="-4.35275852440104E-07"
+        iyy="0.000664075371966241"
+        iyz="7.6045556517038E-08"
+        izz="0.000843093761976948" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sysmo_description/meshes/right_arm_J1_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.698039215686274 0.698039215686274 0.698039215686274 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sysmo_description/meshes/right_arm_J1_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint                         
+    name="right_shoulder_pitch_joint"
+    type="revolute">  
+    <origin
+      xyz="0 -0.186 0.3477"
+      rpy="0 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="right_arm_J1_Link" />
+    <axis
+      xyz="0 1 0" />
+    <limit
+      lower="-3.14"
+      upper="3.14"
+      effort="0"
+      velocity="0" />
+  </joint>
+  <link
+    name="right_arm_J2_Link">
+    <inertial>
+      <origin
+        xyz="0.0210426402698319 -0.0718155413204389 0.000959328637881007"
+        rpy="0 0 0" />
+      <mass
+        value="1.11378131500261" />
+      <inertia
+        ixx="0.00178100603083542"
+        ixy="0.00025187461747162"
+        ixz="9.26578550934932E-07"
+        iyy="0.00124743036513023"
+        iyz="-1.10372835694144E-05"
+        izz="0.00159592465491743" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sysmo_description/meshes/right_arm_J2_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.898039215686275 0.917647058823529 0.929411764705882 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />                
+      <geometry>
+        <mesh
+          filename="package://sysmo_description/meshes/right_arm_J2_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="right_shoulder_roll_joint"
+    type="revolute">
+    <origin
+      xyz="-0.02944 -0.05815 0"
+      rpy="1.39 0 0" />     <!--****************as this zero**********************-->
+    <parent
+      link="right_arm_J1_Link" />
+    <child
+      link="right_arm_J2_Link" />
+    <axis
+      xyz="1 0 0" />
+    <limit
+      lower="-2.8"
+      upper="0.096"
+      effort="0"
+      velocity="0" /><!--***************upper has change***************************-->
+  </joint>
+  <link
+    name="right_arm_J3_Link">
+    <inertial>
+      <origin
+        xyz="-3.10506908105698E-05 -0.102342786859375 -0.00264247410616042"
+        rpy="0 0 0" />
+      <mass
+        value="0.895195075678644" />
+      <inertia
+        ixx="0.00075156720704543"
+        ixy="1.6733400907189E-07"
+        ixz="-3.17717839403716E-08"
+        iyy="0.000541371591112959"
+        iyz="-2.43050728897345E-06"
+        izz="0.00114037049902055" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sysmo_description/meshes/right_arm_J3_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.501960784313725 0.501960784313725 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sysmo_description/meshes/right_arm_J3_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="right_shoulder_yaw_joint"
+    type="revolute">
+    <origin
+      xyz="0.029436 -0.123 0"
+      rpy="0 0 0" />
+    <parent
+      link="right_arm_J2_Link" />
+    <child
+      link="right_arm_J3_Link" />
+    <axis
+      xyz="0 1 0" />
+    <limit
+      lower="-3.14"
+      upper="3.14"
+      effort="0"
+      velocity="0" />
+  </joint>
+  <link
+    name="right_arm_J4_Link">
+    <inertial>
+      <origin
+        xyz="7.04283074031366E-05 -0.075695738219139 0.0244575164432143"
+        rpy="0 0 0" />
+      <mass
+        value="0.792505941931164" />
+      <inertia
+        ixx="0.00111366816963349"
+        ixy="4.83892156512676E-07"
+        ixz="-5.55157210383873E-08"
+        iyy="0.000649296800204704"
+        iyz="0.0001875848194355"
+        izz="0.00128575341491872" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sysmo_description/meshes/right_arm_J4_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.698039215686274 0.698039215686274 0.698039215686274 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sysmo_description/meshes/right_arm_J4_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="right_elbow_joint"
+    type="revolute">
+    <origin
+      xyz="0 -0.119 -0.03085"
+      rpy="0 0 0" />
+    <parent
+      link="right_arm_J3_Link" />
+    <child
+      link="right_arm_J4_Link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-1.57"
+      upper="1.57"
+      effort="0"
+      velocity="0" />
+  </joint>
+  <link
+    name="right_arm_J5_Link">
+    <inertial>
+      <origin
+        xyz="-1.47408944542678E-06 -0.0996487247068005 0.00282004759694815"
+        rpy="0 0 0" />
+      <mass
+        value="0.55897429543658" />
+      <inertia
+        ixx="0.000329529135343447"
+        ixy="1.66584451263776E-08"
+        ixz="3.525188663893E-08"
+        iyy="0.000182880493479853"
+        iyz="6.95974966704163E-06"
+        izz="0.0004450675299348" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sysmo_description/meshes/right_arm_J5_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.501960784313725 0.501960784313725 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sysmo_description/meshes/right_arm_J5_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="right_wrist_yaw_joint"
+    type="revolute">
+    <origin
+      xyz="0 -0.1225 0.03085"
+      rpy="0 0 0" />
+    <parent
+      link="right_arm_J4_Link" />
+    <child
+      link="right_arm_J5_Link" />
+    <axis
+      xyz="0 1 0" />
+    <limit
+      lower="-3.14"
+      upper="3.14"
+      effort="0"
+      velocity="0" />
+  </joint>
+  <link
+    name="right_arm_J6_Link">
+    <inertial>
+      <origin
+        xyz="0.000357579961051549 -0.0718220160081413 -0.0135170042442506"
+        rpy="0 0 0" />
+      <mass
+        value="0.238240532638385" />
+      <inertia
+        ixx="7.02278112005588E-05"
+        ixy="-2.92356896378528E-07"
+        ixz="3.34400671945958E-07"
+        iyy="4.05231857683007E-05"
+        iyz="-5.48549280923932E-06"
+        izz="8.28100994168077E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sysmo_description/meshes/right_arm_J6_Link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.698039215686274 0.698039215686274 0.698039215686274 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://sysmo_description/meshes/right_arm_J6_Link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="right_wrist_pitch_joint"
+    type="revolute">
+    <origin
+      xyz="0 -0.1155 0.0285"
+      rpy="0 0 0" />
+    <parent
+      link="right_arm_J5_Link" />
+    <child
+      link="right_arm_J6_Link" />
+    <axis
+      xyz="0 0 1" />
+    <limit
+      lower="-1.57"
+      upper="1.57"
+      effort="0"
+      velocity="0" />
+  </joint>
+  
+    </xacro:macro>
+</robot>
