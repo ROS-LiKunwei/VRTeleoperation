@@ -47,6 +47,12 @@ class Sysmo32MujocoCommandMirrorCfg:
     render: bool = True
     load_model: bool = True
     print_hand_action_only: bool = True
+    arm_command_source: str = "zmq"
+    ros_arm_command_topic: str = "/sysmo_left_arm_controller/commands"
+    publish_joint_states: bool = False
+    joint_state_topic: str = "/joint_states"
+    joint_state_publish_hz: float = 50.0
+    arm_command_interpolation_steps: int = 5
 
     def build(self):
         from beavr.teleop.components.simulation.sysmo32_mujoco_command_sim import (
@@ -62,6 +68,12 @@ class Sysmo32MujocoCommandMirrorCfg:
             render=self.render,
             load_model=self.load_model,
             print_hand_action_only=self.print_hand_action_only,
+            arm_command_source=self.arm_command_source,
+            ros_arm_command_topic=self.ros_arm_command_topic,
+            publish_joint_states=self.publish_joint_states,
+            joint_state_topic=self.joint_state_topic,
+            joint_state_publish_hz=self.joint_state_publish_hz,
+            arm_command_interpolation_steps=self.arm_command_interpolation_steps,
         )
 
 

@@ -19,13 +19,17 @@ from beavr.teleop.components.interface.robots.sysmo32_command import (
     Sysmo32JointStateCache,
 )
 from beavr.teleop.components.interface.robots.sysmo32_real_control import (
+    SYSMO32_ARM_COMMAND_TOPIC,
     SYSMO32_LEFT_HAND_ACTION_TOPIC,
     SYSMO32_RIGHT_HAND_ACTION_TOPIC,
     Sysmo32RealControl,
     Sysmo32RealControlConfig,
 )
 from beavr.teleop.components.operator.operator_types import CartesianTarget
-from beavr.teleop.components.simulation.sysmo32_mujoco_command_sim import Sysmo32MujocoCommandMirror
+from beavr.teleop.components.simulation.sysmo32_mujoco_command_sim import (
+    Sysmo32MujocoCommandMirror,
+    _quintic_blend,
+)
 from beavr.teleop.configs.constants import ports, robots
 
 
@@ -332,6 +336,146 @@ def test_pause_publishes_release_after_hand_frame_started(monkeypatch, bus):
     controller.cleanup()
 
 
+def test_real_with_mujoco_pause_publishes_hold_from_real_joint_state(monkeypatch, bus):
+    import beavr.teleop.components.interface.robots.sysmo32_real_control as real_mod
+
+    class FakeSubscriber:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def recv_keypoints(self):
+            return None
+
+        def stop(self):
+            return None
+
+    class FakeRos2Bridge:
+        def __init__(self, topics, require_ros):
+            self.available = True
+            self.require_ros = require_ros
+            self.joint_cache = Sysmo32JointStateCache(topics.joint_state_timeout_s)
+            self.joint_cache.update([0.10] * 6, [-0.20] * 6, now_s=time.time())
+            self.published_arm_commands = []
+
+        def spin_once(self):
+            return None
+
+        def publish_arm_command(self, command):
+            self.published_arm_commands.append(command)
+            return True
+
+        def publish_hand_action(self, hand_side, action_id):
+            return True
+
+        def close(self):
+            return None
+
+    class FakeKinematics:
+        available = False
+
+        def __init__(self, urdf_path):
+            self.urdf_path = urdf_path
+
+    monkeypatch.setattr(real_mod, "ZMQSubscriber", FakeSubscriber)
+    monkeypatch.setattr(real_mod, "Sysmo32Ros2Bridge", FakeRos2Bridge)
+    monkeypatch.setattr(real_mod, "Sysmo32MujocoKinematics", FakeKinematics)
+    monkeypatch.setattr(real_mod, "cleanup_zmq_resources", lambda: None)
+
+    controller = Sysmo32RealControl(
+        host="127.0.0.1",
+        control_backend="real_with_mujoco",
+        right_target_port=10011,
+        left_target_port=10013,
+        right_state_publish_port=10012,
+        left_state_publish_port=10014,
+        teleoperation_state_port=ports.KEYPOINT_STREAM_PORT,
+        transformed_right_port=ports.KEYPOINT_TRANSFORM_PORT,
+        transformed_left_port=ports.LEFT_KEYPOINT_TRANSFORM_PORT,
+        config=Sysmo32RealControlConfig(allow_mujoco_mirror_without_joint_state=False),
+    )
+    controller._dry_joint_cache.update([1.0] * 6, [1.0] * 6, now_s=time.time())
+
+    controller._enter_pause("unit-test pause")
+
+    assert len(controller._ros2.published_arm_commands) == 1
+    hold_command = controller._ros2.published_arm_commands[0]
+    assert np.allclose(hold_command.left_arm, [0.10] * 6)
+    assert np.allclose(hold_command.right_arm, [-0.20] * 6)
+    assert bus.recv_latest(ports.SYSMO32_ARM_COMMAND_MIRROR_PORT, SYSMO32_ARM_COMMAND_TOPIC) == hold_command
+    assert controller._pause_hold_command == hold_command
+    assert not controller._teleop_active
+    controller.cleanup()
+
+
+def test_pause_hold_heartbeat_republishes_last_hold_command(monkeypatch):
+    import beavr.teleop.components.interface.robots.sysmo32_real_control as real_mod
+
+    class FakeSubscriber:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def recv_keypoints(self):
+            return None
+
+        def stop(self):
+            return None
+
+    class FakeRos2Bridge:
+        def __init__(self, topics, require_ros):
+            self.available = True
+            self.joint_cache = Sysmo32JointStateCache(topics.joint_state_timeout_s)
+            self.joint_cache.update([0.30] * 6, [-0.40] * 6, now_s=time.time())
+            self.published_arm_commands = []
+
+        def spin_once(self):
+            return None
+
+        def publish_arm_command(self, command):
+            self.published_arm_commands.append(command)
+            return True
+
+        def publish_hand_action(self, hand_side, action_id):
+            return True
+
+        def close(self):
+            return None
+
+    class FakeKinematics:
+        available = False
+
+        def __init__(self, urdf_path):
+            self.urdf_path = urdf_path
+
+    monkeypatch.setattr(real_mod, "ZMQSubscriber", FakeSubscriber)
+    monkeypatch.setattr(real_mod, "Sysmo32Ros2Bridge", FakeRos2Bridge)
+    monkeypatch.setattr(real_mod, "Sysmo32MujocoKinematics", FakeKinematics)
+    monkeypatch.setattr(real_mod, "cleanup_zmq_resources", lambda: None)
+
+    controller = Sysmo32RealControl(
+        host="127.0.0.1",
+        control_backend="real",
+        right_target_port=10011,
+        left_target_port=10013,
+        right_state_publish_port=10012,
+        left_state_publish_port=10014,
+        teleoperation_state_port=ports.KEYPOINT_STREAM_PORT,
+        transformed_right_port=ports.KEYPOINT_TRANSFORM_PORT,
+        transformed_left_port=ports.LEFT_KEYPOINT_TRANSFORM_PORT,
+    )
+
+    controller._enter_pause("unit-test pause")
+    assert len(controller._ros2.published_arm_commands) == 1
+
+    controller._ros2.joint_cache.snapshot.timestamp_s = 0.0
+    controller._last_pause_hold_publish_time = 0.0
+    controller._publish_pause_hold_if_needed()
+
+    assert len(controller._ros2.published_arm_commands) == 2
+    assert np.allclose(controller._ros2.published_arm_commands[1].left_arm, [0.30] * 6)
+    assert np.allclose(controller._ros2.published_arm_commands[1].right_arm, [-0.40] * 6)
+    controller.cleanup()
+
+
 def test_mujoco_hand_action_callback_prints_only(monkeypatch):
     import beavr.teleop.components.simulation.sysmo32_mujoco_command_sim as sim_mod
 
@@ -349,12 +493,286 @@ def test_mujoco_hand_action_callback_prints_only(monkeypatch):
     assert any("right action=2, print only, no execution" in message for message in messages)
 
 
+def test_mujoco_command_mirror_accepts_ros2_real_command_topic():
+    mirror = Sysmo32MujocoCommandMirror.__new__(Sysmo32MujocoCommandMirror)
+    applied = []
+    mirror.apply_arm_command = applied.append
+    data = [0.1] * 6 + [-0.2] * 6 + [0.0] * 6
+
+    mirror._on_ros_arm_command(SimpleNamespace(data=data))
+
+    assert len(applied) == 1
+    assert applied[0].values == tuple(data)
+
+
+def test_mujoco_command_mirror_uses_quintic_interpolation():
+    mirror = Sysmo32MujocoCommandMirror.__new__(Sysmo32MujocoCommandMirror)
+    mirror.control_dt = 0.1
+    mirror.arm_command_interpolation_steps = 5
+    mirror._arm_joint_ids = list(range(12))
+    mirror._arm_qpos_addrs = list(range(12))
+    mirror._hold_joint_positions = np.zeros(12, dtype=np.float64)
+    mirror._trajectory_start_positions = None
+    mirror._trajectory_target_positions = None
+    mirror._trajectory_start_time_s = None
+    mirror._log_applied_arm_command = lambda values: None
+    model = SimpleNamespace(jnt_range=np.asarray([[-10.0, 10.0]] * 12, dtype=np.float64))
+    data = SimpleNamespace(qpos=np.zeros(12, dtype=np.float64))
+    mirror._kinematics = SimpleNamespace(available=True, model=model, data=data)
+
+    command = Sysmo32ArmCommand(timestamp_s=1.0, values=tuple([1.0] * 12 + [0.0] * 6))
+    mirror.apply_arm_command(command)
+    start_s = mirror._trajectory_start_time_s
+
+    assert np.allclose(mirror._hold_joint_positions, np.zeros(12))
+    mirror._update_interpolated_hold(start_s + 0.25)
+    assert np.allclose(mirror._hold_joint_positions, np.full(12, _quintic_blend(0.5)))
+
+    mirror._update_interpolated_hold(start_s + 0.5)
+    assert np.allclose(mirror._hold_joint_positions, np.ones(12))
+    assert mirror._trajectory_target_positions is None
+
+
+def test_mujoco_backend_publishes_same_command_to_ros_and_mirror(monkeypatch, bus):
+    import beavr.teleop.components.interface.robots.sysmo32_real_control as real_mod
+
+    class FakeSubscriber:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def recv_keypoints(self):
+            return None
+
+        def stop(self):
+            return None
+
+    class FakeRos2Bridge:
+        def __init__(self, topics, require_ros):
+            self.available = True
+            self.require_ros = require_ros
+            self.joint_cache = Sysmo32JointStateCache(topics.joint_state_timeout_s)
+            self.published_arm_commands = []
+
+        def spin_once(self):
+            return None
+
+        def publish_arm_command(self, command):
+            self.published_arm_commands.append(command)
+            return True
+
+        def publish_hand_action(self, hand_side, action_id):
+            return True
+
+        def close(self):
+            return None
+
+    class FakeKinematics:
+        available = True
+
+        def __init__(self, urdf_path):
+            self.urdf_path = urdf_path
+
+        def solve_ik(self, hand_side, target, current_joints):
+            return np.full(6, 0.25)
+
+    monkeypatch.setattr(real_mod, "ZMQSubscriber", FakeSubscriber)
+    monkeypatch.setattr(real_mod, "Sysmo32Ros2Bridge", FakeRos2Bridge)
+    monkeypatch.setattr(real_mod, "Sysmo32MujocoKinematics", FakeKinematics)
+    monkeypatch.setattr(real_mod, "cleanup_zmq_resources", lambda: None)
+
+    controller = Sysmo32RealControl(
+        host="127.0.0.1",
+        control_backend="mujoco",
+        right_target_port=10011,
+        left_target_port=10013,
+        right_state_publish_port=10012,
+        left_state_publish_port=10014,
+        teleoperation_state_port=ports.KEYPOINT_STREAM_PORT,
+        transformed_right_port=ports.KEYPOINT_TRANSFORM_PORT,
+        transformed_left_port=ports.LEFT_KEYPOINT_TRANSFORM_PORT,
+        config=Sysmo32RealControlConfig(
+            allow_placeholder_ik_for_mujoco=True,
+            publish_arm_command_topic_in_mujoco=True,
+        ),
+    )
+    controller._latest_targets[robots.RIGHT] = CartesianTarget(
+        timestamp_s=time.time(),
+        hand_side=robots.RIGHT,
+        frame_id="base",
+        position_m=(0.1, 0.0, 0.2),
+        orientation_xyzw=(0.0, 0.0, 0.0, 1.0),
+    )
+
+    controller._publish_arm_command_if_safe()
+
+    assert controller._ros2.require_ros
+    assert len(controller._ros2.published_arm_commands) == 1
+    mirror_command = bus.recv_latest(ports.SYSMO32_ARM_COMMAND_MIRROR_PORT, SYSMO32_ARM_COMMAND_TOPIC)
+    assert mirror_command == controller._ros2.published_arm_commands[0]
+    controller.cleanup()
+
+
+def test_real_with_mujoco_holds_mirror_until_real_reset(monkeypatch, bus):
+    import beavr.teleop.components.interface.robots.sysmo32_real_control as real_mod
+
+    class FakeSubscriber:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def recv_keypoints(self):
+            return None
+
+        def stop(self):
+            return None
+
+    class FakeRos2Bridge:
+        def __init__(self, topics, require_ros):
+            self.available = True
+            self.joint_cache = Sysmo32JointStateCache(topics.joint_state_timeout_s)
+            self.published_arm_commands = []
+
+        def spin_once(self):
+            return None
+
+        def publish_arm_command(self, command):
+            self.published_arm_commands.append(command)
+            return True
+
+        def publish_hand_action(self, hand_side, action_id):
+            return True
+
+        def close(self):
+            return None
+
+    class FakeKinematics:
+        available = True
+
+        def __init__(self, urdf_path):
+            self.urdf_path = urdf_path
+
+        def solve_ik(self, hand_side, target, current_joints):
+            return np.ones(6)
+
+    monkeypatch.setattr(real_mod, "ZMQSubscriber", FakeSubscriber)
+    monkeypatch.setattr(real_mod, "Sysmo32Ros2Bridge", FakeRos2Bridge)
+    monkeypatch.setattr(real_mod, "Sysmo32MujocoKinematics", FakeKinematics)
+    monkeypatch.setattr(real_mod, "cleanup_zmq_resources", lambda: None)
+
+    controller = Sysmo32RealControl(
+        host="127.0.0.1",
+        control_backend="real_with_mujoco",
+        right_target_port=10011,
+        left_target_port=10013,
+        right_state_publish_port=10012,
+        left_state_publish_port=10014,
+        teleoperation_state_port=ports.KEYPOINT_STREAM_PORT,
+        transformed_right_port=ports.KEYPOINT_TRANSFORM_PORT,
+        transformed_left_port=ports.LEFT_KEYPOINT_TRANSFORM_PORT,
+        config=Sysmo32RealControlConfig(allow_mujoco_mirror_without_joint_state=False),
+    )
+    controller._latest_targets[robots.RIGHT] = CartesianTarget(
+        timestamp_s=time.time(),
+        hand_side=robots.RIGHT,
+        frame_id="base",
+        position_m=(0.1, 0.0, 0.2),
+        orientation_xyzw=(0.0, 0.0, 0.0, 1.0),
+    )
+
+    controller._publish_arm_command_if_safe()
+
+    assert controller._ros2.published_arm_commands == []
+    assert bus.recv_latest(ports.SYSMO32_ARM_COMMAND_MIRROR_PORT, SYSMO32_ARM_COMMAND_TOPIC) is None
+    controller.cleanup()
+
+
+def test_real_with_mujoco_mirrors_after_real_publish_gate(monkeypatch, bus):
+    import beavr.teleop.components.interface.robots.sysmo32_real_control as real_mod
+
+    class FakeSubscriber:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def recv_keypoints(self):
+            return None
+
+        def stop(self):
+            return None
+
+    class FakeRos2Bridge:
+        def __init__(self, topics, require_ros):
+            self.available = True
+            self.joint_cache = Sysmo32JointStateCache(topics.joint_state_timeout_s)
+            self.joint_cache.update([0.0] * 6, [0.0] * 6, now_s=time.time())
+            self.published_arm_commands = []
+
+        def spin_once(self):
+            return None
+
+        def publish_arm_command(self, command):
+            self.published_arm_commands.append(command)
+            return True
+
+        def publish_hand_action(self, hand_side, action_id):
+            return True
+
+        def close(self):
+            return None
+
+    class FakeKinematics:
+        available = True
+
+        def __init__(self, urdf_path):
+            self.urdf_path = urdf_path
+
+        def solve_ik(self, hand_side, target, current_joints):
+            return np.full(6, 0.25)
+
+    monkeypatch.setattr(real_mod, "ZMQSubscriber", FakeSubscriber)
+    monkeypatch.setattr(real_mod, "Sysmo32Ros2Bridge", FakeRos2Bridge)
+    monkeypatch.setattr(real_mod, "Sysmo32MujocoKinematics", FakeKinematics)
+    monkeypatch.setattr(real_mod, "cleanup_zmq_resources", lambda: None)
+
+    controller = Sysmo32RealControl(
+        host="127.0.0.1",
+        control_backend="real_with_mujoco",
+        right_target_port=10011,
+        left_target_port=10013,
+        right_state_publish_port=10012,
+        left_state_publish_port=10014,
+        teleoperation_state_port=ports.KEYPOINT_STREAM_PORT,
+        transformed_right_port=ports.KEYPOINT_TRANSFORM_PORT,
+        transformed_left_port=ports.LEFT_KEYPOINT_TRANSFORM_PORT,
+        config=Sysmo32RealControlConfig(allow_mujoco_mirror_without_joint_state=False),
+    )
+    controller._real_reset_ready = True
+    controller._latest_targets[robots.RIGHT] = CartesianTarget(
+        timestamp_s=time.time(),
+        hand_side=robots.RIGHT,
+        frame_id="base",
+        position_m=(0.1, 0.0, 0.2),
+        orientation_xyzw=(0.0, 0.0, 0.0, 1.0),
+    )
+
+    controller._publish_arm_command_if_safe()
+
+    assert len(controller._ros2.published_arm_commands) == 1
+    mirror_command = bus.recv_latest(ports.SYSMO32_ARM_COMMAND_MIRROR_PORT, SYSMO32_ARM_COMMAND_TOPIC)
+    assert mirror_command == controller._ros2.published_arm_commands[0]
+    controller.cleanup()
+
+
 def test_sysmo32_config_routes_backends():
     mujoco_cfg = load_robot_config("sysmo32", Laterality.BIMANUAL, True, control_backend="mujoco")
     assert mujoco_cfg.control_backend == "mujoco"
     assert len(mujoco_cfg.robots) == 1
     assert len(mujoco_cfg.environment) == 1
     assert mujoco_cfg.camera_streamers == []
+    assert mujoco_cfg.robots[0].config.publish_arm_command_topic_in_mujoco
+    assert mujoco_cfg.environment[0].arm_command_source == "ros2"
+    assert mujoco_cfg.environment[0].ros_arm_command_topic == "/sysmo_left_arm_controller/commands"
+    assert mujoco_cfg.environment[0].publish_joint_states
+    assert mujoco_cfg.environment[0].joint_state_topic == "/joint_states"
+    assert mujoco_cfg.environment[0].arm_command_interpolation_steps == 5
 
     real_cfg = load_robot_config("sysmo32", Laterality.BIMANUAL, False, control_backend="real")
     assert real_cfg.control_backend == "real"
@@ -363,3 +781,13 @@ def test_sysmo32_config_routes_backends():
     assert real_cfg.operators[0].teleoperation_state_port == ports.KEYPOINT_STREAM_PORT
     assert real_cfg.operators[0].hand_frame_timeout_s == 0.3
     assert real_cfg.operators[0].rotation_delta_frame == "base"
+
+    real_with_mujoco_cfg = load_robot_config(
+        "sysmo32", Laterality.BIMANUAL, True, control_backend="real_with_mujoco"
+    )
+    assert real_with_mujoco_cfg.control_backend == "real_with_mujoco"
+    assert len(real_with_mujoco_cfg.robots) == 1
+    assert len(real_with_mujoco_cfg.environment) == 1
+    assert not real_with_mujoco_cfg.robots[0].config.allow_mujoco_mirror_without_joint_state
+    assert real_with_mujoco_cfg.environment[0].arm_command_source == "ros2"
+    assert not real_with_mujoco_cfg.environment[0].publish_joint_states

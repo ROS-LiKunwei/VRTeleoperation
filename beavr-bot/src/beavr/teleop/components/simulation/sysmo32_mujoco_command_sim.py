@@ -19,6 +19,8 @@ from beavr.teleop.components.interface.robots.sysmo32_command import (
     SYSMO32_COMMAND_LENGTH,
     SYSMO32_HAND_ACTION_GRASP,
     SYSMO32_HAND_ACTION_RELEASE,
+    SYSMO32_LEFT_JOINT_NAMES,
+    SYSMO32_RIGHT_JOINT_NAMES,
     Sysmo32ArmCommand,
     Sysmo32HandAction,
 )
@@ -46,18 +48,41 @@ class Sysmo32MujocoCommandMirror(Component):
         render: bool = True,
         load_model: bool = True,
         print_hand_action_only: bool = True,
+        arm_command_source: str = "zmq",
+        ros_arm_command_topic: str = "/sysmo_left_arm_controller/commands",
+        publish_joint_states: bool = False,
+        joint_state_topic: str = "/joint_states",
+        joint_state_publish_hz: float = 50.0,
+        arm_command_interpolation_steps: int = 5,
     ):
         self.notify_component_start("sysmo32_mujoco_command_mirror")
+        if arm_command_source not in ("zmq", "ros2", "both"):
+            raise ValueError("arm_command_source must be one of: zmq, ros2, both")
         self.host = host
         self.control_dt = control_dt
         self.render = render
         self.print_hand_action_only = print_hand_action_only
+        self.arm_command_source = arm_command_source
+        self.ros_arm_command_topic = ros_arm_command_topic
+        self.publish_joint_states = publish_joint_states
+        self.joint_state_topic = joint_state_topic
+        self.joint_state_publish_hz = max(0.1, float(joint_state_publish_hz))
+        self.arm_command_interpolation_steps = max(1, int(arm_command_interpolation_steps))
         self._last_no_hand_action_log_time = 0.0
         self._last_arm_pose_log_time = 0.0
+        self._last_joint_state_publish_time = 0.0
         self._arm_joint_ids = []
         self._arm_qpos_addrs = []
         self._arm_dof_addrs = []
         self._hold_joint_positions: Optional[np.ndarray] = None
+        self._trajectory_start_positions: Optional[np.ndarray] = None
+        self._trajectory_target_positions: Optional[np.ndarray] = None
+        self._trajectory_start_time_s: Optional[float] = None
+        self._rclpy = None
+        self._ros_node = None
+        self._joint_state_msg_type = None
+        self._joint_state_pub = None
+        self._owns_rclpy_context = False
         # 订阅真实机械臂命令字段
         self._arm_command_subscriber = ZMQSubscriber(
             host,
@@ -84,6 +109,8 @@ class Sysmo32MujocoCommandMirror(Component):
             self._left_hand_action_subscriber,
             self._right_hand_action_subscriber,
         ]
+        if self.arm_command_source in ("ros2", "both") or self.publish_joint_states:
+            self._init_ros2_interfaces()
 
         self._kinematics: Optional[Sysmo32MujocoKinematics] = None
         if load_model:
@@ -96,6 +123,52 @@ class Sysmo32MujocoCommandMirror(Component):
                 )
             else:
                 self._configure_arm_hold_state()
+
+    def _init_ros2_interfaces(self) -> None:
+        try:
+            import rclpy
+            from sensor_msgs.msg import JointState
+            from std_msgs.msg import Float64MultiArray
+
+            self._rclpy = rclpy
+            if not rclpy.ok():
+                rclpy.init(args=None)
+                self._owns_rclpy_context = True
+            self._ros_node = rclpy.create_node("sysmo32_mujoco_command_mirror")
+            if self.arm_command_source in ("ros2", "both"):
+                self._ros_node.create_subscription(
+                    Float64MultiArray,
+                    self.ros_arm_command_topic,
+                    self._on_ros_arm_command,
+                    10,
+                )
+                logger.info(
+                    "SYSMO-32 MuJoCo command mirror subscribed to ROS2 arm command topic %s",
+                    self.ros_arm_command_topic,
+                )
+            if self.publish_joint_states:
+                self._joint_state_msg_type = JointState
+                self._joint_state_pub = self._ros_node.create_publisher(JointState, self.joint_state_topic, 10)
+                logger.info(
+                    "SYSMO-32 MuJoCo command mirror publishing simulated joint feedback on %s",
+                    self.joint_state_topic,
+                )
+        except Exception as exc:
+            raise RuntimeError(
+                f"SYSMO-32 MuJoCo command mirror cannot initialize ROS2 interfaces: {exc}"
+            ) from exc
+
+    def _spin_ros2_once(self) -> None:
+        if self._rclpy is not None and self._ros_node is not None:
+            self._rclpy.spin_once(self._ros_node, timeout_sec=0.0)
+
+    def _on_ros_arm_command(self, msg) -> None:
+        try:
+            command = Sysmo32ArmCommand(timestamp_s=time.time(), values=tuple(float(v) for v in msg.data))
+        except Exception as exc:
+            logger.warning("[MuJoCo][ROS2 ArmCommand] invalid command: %s", exc)
+            return
+        self.apply_arm_command(command)
 
     def stream(self):
         if self._kinematics is None or not self._kinematics.available:
@@ -140,8 +213,10 @@ class Sysmo32MujocoCommandMirror(Component):
     def _forward_kinematic_mirror(self, mujoco_module) -> None:
         """Forward the model as a kinematic mirror instead of stepping free dynamics."""
 
+        self._update_interpolated_hold(time.time())
         self._apply_arm_hold()
         mujoco_module.mj_forward(self._kinematics.model, self._kinematics.data)
+        self._publish_joint_state_if_due()
 
     def _apply_arm_hold(self) -> None:
         if self._kinematics is None or self._hold_joint_positions is None:
@@ -152,9 +227,13 @@ class Sysmo32MujocoCommandMirror(Component):
             self._kinematics.data.qvel[dof_addr] = 0.0
 
     def _receive_once(self) -> None:
-        command = self._arm_command_subscriber.recv_keypoints()
-        if command is not None:
-            self.apply_arm_command(command)
+        if self.arm_command_source in ("ros2", "both"):
+            self._spin_ros2_once()
+
+        if self.arm_command_source in ("zmq", "both"):
+            command = self._arm_command_subscriber.recv_keypoints()
+            if command is not None:
+                self.apply_arm_command(command)
 
         left_action = self._left_hand_action_subscriber.recv_keypoints()
         if left_action is not None:
@@ -173,18 +252,64 @@ class Sysmo32MujocoCommandMirror(Component):
             logger.debug("[MuJoCo][ArmCommand] received valid command without model: %s", values)
             return
 
-        hold = []
+        now_s = time.time()
+        self._update_interpolated_hold(now_s)
+        target = []
         for idx, joint_id in enumerate(self._arm_joint_ids):
-            qpos_addr = self._kinematics.model.jnt_qposadr[joint_id]
             low, high = self._kinematics.model.jnt_range[joint_id]
-            hold.append(float(np.clip(values[idx], low, high)))
-        self._hold_joint_positions = np.asarray(hold, dtype=np.float64)
-        self._apply_arm_hold()
-        for joint_id in self._arm_joint_ids:
-            dof_addr = self._kinematics.model.jnt_dofadr[joint_id]
-            self._kinematics.data.qvel[dof_addr] = 0.0
-        self._kinematics._mujoco.mj_forward(self._kinematics.model, self._kinematics.data)
+            target.append(float(np.clip(values[idx], low, high)))
+        if self._hold_joint_positions is None:
+            self._hold_joint_positions = np.asarray(
+                [self._kinematics.data.qpos[addr] for addr in self._arm_qpos_addrs],
+                dtype=np.float64,
+            )
+        self._trajectory_start_positions = self._hold_joint_positions.copy()
+        self._trajectory_target_positions = np.asarray(target, dtype=np.float64)
+        self._trajectory_start_time_s = now_s
+        self._update_interpolated_hold(now_s)
         self._log_applied_arm_command(values)
+
+    def _update_interpolated_hold(self, now_s: float) -> None:
+        if (
+            self._trajectory_start_positions is None
+            or self._trajectory_target_positions is None
+            or self._trajectory_start_time_s is None
+        ):
+            return
+        duration_s = max(self.control_dt, self.control_dt * self.arm_command_interpolation_steps)
+        progress = (now_s - self._trajectory_start_time_s) / duration_s
+        blend = _quintic_blend(progress)
+        self._hold_joint_positions = self._trajectory_start_positions + (
+            self._trajectory_target_positions - self._trajectory_start_positions
+        ) * blend
+        if progress >= 1.0:
+            self._hold_joint_positions = self._trajectory_target_positions.copy()
+            self._trajectory_start_positions = None
+            self._trajectory_target_positions = None
+            self._trajectory_start_time_s = None
+
+    def _publish_joint_state_if_due(self) -> None:
+        if (
+            not self.publish_joint_states
+            or self._joint_state_pub is None
+            or self._joint_state_msg_type is None
+            or self._ros_node is None
+            or self._kinematics is None
+            or not self._kinematics.available
+        ):
+            return
+        now_s = time.time()
+        if now_s - self._last_joint_state_publish_time < 1.0 / self.joint_state_publish_hz:
+            return
+        self._last_joint_state_publish_time = now_s
+
+        msg = self._joint_state_msg_type()
+        msg.header.stamp = self._ros_node.get_clock().now().to_msg()
+        msg.name = list(SYSMO32_LEFT_JOINT_NAMES + SYSMO32_RIGHT_JOINT_NAMES)
+        msg.position = [
+            float(self._kinematics.data.qpos[qpos_addr]) for qpos_addr in self._arm_qpos_addrs
+        ]
+        self._joint_state_pub.publish(msg)
 
     def _log_applied_arm_command(self, values: np.ndarray) -> None:
         now = time.time()
@@ -221,6 +346,11 @@ class Sysmo32MujocoCommandMirror(Component):
     def cleanup(self) -> None:
         for subscriber in getattr(self, "_subscribers", []):
             subscriber.stop()
+        if self._ros_node is not None:
+            self._ros_node.destroy_node()
+            self._ros_node = None
+        if self._owns_rclpy_context and self._rclpy is not None and self._rclpy.ok():
+            self._rclpy.shutdown()
         cleanup_zmq_resources()
 
     def __del__(self):
@@ -231,3 +361,8 @@ class Sysmo32MujocoCommandMirror(Component):
 
 
 __all__ = ["Sysmo32MujocoCommandMirror"]
+
+
+def _quintic_blend(progress: float) -> float:
+    tau = float(np.clip(progress, 0.0, 1.0))
+    return 10.0 * tau**3 - 15.0 * tau**4 + 6.0 * tau**5

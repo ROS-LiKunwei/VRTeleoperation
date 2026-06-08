@@ -163,14 +163,27 @@ class Sysmo32RealControlCfg:
             ),
             hand_frame_timeout_s=0.3,
             safety_hold_arm_on_pause=True,
+            pause_hold_heartbeat_hz=20.0,
             allow_placeholder_ik_for_mujoco=True,
             allow_mujoco_mirror_without_joint_state=True,
             mujoco_mirror_max_joint_velocity_rad_s=3.0,
+            publish_arm_command_topic_in_mujoco=False,
         )
     )
 
+    def __post_init__(self):
+        self.config.control_backend = self.control_backend
+        if self.control_backend == "mujoco":
+            self.config.publish_arm_command_topic_in_mujoco = True
+        if self.control_backend == "real_with_mujoco":
+            self.config.allow_mujoco_mirror_without_joint_state = False
+
     def build(self):
         self.config.control_backend = self.control_backend
+        if self.control_backend == "mujoco":
+            self.config.publish_arm_command_topic_in_mujoco = True
+        if self.control_backend == "real_with_mujoco":
+            self.config.allow_mujoco_mirror_without_joint_state = False
         return Sysmo32RealControl(
             host=self.host,
             control_backend=self.control_backend,
@@ -465,6 +478,12 @@ class Sysmo32Config:
                     render=True,
                     load_model=True,
                     print_hand_action_only=True,
+                    arm_command_source="ros2",
+                    ros_arm_command_topic="/sysmo_left_arm_controller/commands",
+                    publish_joint_states=self.control_backend == "mujoco",
+                    joint_state_topic="/joint_states",
+                    joint_state_publish_hz=50.0,
+                    arm_command_interpolation_steps=5,
                 )
             ]
 
