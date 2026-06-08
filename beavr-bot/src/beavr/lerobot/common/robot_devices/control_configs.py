@@ -87,6 +87,9 @@ class RecordControlConfig(ControlConfig):
     play_sounds: bool = False
     # Resume recording on an existing dataset.
     resume: bool = False
+    # Dataset layout to leave on disk after recording. The internal recorder still writes v2.1 incrementally
+    # and finalizes to v3.0 at the end when requested.
+    dataset_format: str = "v3.0"
 
     def __post_init__(self):
         # HACK: We parse again the cli args here to get the pretrained path if there was one.

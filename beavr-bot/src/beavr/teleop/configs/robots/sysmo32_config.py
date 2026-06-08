@@ -19,7 +19,7 @@ SYSMO-32是6自由度双臂机器人,每臂6个旋转关节,共12个关节。
     左臂：
         - endeff_publish: 10014 (XARM_ENDEFF_PUBLISH_PORT + 4)
         - endeff_subscribe: 10013 (XARM_ENDEFF_SUBSCRIBE_PORT + 4)
-        - state_publish: 10019 (XARM_STATE_PUBLISH_PORT + 3)
+        - state_publish: 10020 (XARM_STATE_PUBLISH_PORT + 4)
 """
 
 from __future__ import annotations
@@ -67,7 +67,7 @@ class Sysmo32RobotCfg:
     reset_subscribe_port: int = ports.XARM_RESET_SUBSCRIBE_PORT + SYSMO32_RIGHT_PORT_OFFSET
     state_publish_port: int = ports.XARM_STATE_PUBLISH_PORT + SYSMO32_RIGHT_PORT_OFFSET
     home_subscribe_port: int = ports.XARM_HOME_SUBSCRIBE_PORT
-    teleoperation_state_port: int = ports.KEYPOINT_STREAM_PORT
+    teleoperation_state_port: int = ports.XARM_TELEOPERATION_STATE_PORT
     hand_side: str = robots.RIGHT
     simulation_mode: bool = True
     enable_ros2_bridge: bool = False
@@ -120,9 +120,11 @@ class Sysmo32RealControlCfg:
     # ZMQ 端口配置（用于接收目标、发布状态等）
     right_target_port: int = ports.XARM_ENDEFF_SUBSCRIBE_PORT + SYSMO32_RIGHT_PORT_OFFSET
     left_target_port: int = ports.XARM_ENDEFF_SUBSCRIBE_PORT + SYSMO32_LEFT_PORT_OFFSET
-    right_state_publish_port: int = ports.XARM_ENDEFF_PUBLISH_PORT + SYSMO32_RIGHT_PORT_OFFSET
-    left_state_publish_port: int = ports.XARM_ENDEFF_PUBLISH_PORT + SYSMO32_LEFT_PORT_OFFSET
-    teleoperation_state_port: int = ports.KEYPOINT_STREAM_PORT
+    right_endeff_publish_port: int = ports.XARM_ENDEFF_PUBLISH_PORT + SYSMO32_RIGHT_PORT_OFFSET
+    left_endeff_publish_port: int = ports.XARM_ENDEFF_PUBLISH_PORT + SYSMO32_LEFT_PORT_OFFSET
+    right_state_publish_port: int = ports.XARM_STATE_PUBLISH_PORT + SYSMO32_RIGHT_PORT_OFFSET
+    left_state_publish_port: int = ports.XARM_STATE_PUBLISH_PORT + SYSMO32_LEFT_PORT_OFFSET
+    teleoperation_state_port: int = ports.XARM_TELEOPERATION_STATE_PORT
     transformed_right_port: int = ports.KEYPOINT_TRANSFORM_PORT
     transformed_left_port: int = ports.LEFT_KEYPOINT_TRANSFORM_PORT
     arm_command_mirror_port: int = ports.SYSMO32_ARM_COMMAND_MIRROR_PORT
@@ -161,6 +163,7 @@ class Sysmo32RealControlCfg:
                 force_release_on_pause=True,
                 force_release_on_timeout=True,
             ),
+            state_publish_fps=30.0,
             hand_frame_timeout_s=0.3,
             safety_hold_arm_on_pause=True,
             allow_placeholder_ik_for_mujoco=True,
@@ -176,6 +179,8 @@ class Sysmo32RealControlCfg:
             control_backend=self.control_backend,
             right_target_port=self.right_target_port,
             left_target_port=self.left_target_port,
+            right_endeff_publish_port=self.right_endeff_publish_port,
+            left_endeff_publish_port=self.left_endeff_publish_port,
             right_state_publish_port=self.right_state_publish_port,
             left_state_publish_port=self.left_state_publish_port,
             teleoperation_state_port=self.teleoperation_state_port,
@@ -206,7 +211,7 @@ class Sysmo32OperatorCfg:
     moving_average_limit: int = 3
     arm_resolution_port: int = ports.KEYPOINT_STREAM_PORT
     use_filter: bool = False
-    teleoperation_state_port: int = ports.KEYPOINT_STREAM_PORT
+    teleoperation_state_port: int = ports.XARM_TELEOPERATION_STATE_PORT
     hand_frame_timeout_s: float = 0.3
     rotation_delta_frame: str = "base"
     logging_config: dict[str, Any] = field(
@@ -388,9 +393,11 @@ class Sysmo32Config:
                 control_backend=self.control_backend,
                 right_target_port=ports.XARM_ENDEFF_SUBSCRIBE_PORT + SYSMO32_RIGHT_PORT_OFFSET,
                 left_target_port=ports.XARM_ENDEFF_SUBSCRIBE_PORT + SYSMO32_LEFT_PORT_OFFSET,
-                right_state_publish_port=ports.XARM_ENDEFF_PUBLISH_PORT + SYSMO32_RIGHT_PORT_OFFSET,
-                left_state_publish_port=ports.XARM_ENDEFF_PUBLISH_PORT + SYSMO32_LEFT_PORT_OFFSET,
-                teleoperation_state_port=ports.KEYPOINT_STREAM_PORT,
+                right_endeff_publish_port=ports.XARM_ENDEFF_PUBLISH_PORT + SYSMO32_RIGHT_PORT_OFFSET,
+                left_endeff_publish_port=ports.XARM_ENDEFF_PUBLISH_PORT + SYSMO32_LEFT_PORT_OFFSET,
+                right_state_publish_port=ports.XARM_STATE_PUBLISH_PORT + SYSMO32_RIGHT_PORT_OFFSET,
+                left_state_publish_port=ports.XARM_STATE_PUBLISH_PORT + SYSMO32_LEFT_PORT_OFFSET,
+                teleoperation_state_port=ports.XARM_TELEOPERATION_STATE_PORT,
                 transformed_right_port=ports.KEYPOINT_TRANSFORM_PORT,
                 transformed_left_port=ports.LEFT_KEYPOINT_TRANSFORM_PORT,
                 arm_command_mirror_port=ports.SYSMO32_ARM_COMMAND_MIRROR_PORT,
@@ -415,7 +422,7 @@ class Sysmo32Config:
                     moving_average_limit=3,
                     arm_resolution_port=ports.KEYPOINT_STREAM_PORT,
                     use_filter=False,
-                    teleoperation_state_port=ports.KEYPOINT_STREAM_PORT,
+                    teleoperation_state_port=ports.XARM_TELEOPERATION_STATE_PORT,
                     hand_side=robots.RIGHT,
                     logging_config={
                         "enabled": False,
@@ -441,7 +448,7 @@ class Sysmo32Config:
                     moving_average_limit=3,
                     arm_resolution_port=ports.KEYPOINT_STREAM_PORT,
                     use_filter=False,
-                    teleoperation_state_port=ports.KEYPOINT_STREAM_PORT,
+                    teleoperation_state_port=ports.XARM_TELEOPERATION_STATE_PORT,
                     hand_side=robots.LEFT,
                     logging_config={
                         "enabled": False,

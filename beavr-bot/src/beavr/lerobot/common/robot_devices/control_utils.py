@@ -405,10 +405,12 @@ def control_loop(
                     action = {"action": action_to_send}
 
         if dataset is not None:
-            if action is None:
-                continue
-            frame = {**observation, **action, "task": single_task}
-            dataset.add_frame(frame)
+            dataset_requires_action = "action" in dataset.features
+            if not (dataset_requires_action and action is None):
+                frame = {**observation, "task": single_task}
+                if action is not None:
+                    frame.update(action)
+                dataset.add_frame(frame)
 
         # TODO(Steven): This should be more general (for RemoteRobot instead of checking the name, but anyways it will change soon)
         if (display_data and not is_headless()) or (display_data and robot.robot_type.startswith("lekiwi")):
