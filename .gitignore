@@ -21,6 +21,10 @@ dist/
 BeaVR-app/BeaVR-Unity/.utmp/
 BeaVR-app/BeaVR_BurstDebugInformation_DoNotShip/
 
+# Unity 自动恢复场景
+BeaVR-app/BeaVR-Unity/Assets/_Recovery/*.unity
+BeaVR-app/BeaVR-Unity/Assets/_Recovery/*.unity.meta
+
 # 本机生成的构建状态
 beavr-bot/log/latest_build
 

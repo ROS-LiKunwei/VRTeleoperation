@@ -100,6 +100,7 @@ def make_robot_from_config(config: RobotConfig):
             robot_configs=config.robot_configs,
             cameras=config.cameras,
             robot_type=config.robot_type,
+            record_actions=config.record_actions,
         )
     else:
         from beavr.lerobot.common.robot_devices.robots.stretch import StretchRobot

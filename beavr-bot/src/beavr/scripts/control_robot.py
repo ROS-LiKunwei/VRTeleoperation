@@ -129,12 +129,14 @@ python beavr/scripts/control_robot.py \
 
 import logging
 import multiprocessing  # Needed for process types
+import os
 import time
 from dataclasses import asdict
 from pprint import pformat
 
 # from safetensors.torch import load_file, save_file
 from beavr.lerobot.common.datasets.lerobot_dataset import LeRobotDataset
+from beavr.lerobot.common.datasets.v30.convert_dataset_v21_to_v30 import convert_dataset_v21_to_v30
 from beavr.lerobot.common.policies.factory import make_policy
 from beavr.lerobot.common.robot_devices.control_configs import (
     ControlPipelineConfig,
@@ -165,6 +167,40 @@ from beavr.lerobot.configs import parser
 ########################################################################################
 
 _teleop_processes: list[multiprocessing.Process] | None = None  # Populated at runtime
+
+
+class _RecordTerminalLogFilter(logging.Filter):
+    """Keep record-mode terminal output focused on dataset collection prompts."""
+
+    _PROMPT_MESSAGES = (
+        "Warmup record",
+        "Recording episode",
+        "Reset the environment",
+        "Re-record episode",
+        "No frames recorded",
+        "Stop recording",
+        "Exiting",
+    )
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno >= logging.ERROR:
+            return True
+        message = record.getMessage()
+        return record.levelno == logging.INFO and message.startswith(self._PROMPT_MESSAGES)
+
+
+def _configure_record_terminal_logging() -> None:
+    os.environ["BEAVR_RECORD_TERMINAL_QUIET"] = "1"
+    logging.getLogger().setLevel(logging.INFO)
+    for handler in logging.getLogger().handlers:
+        handler.addFilter(_RecordTerminalLogFilter())
+
+
+def _episode_buffer_size(dataset: LeRobotDataset) -> int:
+    episode_buffer = getattr(dataset, "episode_buffer", None)
+    if not episode_buffer:
+        return 0
+    return int(episode_buffer.get("size", 0))
 
 
 def start_teleop_process(
@@ -364,20 +400,27 @@ def record(
                 single_task=cfg.single_task,
             )
 
-            # Execute a few seconds without recording to give time to manually reset the environment
-            # TODO: add an option to enable teleoperation during reset
-            # Skip reset for the last episode to be recorded
-            if not events["stop_recording"] and (
-                (recorded_episodes < cfg.num_episodes - 1) or events["rerecord_episode"]
-            ):
-                log_say("Reset the environment", cfg.play_sounds)
-                reset_environment(robot, events, cfg.reset_time_s, cfg.fps)
-
             if events["rerecord_episode"]:
+                if not events["stop_recording"]:
+                    log_say("Reset the environment", cfg.play_sounds)
+                    reset_environment(robot, events, cfg.reset_time_s, cfg.fps)
                 log_say("Re-record episode", cfg.play_sounds)
                 events["rerecord_episode"] = False
                 events["exit_early"] = False
                 dataset.clear_episode_buffer()
+                continue
+
+            if _episode_buffer_size(dataset) == 0:
+                log_say(
+                    "No frames recorded; episode not saved. Waiting for valid observation/action frames.",
+                    cfg.play_sounds,
+                )
+                dataset.clear_episode_buffer()
+                if events["stop_recording"]:
+                    break
+                if recorded_episodes < cfg.num_episodes:
+                    log_say("Reset the environment", cfg.play_sounds)
+                    reset_environment(robot, events, cfg.reset_time_s, cfg.fps)
                 continue
 
             dataset.save_episode()
@@ -386,8 +429,19 @@ def record(
             if events["stop_recording"]:
                 break
 
+            # Execute a few seconds without recording to give time to manually reset the environment.
+            # Save first so early-exited episodes are durable before reset or a later Ctrl+C.
+            if recorded_episodes < cfg.num_episodes:
+                log_say("Reset the environment", cfg.play_sounds)
+                reset_environment(robot, events, cfg.reset_time_s, cfg.fps)
+
         log_say("Stop recording", cfg.play_sounds, blocking=True)
         stop_recording(robot, listener, cfg.display_data)
+
+        if cfg.dataset_format == "v3.0":
+            convert_dataset_v21_to_v30(dataset.root)
+        elif cfg.dataset_format != "v2.1":
+            raise ValueError("control.dataset_format must be either 'v3.0' or 'v2.1'")
 
         if cfg.push_to_hub:
             dataset.push_to_hub(tags=cfg.tags, private=cfg.private)
@@ -430,6 +484,8 @@ def replay(
 @parser.wrap()
 def control_robot(cfg: ControlPipelineConfig):
     init_logging()
+    if isinstance(cfg.control, RecordControlConfig):
+        _configure_record_terminal_logging()
     logging.info(pformat(asdict(cfg)))
 
     # Determine whether the teleoperation helper needs to run. Set

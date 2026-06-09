@@ -36,6 +36,7 @@ class BeavrBot(Robot):
         *,
         op_state_port: int = 8089,
         handshake_host: str = "127.0.0.1",
+        record_actions: bool = True,
     ):
         """Initialize the multi-robot adapter.
 
@@ -55,6 +56,7 @@ class BeavrBot(Robot):
         """
         self.robot_type = robot_type
         self.robot_configs = robot_configs
+        self.record_actions = record_actions
 
         # Create ZMQ subscribers for each robot
         self.robot_subscribers = {}
@@ -186,9 +188,7 @@ class BeavrBot(Robot):
         hand_configs = [c for c in self.robot_configs if c["robot_type"] == "hand"]
         sorted_configs = arm_configs + hand_configs
 
-        # Calculate total dimensions
         total_obs_dim = sum(c["joint_count"] for c in sorted_configs)
-        total_action_dim = sum(7 if c["robot_type"] == "arm" else c["joint_count"] for c in sorted_configs)
 
         # Build combined observation feature
         obs_names = []
@@ -201,21 +201,24 @@ class BeavrBot(Robot):
             "names": obs_names,
         }
 
-        # Build combined action feature
-        action_names = []
-        for config in sorted_configs:
-            if config["robot_type"] == "arm":
-                action_names.extend(
-                    [f"{config['name']}_{dim}" for dim in ["x", "y", "z", "qx", "qy", "qz", "qw"]]
-                )
-            else:
-                action_names.extend([f"{config['name']}_cmd_{i}" for i in range(config["joint_count"])])
+        if self.record_actions:
+            total_action_dim = sum(
+                7 if c["robot_type"] == "arm" else c["joint_count"] for c in sorted_configs
+            )
+            action_names = []
+            for config in sorted_configs:
+                if config["robot_type"] == "arm":
+                    action_names.extend(
+                        [f"{config['name']}_{dim}" for dim in ["x", "y", "z", "qx", "qy", "qz", "qw"]]
+                    )
+                else:
+                    action_names.extend([f"{config['name']}_cmd_{i}" for i in range(config["joint_count"])])
 
-        features["action"] = {
-            "shape": (total_action_dim,),
-            "dtype": "float32",
-            "names": action_names,
-        }
+            features["action"] = {
+                "shape": (total_action_dim,),
+                "dtype": "float32",
+                "names": action_names,
+            }
 
         # Add camera features
         for name, camera in self.cameras.items():
@@ -409,6 +412,8 @@ class BeavrBot(Robot):
 
         # Get observation frame
         observation_frame = self.capture_observation()
+        if not self.record_actions:
+            return observation_frame, None
 
         # Build combined action array (raw, in native units)
         combined_action = []

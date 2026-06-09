@@ -706,6 +706,7 @@ class BeavrBotConfig(RobotConfig):
 
     # Overall robot type identifier
     robot_type: str = "multi_robot"
+    record_actions: bool = True
 
     mock: bool = False
 
@@ -836,6 +837,7 @@ class Sysmo32AdapterConfig(BeavrBotConfig):
         }
     )
     robot_type: str = "sysmo32"
+    record_actions: bool = True
 
     def __post_init__(self):
         self.robot_configs = [

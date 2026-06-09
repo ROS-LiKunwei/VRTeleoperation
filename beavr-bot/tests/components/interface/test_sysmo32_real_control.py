@@ -197,6 +197,73 @@ def test_joint_state_cache_parses_and_rejects_stale_state():
     assert not cache.is_fresh(now_s=10.6)
 
 
+def test_real_control_publishes_lerobot_joint_states_at_configured_rate(monkeypatch, bus):
+    import beavr.teleop.components.interface.robots.sysmo32_real_control as real_mod
+
+    class FakeSubscriber:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def recv_keypoints(self):
+            return None
+
+        def stop(self):
+            return None
+
+    class FakeKinematics:
+        available = False
+
+        def __init__(self, urdf_path):
+            self.urdf_path = urdf_path
+
+    monkeypatch.setattr(real_mod, "ZMQSubscriber", FakeSubscriber)
+    monkeypatch.setattr(real_mod, "Sysmo32MujocoKinematics", FakeKinematics)
+    monkeypatch.setattr(real_mod, "cleanup_zmq_resources", lambda: None)
+
+    controller = Sysmo32RealControl(
+        host="127.0.0.1",
+        control_backend="mujoco",
+        right_target_port=10011,
+        left_target_port=10013,
+        right_endeff_publish_port=10012,
+        left_endeff_publish_port=10014,
+        right_state_publish_port=10018,
+        left_state_publish_port=10020,
+        teleoperation_state_port=ports.XARM_TELEOPERATION_STATE_PORT,
+        transformed_right_port=ports.KEYPOINT_TRANSFORM_PORT,
+        transformed_left_port=ports.LEFT_KEYPOINT_TRANSFORM_PORT,
+        config=Sysmo32RealControlConfig(control_backend="mujoco", state_publish_fps=30.0),
+    )
+    controller._dry_joint_cache.update([1, 2, 3, 4, 5, 6], [7, 8, 9, 10, 11, 12], now_s=time.time())
+    controller._latest_targets[robots.RIGHT] = CartesianTarget(
+        timestamp_s=123.0,
+        hand_side=robots.RIGHT,
+        frame_id="base",
+        position_m=(0.1, 0.2, 0.3),
+        orientation_xyzw=(0.0, 0.0, 0.0, 1.0),
+    )
+
+    controller._publish_lerobot_joint_states()
+
+    right_state = bus.recv_latest(10018, "sysmo32_right")
+    left_state = bus.recv_latest(10020, "sysmo32_left")
+    assert right_state["joint_states"]["joint_position"] == [7.0, 8.0, 9.0, 10.0, 11.0, 12.0]
+    assert left_state["joint_states"]["joint_position"] == [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+    assert right_state["joint_angles_rad"] == right_state["joint_states"]["joint_position"]
+    assert right_state["commanded_cartesian_state"]["commanded_cartesian_position"] == [
+        0.1,
+        0.2,
+        0.3,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+    ]
+    assert right_state["commanded_cartesian_state"]["timestamp_s"] == 123.0
+    assert "commanded_cartesian_state" not in left_state
+    controller.cleanup()
+
+
 def test_hand_action_not_published_before_first_hand_frame(monkeypatch, bus):
     import beavr.teleop.components.interface.robots.sysmo32_real_control as real_mod
 
@@ -230,7 +297,7 @@ def test_hand_action_not_published_before_first_hand_frame(monkeypatch, bus):
         left_target_port=10013,
         right_state_publish_port=10012,
         left_state_publish_port=10014,
-        teleoperation_state_port=ports.KEYPOINT_STREAM_PORT,
+        teleoperation_state_port=ports.XARM_TELEOPERATION_STATE_PORT,
         transformed_right_port=ports.KEYPOINT_TRANSFORM_PORT,
         transformed_left_port=ports.LEFT_KEYPOINT_TRANSFORM_PORT,
     )
@@ -277,7 +344,7 @@ def test_hand_action_publishes_after_first_hand_frame(monkeypatch, bus):
         left_target_port=10013,
         right_state_publish_port=10012,
         left_state_publish_port=10014,
-        teleoperation_state_port=ports.KEYPOINT_STREAM_PORT,
+        teleoperation_state_port=ports.XARM_TELEOPERATION_STATE_PORT,
         transformed_right_port=ports.KEYPOINT_TRANSFORM_PORT,
         transformed_left_port=ports.LEFT_KEYPOINT_TRANSFORM_PORT,
     )
@@ -325,7 +392,7 @@ def test_pause_publishes_release_after_hand_frame_started(monkeypatch, bus):
         left_target_port=10013,
         right_state_publish_port=10012,
         left_state_publish_port=10014,
-        teleoperation_state_port=ports.KEYPOINT_STREAM_PORT,
+        teleoperation_state_port=ports.XARM_TELEOPERATION_STATE_PORT,
         transformed_right_port=ports.KEYPOINT_TRANSFORM_PORT,
         transformed_left_port=ports.LEFT_KEYPOINT_TRANSFORM_PORT,
     )
@@ -783,7 +850,19 @@ def test_sysmo32_config_routes_backends():
     assert real_cfg.control_backend == "real"
     assert len(real_cfg.robots) == 1
     assert real_cfg.environment == []
-    assert real_cfg.operators[0].teleoperation_state_port == ports.KEYPOINT_STREAM_PORT
+    robot_cfg = real_cfg.robots[0]
+    assert robot_cfg.right_target_port == ports.XARM_ENDEFF_SUBSCRIBE_PORT + 2
+    assert robot_cfg.left_target_port == ports.XARM_ENDEFF_SUBSCRIBE_PORT + 4
+    assert robot_cfg.right_endeff_publish_port == ports.XARM_ENDEFF_PUBLISH_PORT + 2
+    assert robot_cfg.left_endeff_publish_port == ports.XARM_ENDEFF_PUBLISH_PORT + 4
+    assert robot_cfg.right_state_publish_port == ports.XARM_STATE_PUBLISH_PORT + 2
+    assert robot_cfg.left_state_publish_port == ports.XARM_STATE_PUBLISH_PORT + 4
+    assert real_cfg.robots[0].teleoperation_state_port == ports.XARM_TELEOPERATION_STATE_PORT
+    assert real_cfg.operators[0].endeff_publish_port == robot_cfg.right_target_port
+    assert real_cfg.operators[0].endeff_subscribe_port == robot_cfg.right_endeff_publish_port
+    assert real_cfg.operators[1].endeff_publish_port == robot_cfg.left_target_port
+    assert real_cfg.operators[1].endeff_subscribe_port == robot_cfg.left_endeff_publish_port
+    assert real_cfg.operators[0].teleoperation_state_port == ports.XARM_TELEOPERATION_STATE_PORT
     assert real_cfg.operators[0].hand_frame_timeout_s == 0.3
     assert real_cfg.operators[0].rotation_delta_frame == "base"
 

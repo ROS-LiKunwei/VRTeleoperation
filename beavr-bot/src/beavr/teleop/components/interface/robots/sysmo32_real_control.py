@@ -77,6 +77,7 @@ class Sysmo32RealControlConfig:
     ros2: Sysmo32Ros2Topics = field(default_factory=Sysmo32Ros2Topics)  # ROS2 配置
     arm: Sysmo32ArmSafetyConfig = field(default_factory=Sysmo32ArmSafetyConfig)  # 手臂安全配置
     hand: Sysmo32HandConfig = field(default_factory=Sysmo32HandConfig)  # 手部配置
+    state_publish_fps: float = 30.0  # LeRobot录制状态发布频率
     hand_frame_timeout_s: float = 0.3  # 手部帧超时时间：0.3s
     safety_hold_arm_on_pause: bool = True  # 暂停时保持手臂位置
     pause_hold_heartbeat_hz: float = 20.0  # 暂停保持命令心跳频率
@@ -196,6 +197,8 @@ class Sysmo32RealControl(Component):
         teleoperation_state_port: int,
         transformed_right_port: int,
         transformed_left_port: int,
+        right_endeff_publish_port: Optional[int] = None,
+        left_endeff_publish_port: Optional[int] = None,
         arm_command_mirror_port: int = ports.SYSMO32_ARM_COMMAND_MIRROR_PORT,
         hand_action_mirror_port: int = ports.SYSMO32_HAND_ACTION_MIRROR_PORT,
         urdf_path: str = "robots/sysmo_description/urdf/sysmo32.urdf",
@@ -213,6 +216,8 @@ class Sysmo32RealControl(Component):
         self._hand_action_mirror_port = hand_action_mirror_port
         self._right_state_publish_port = right_state_publish_port
         self._left_state_publish_port = left_state_publish_port
+        self._right_endeff_publish_port = right_endeff_publish_port or right_state_publish_port
+        self._left_endeff_publish_port = left_endeff_publish_port or left_state_publish_port
         self._publisher_manager.register_topic(
             self.host, self._arm_command_mirror_port, SYSMO32_ARM_COMMAND_TOPIC
         )
@@ -225,6 +230,16 @@ class Sysmo32RealControl(Component):
             self.host,
             self._hand_action_mirror_port,
             SYSMO32_RIGHT_HAND_ACTION_TOPIC,
+        )
+        self._publisher_manager.register_topic(
+            self.host,
+            self._right_state_publish_port,
+            "sysmo32_right",
+        )
+        self._publisher_manager.register_topic(
+            self.host,
+            self._left_state_publish_port,
+            "sysmo32_left",
         )
 
         self._right_target_subscriber = ZMQSubscriber(
@@ -300,6 +315,7 @@ class Sysmo32RealControl(Component):
         self._last_safety_log_time: Dict[str, float] = {}
         self._last_session_command: Optional[str] = None
         self._real_reset_ready = self.control_backend == "mujoco"
+        self._next_state_publish_time_s = 0.0
         self._pause_hold_command: Optional[Sysmo32ArmCommand] = None
         self._last_pause_hold_publish_time = 0.0
 
@@ -339,6 +355,7 @@ class Sysmo32RealControl(Component):
             self._publish_hand_actions_for_current_state()  # 发布手部动作
             self._handle_reset_requests()  # 处理重置请求
             self._receive_cartesian_targets()  # 接收笛卡尔目标
+            self._publish_lerobot_joint_states()  # 按30Hz发布LeRobot录制状态
             self._publish_arm_command_if_safe()  # 发布安全的手臂命令
             elapsed = time.time() - start
             time.sleep(max(0.0, (1.0 / robots.VR_FREQ) - elapsed))
@@ -494,8 +511,8 @@ class Sysmo32RealControl(Component):
 
     def _handle_reset_requests(self) -> None:
         for hand_side, subscriber, publish_port in (
-            (robots.RIGHT, self._right_reset_subscriber, self._right_state_publish_port),
-            (robots.LEFT, self._left_reset_subscriber, self._left_state_publish_port),
+            (robots.RIGHT, self._right_reset_subscriber, self._right_endeff_publish_port),
+            (robots.LEFT, self._left_reset_subscriber, self._left_endeff_publish_port),
         ):
             if subscriber.recv_keypoints() is None:
                 continue
@@ -548,6 +565,66 @@ class Sysmo32RealControl(Component):
                 self._warn_safety(f"{hand_side}_wrong_target_side", f"wrong target side: {msg.hand_side}")
                 continue
             self._latest_targets[hand_side] = msg
+
+    def _publish_lerobot_joint_states(self) -> None:
+        """Publish per-arm state dictionaries consumed by the LeRobot BeavrBot adapter."""
+
+        state_publish_fps = float(self.config.state_publish_fps)
+        if state_publish_fps <= 0.0:
+            return
+
+        now = time.time()
+        if now < self._next_state_publish_time_s:
+            return
+        self._next_state_publish_time_s = now + (1.0 / state_publish_fps)
+
+        if not self._joint_state_fresh():
+            self._warn_safety("record_joint_state_stale", "LeRobot state publish skipped: stale joint state")
+            return
+
+        snapshot = self._current_joint_snapshot()
+        if snapshot is None:
+            self._warn_safety(
+                "record_joint_state_missing", "LeRobot state publish skipped: missing joint state"
+            )
+            return
+
+        self._publish_lerobot_arm_state(robots.RIGHT, snapshot.right_arm, self._right_state_publish_port, now)
+        self._publish_lerobot_arm_state(robots.LEFT, snapshot.left_arm, self._left_state_publish_port, now)
+
+    def _publish_lerobot_arm_state(
+        self,
+        hand_side: str,
+        joint_positions_rad: Sequence[float],
+        publish_port: int,
+        publish_time_s: float,
+    ) -> None:
+        topic = f"sysmo32_{hand_side}"
+        state = {
+            "joint_states": {
+                "joint_position": [float(value) for value in joint_positions_rad],
+                "timestamp": publish_time_s,
+            },
+            "joint_angles_rad": [float(value) for value in joint_positions_rad],
+            "timestamp": publish_time_s,
+        }
+
+        target = self._latest_targets.get(hand_side)
+        if target is not None:
+            state["commanded_cartesian_state"] = {
+                "commanded_cartesian_position": [
+                    *[float(value) for value in target.position_m],
+                    *[float(value) for value in target.orientation_xyzw],
+                ],
+                "timestamp_s": getattr(target, "timestamp_s", publish_time_s),
+            }
+
+        self._publisher_manager.publish(
+            host=self.host,
+            port=publish_port,
+            topic=topic,
+            data=state,
+        )
 
     def _publish_arm_command_if_safe(self) -> None:
         # 检查状态

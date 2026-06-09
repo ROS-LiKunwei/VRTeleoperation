@@ -8,6 +8,32 @@ from beavr.teleop.common.factory.instantiator import instantiate_from_target
 logger = logging.getLogger(__name__)
 
 
+class _RecordTerminalLogFilter(logging.Filter):
+    _PROMPT_MESSAGES = (
+        "Warmup record",
+        "Recording episode",
+        "Reset the environment",
+        "Re-record episode",
+        "No frames recorded",
+        "Stop recording",
+        "Exiting",
+    )
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno >= logging.ERROR:
+            return True
+        message = record.getMessage()
+        return record.levelno == logging.INFO and message.startswith(self._PROMPT_MESSAGES)
+
+
+def _configure_record_terminal_logging_from_env() -> None:
+    if os.getenv("BEAVR_RECORD_TERMINAL_QUIET") != "1":
+        return
+    logging.getLogger().setLevel(logging.INFO)
+    for handler in logging.getLogger().handlers:
+        handler.addFilter(_RecordTerminalLogFilter())
+
+
 class ProcessInstantiator(ABC):
     """
     进程实例化器基类：
@@ -80,6 +106,7 @@ class TeleOperator(ProcessInstantiator):
         - 组件列表（逐个调用 `stream()`)
         """
         try:
+            _configure_record_terminal_logging_from_env()
             component = instantiate_from_target(configs)
             # Handle both single component and list of components
             if isinstance(component, list):
@@ -93,7 +120,9 @@ class TeleOperator(ProcessInstantiator):
 
     def _init_detector(self):
         """初始化 detector 进程。"""
-        self.processes.append(Process(target=self._start_component, args=(self.robot_config.detector,))) # 在 Python 中，args 必须接收一个元组（Tuple）
+        self.processes.append(
+            Process(target=self._start_component, args=(self.robot_config.detector,))
+        )  # 在 Python 中，args 必须接收一个元组（Tuple）
 
     def _init_sim_environment(self):
         """初始化仿真环境相关进程（可能有多个环境组件）。"""
