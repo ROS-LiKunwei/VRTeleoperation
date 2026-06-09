@@ -70,9 +70,14 @@ def test_sysmo32_arm_command_rejects_invalid_length_and_nan():
         Sysmo32CommandBuilder().build([np.nan] * 6, [0.0] * 6)
 
 
-def test_sysmo32_speed_mode_4_is_not_allowed_as_default():
-    with pytest.raises(ValueError, match="speed_mode=4.0"):
-        Sysmo32ArmSafetyConfig(speed_mode=4.0)
+def test_sysmo32_speed_mode_4_is_allowed():
+    command = Sysmo32CommandBuilder(Sysmo32ArmSafetyConfig(speed_mode=4.0)).build(
+        [0.1] * 6,
+        [-0.1] * 6,
+        timestamp_s=1.0,
+    )
+
+    assert command.speed_mode == 4.0
 
 
 def test_sysmo32_limiter_clips_joint_position_and_limits_velocity():

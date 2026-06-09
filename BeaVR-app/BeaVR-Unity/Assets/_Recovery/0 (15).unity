@@ -166,8 +166,8 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 1344c3c82d62a2a41a3576d8abb8e3ea, type: 3}
-  m_Name:
-  m_EditorClassIdentifier:
+  m_Name: 
+  m_EditorClassIdentifier: 
   m_Material: {fileID: 0}
   m_Color: {r: 1, g: 1, b: 1, a: 1}
   m_RaycastTarget: 0
@@ -351,7 +351,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 59f8146938fff824cb5fd77236b75775, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: UnityEngine.UI::UnityEngine.UI.VerticalLayoutGroup
   m_Padding:
     m_Left: 0
@@ -417,7 +417,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 67db9e8f0e2ae9c40bc1e2b64352a6b4, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: UnityEngine.UI::UnityEngine.UI.Slider
   m_Navigation:
     m_Mode: 3
@@ -467,7 +467,7 @@ MonoBehaviour:
           m_ObjectArgumentAssemblyTypeName: UnityEngine.Object, UnityEngine
           m_IntArgument: 0
           m_FloatArgument: 0
-          m_StringArgument:
+          m_StringArgument: 
           m_BoolArgument: 0
         m_CallState: 2
 --- !u!114 &90169686
@@ -480,7 +480,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: f78324885a62cc74091f3f86ba5298fb, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::HandMultiplierSaver
   slider: {fileID: 90169685}
   prefsKey: HandMultiplier
@@ -571,7 +571,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 0f19b6e60eb60c044b1e397f2cfbf47f, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::CanvasSwitch
   nextCanvas: {fileID: 191049804}
   alsoDisableCanvas: {fileID: 1930241850}
@@ -585,7 +585,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 4e29b1a8efbd4b44bb3f3716e73f07ff, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: UnityEngine.UI::UnityEngine.UI.Button
   m_Navigation:
     m_Mode: 3
@@ -628,7 +628,7 @@ MonoBehaviour:
           m_ObjectArgumentAssemblyTypeName: UnityEngine.Object, UnityEngine
           m_IntArgument: 0
           m_FloatArgument: 0
-          m_StringArgument:
+          m_StringArgument: 
           m_BoolArgument: 0
         m_CallState: 2
 --- !u!114 &113637720
@@ -641,7 +641,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: fe87c0e1cc204ed48ad3b37840f39efc, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: UnityEngine.UI::UnityEngine.UI.Image
   m_Material: {fileID: 0}
   m_Color: {r: 0.25882354, g: 0.25882354, b: 0.25882354, a: 1}
@@ -702,7 +702,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: dc42784cf147c0c48a680349fa168899, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: UnityEngine.UI::UnityEngine.UI.GraphicRaycaster
   m_IgnoreReversedGraphics: 1
   m_BlockingObjects: 0
@@ -977,8 +977,8 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 306cc8c2b49d7114eaa3623786fc2126, type: 3}
-  m_Name:
-  m_EditorClassIdentifier:
+  m_Name: 
+  m_EditorClassIdentifier: 
   m_IgnoreLayout: 1
   m_MinWidth: -1
   m_MinHeight: -1
@@ -1034,7 +1034,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: f4688fdb7df04437aeb418b961361dc5, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: Unity.TextMeshPro::TMPro.TextMeshProUGUI
   m_Material: {fileID: 0}
   m_Color: {r: 1, g: 1, b: 1, a: 1}
@@ -1152,8 +1152,8 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: dc42784cf147c0c48a680349fa168899, type: 3}
-  m_Name:
-  m_EditorClassIdentifier:
+  m_Name: 
+  m_EditorClassIdentifier: 
   m_IgnoreReversedGraphics: 1
   m_BlockingObjects: 0
   m_BlockingMask:
@@ -1169,8 +1169,8 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 0cd44c1031e13a943bb63640046fad76, type: 3}
-  m_Name:
-  m_EditorClassIdentifier:
+  m_Name: 
+  m_EditorClassIdentifier: 
   m_UiScaleMode: 0
   m_ReferencePixelsPerUnit: 100
   m_ScaleFactor: 1
@@ -1294,7 +1294,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: dc42784cf147c0c48a680349fa168899, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: UnityEngine.UI::UnityEngine.UI.GraphicRaycaster
   m_IgnoreReversedGraphics: 1
   m_BlockingObjects: 0
@@ -1311,7 +1311,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 0cd44c1031e13a943bb63640046fad76, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: UnityEngine.UI::UnityEngine.UI.CanvasScaler
   m_UiScaleMode: 0
   m_ReferencePixelsPerUnit: 100
@@ -1457,7 +1457,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 4e29b1a8efbd4b44bb3f3716e73f07ff, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: UnityEngine.UI::UnityEngine.UI.Button
   m_Navigation:
     m_Mode: 3
@@ -1500,7 +1500,7 @@ MonoBehaviour:
           m_ObjectArgumentAssemblyTypeName: UnityEngine.Object, UnityEngine
           m_IntArgument: 0
           m_FloatArgument: 0
-          m_StringArgument:
+          m_StringArgument: 
           m_BoolArgument: 0
         m_CallState: 2
 --- !u!114 &213152970
@@ -1513,7 +1513,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: fe87c0e1cc204ed48ad3b37840f39efc, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: UnityEngine.UI::UnityEngine.UI.Image
   m_Material: {fileID: 0}
   m_Color: {r: 0.25882354, g: 0.25882354, b: 0.25882354, a: 1}
@@ -1551,7 +1551,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 0f19b6e60eb60c044b1e397f2cfbf47f, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::CanvasSwitch
   nextCanvas: {fileID: 1930241850}
   alsoDisableCanvas: {fileID: 0}
@@ -1565,7 +1565,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: f5e9c96069d593040b7739cd5bd3cfbb, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::StartTeleopButton
   networkManager: {fileID: 1197026216}
   canvasSwitch: {fileID: 213152973}
@@ -1612,13 +1612,18 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 9f025dc8af99e80e4b8146e9fb885129, type: 3}
-  m_Name:
-  m_EditorClassIdentifier:
+  m_Name: 
+  m_EditorClassIdentifier: 
   EnableKeypointLogging: 1
   KeypointLogIntervalSeconds: 1
   EnableSendFrequencyLogging: 1
   EnableWristDataLogging: 1
   MinGestureSendDeltaMeters: 0.001
+  EnableGrabReleaseDetection: 1
+  GrabRequiredCurledFingers: 3
+  GrabFingerTipToPalmThresholdMeters: 0.055
+  ReleaseFingerTipToPalmThresholdMeters: 0.075
+  GrabReleaseStateCooldownSeconds: 0.12
   EnableFullJointLogging: 1
   MenuButton: {fileID: 113637716}
   ResolutionButton: {fileID: 0}
@@ -1690,7 +1695,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: dc42784cf147c0c48a680349fa168899, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: UnityEngine.UI::UnityEngine.UI.GraphicRaycaster
   m_IgnoreReversedGraphics: 1
   m_BlockingObjects: 0
@@ -1730,7 +1735,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 0f19b6e60eb60c044b1e397f2cfbf47f, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::CanvasSwitch
   nextCanvas: {fileID: 191049804}
   alsoDisableCanvas: {fileID: 1930241850}
@@ -1744,7 +1749,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 4e29b1a8efbd4b44bb3f3716e73f07ff, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: UnityEngine.UI::UnityEngine.UI.Button
   m_Navigation:
     m_Mode: 3
@@ -1787,7 +1792,7 @@ MonoBehaviour:
           m_ObjectArgumentAssemblyTypeName: UnityEngine.Object, UnityEngine
           m_IntArgument: 0
           m_FloatArgument: 0
-          m_StringArgument:
+          m_StringArgument: 
           m_BoolArgument: 0
         m_CallState: 2
 --- !u!114 &248164268
@@ -1800,7 +1805,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: fe87c0e1cc204ed48ad3b37840f39efc, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: UnityEngine.UI::UnityEngine.UI.Image
   m_Material: {fileID: 0}
   m_Color: {r: 0.25882354, g: 0.25882354, b: 0.25882354, a: 1}
@@ -1875,7 +1880,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: fe87c0e1cc204ed48ad3b37840f39efc, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: UnityEngine.UI::UnityEngine.UI.Image
   m_Material: {fileID: 0}
   m_Color: {r: 1, g: 1, b: 1, a: 1}
@@ -1950,8 +1955,8 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 306cc8c2b49d7114eaa3623786fc2126, type: 3}
-  m_Name:
-  m_EditorClassIdentifier:
+  m_Name: 
+  m_EditorClassIdentifier: 
   m_IgnoreLayout: 1
   m_MinWidth: -1
   m_MinHeight: -1
@@ -2007,7 +2012,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: fe87c0e1cc204ed48ad3b37840f39efc, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: UnityEngine.UI::UnityEngine.UI.Image
   m_Material: {fileID: 0}
   m_Color: {r: 1, g: 1, b: 1, a: 1}
@@ -2082,7 +2087,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: f4688fdb7df04437aeb418b961361dc5, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: Unity.TextMeshPro::TMPro.TextMeshProUGUI
   m_Material: {fileID: 0}
   m_Color: {r: 1, g: 1, b: 1, a: 1}
@@ -2301,8 +2306,8 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 306cc8c2b49d7114eaa3623786fc2126, type: 3}
-  m_Name:
-  m_EditorClassIdentifier:
+  m_Name: 
+  m_EditorClassIdentifier: 
   m_IgnoreLayout: 1
   m_MinWidth: -1
   m_MinHeight: -1
@@ -2389,8 +2394,8 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 306cc8c2b49d7114eaa3623786fc2126, type: 3}
-  m_Name:
-  m_EditorClassIdentifier:
+  m_Name: 
+  m_EditorClassIdentifier: 
   m_IgnoreLayout: 1
   m_MinWidth: -1
   m_MinHeight: -1
@@ -2476,7 +2481,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: d8928e15e23049345b1308cd8e4dd1b0, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::IPFieldManager
   ipInput: {fileID: 564264848}
   toastManager: {fileID: 1189762169}
@@ -2529,7 +2534,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: f4688fdb7df04437aeb418b961361dc5, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: Unity.TextMeshPro::TMPro.TextMeshProUGUI
   m_Material: {fileID: 0}
   m_Color: {r: 1, g: 1, b: 1, a: 1}
@@ -2667,7 +2672,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: fe87c0e1cc204ed48ad3b37840f39efc, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: UnityEngine.UI::UnityEngine.UI.Image
   m_Material: {fileID: 0}
   m_Color: {r: 1, g: 1, b: 1, a: 1}
@@ -2774,7 +2779,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: f4688fdb7df04437aeb418b961361dc5, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: Unity.TextMeshPro::TMPro.TextMeshProUGUI
   m_Material: {fileID: 0}
   m_Color: {r: 1, g: 1, b: 1, a: 1}
@@ -2873,7 +2878,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 22a01fb315a19ca42bfdbf5ed3ec8e33, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::CurrentIPLabel
   target: {fileID: 543011101}
   prefix: 'Current IP Address:'
@@ -2963,7 +2968,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 2da0c512f12947e489f739169773d7ca, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: Unity.TextMeshPro::TMPro.TMP_InputField
   m_Navigation:
     m_Mode: 3
@@ -3009,7 +3014,7 @@ MonoBehaviour:
   m_HideMobileInput: 0
   m_HideSoftKeyboard: 0
   m_CharacterValidation: 0
-  m_RegexValue:
+  m_RegexValue: 
   m_GlobalPointSize: 14
   m_CharacterLimit: 0
   m_OnEndEdit:
@@ -3024,7 +3029,7 @@ MonoBehaviour:
           m_ObjectArgumentAssemblyTypeName: UnityEngine.Object, UnityEngine
           m_IntArgument: 0
           m_FloatArgument: 0
-          m_StringArgument:
+          m_StringArgument: 
           m_BoolArgument: 0
         m_CallState: 2
   m_OnSubmit:
@@ -3042,7 +3047,7 @@ MonoBehaviour:
           m_ObjectArgumentAssemblyTypeName: UnityEngine.Object, UnityEngine
           m_IntArgument: 0
           m_FloatArgument: 0
-          m_StringArgument:
+          m_StringArgument: 
           m_BoolArgument: 0
         m_CallState: 2
   m_OnDeselect:
@@ -3057,7 +3062,7 @@ MonoBehaviour:
           m_ObjectArgumentAssemblyTypeName: UnityEngine.Object, UnityEngine
           m_IntArgument: 0
           m_FloatArgument: 0
-          m_StringArgument:
+          m_StringArgument: 
           m_BoolArgument: 0
         m_CallState: 2
   m_OnTextSelection:
@@ -3075,7 +3080,7 @@ MonoBehaviour:
   m_CaretColor: {r: 0.19607843, g: 0.19607843, b: 0.19607843, a: 1}
   m_CustomCaretColor: 0
   m_SelectionColor: {r: 0.65882355, g: 0.80784315, b: 1, a: 0.7529412}
-  m_Text:
+  m_Text: 
   m_CaretBlinkRate: 0.85
   m_CaretWidth: 1
   m_ReadOnly: 0
@@ -3100,7 +3105,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: fe87c0e1cc204ed48ad3b37840f39efc, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: UnityEngine.UI::UnityEngine.UI.Image
   m_Material: {fileID: 0}
   m_Color: {r: 0.25882354, g: 0.25882354, b: 0.25882354, a: 1}
@@ -3178,7 +3183,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 4e29b1a8efbd4b44bb3f3716e73f07ff, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: UnityEngine.UI::UnityEngine.UI.Button
   m_Navigation:
     m_Mode: 3
@@ -3221,7 +3226,7 @@ MonoBehaviour:
           m_ObjectArgumentAssemblyTypeName: UnityEngine.Object, UnityEngine
           m_IntArgument: 0
           m_FloatArgument: 0
-          m_StringArgument:
+          m_StringArgument: 
           m_BoolArgument: 0
         m_CallState: 2
 --- !u!114 &566981344
@@ -3234,7 +3239,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: fe87c0e1cc204ed48ad3b37840f39efc, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: UnityEngine.UI::UnityEngine.UI.Image
   m_Material: {fileID: 0}
   m_Color: {r: 0.25882354, g: 0.25882354, b: 0.25882354, a: 1}
@@ -3272,7 +3277,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 0f19b6e60eb60c044b1e397f2cfbf47f, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::CanvasSwitch
   nextCanvas: {fileID: 782628375}
   alsoDisableCanvas: {fileID: 0}
@@ -3327,7 +3332,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 4e29b1a8efbd4b44bb3f3716e73f07ff, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: UnityEngine.UI::UnityEngine.UI.Button
   m_Navigation:
     m_Mode: 3
@@ -3370,7 +3375,7 @@ MonoBehaviour:
           m_ObjectArgumentAssemblyTypeName: UnityEngine.Object, UnityEngine
           m_IntArgument: 0
           m_FloatArgument: 0
-          m_StringArgument:
+          m_StringArgument: 
           m_BoolArgument: 0
         m_CallState: 2
 --- !u!114 &567144574
@@ -3383,7 +3388,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: fe87c0e1cc204ed48ad3b37840f39efc, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: UnityEngine.UI::UnityEngine.UI.Image
   m_Material: {fileID: 0}
   m_Color: {r: 0.25882354, g: 0.25882354, b: 0.25882354, a: 1}
@@ -3421,7 +3426,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 0f19b6e60eb60c044b1e397f2cfbf47f, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::CanvasSwitch
   nextCanvas: {fileID: 191049804}
   alsoDisableCanvas: {fileID: 0}
@@ -3435,7 +3440,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: a4fd64858d6b0df4192f09903a3384fd, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::SaveAndReturnIP
   ipInput: {fileID: 564264848}
   canvasSwitch: {fileID: 567144576}
@@ -3552,7 +3557,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: f4688fdb7df04437aeb418b961361dc5, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: Unity.TextMeshPro::TMPro.TextMeshProUGUI
   m_Material: {fileID: 0}
   m_Color: {r: 1, g: 1, b: 1, a: 1}
@@ -3852,8 +3857,8 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 306cc8c2b49d7114eaa3623786fc2126, type: 3}
-  m_Name:
-  m_EditorClassIdentifier:
+  m_Name: 
+  m_EditorClassIdentifier: 
   m_IgnoreLayout: 1
   m_MinWidth: -1
   m_MinHeight: -1
@@ -3891,7 +3896,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: dc42784cf147c0c48a680349fa168899, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: UnityEngine.UI::UnityEngine.UI.GraphicRaycaster
   m_IgnoreReversedGraphics: 1
   m_BlockingObjects: 0
@@ -3908,7 +3913,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 0cd44c1031e13a943bb63640046fad76, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: UnityEngine.UI::UnityEngine.UI.CanvasScaler
   m_UiScaleMode: 0
   m_ReferencePixelsPerUnit: 100
@@ -4082,7 +4087,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: f4688fdb7df04437aeb418b961361dc5, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: Unity.TextMeshPro::TMPro.TextMeshProUGUI
   m_Material: {fileID: 0}
   m_Color: {r: 1, g: 1, b: 1, a: 1}
@@ -4292,7 +4297,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: dc42784cf147c0c48a680349fa168899, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: UnityEngine.UI::UnityEngine.UI.GraphicRaycaster
   m_IgnoreReversedGraphics: 1
   m_BlockingObjects: 0
@@ -4309,7 +4314,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 0cd44c1031e13a943bb63640046fad76, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: UnityEngine.UI::UnityEngine.UI.CanvasScaler
   m_UiScaleMode: 0
   m_ReferencePixelsPerUnit: 100
@@ -4415,7 +4420,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: f4688fdb7df04437aeb418b961361dc5, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: Unity.TextMeshPro::TMPro.TextMeshProUGUI
   m_Material: {fileID: 0}
   m_Color: {r: 1, g: 1, b: 1, a: 1}
@@ -4557,7 +4562,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: e19747de3f5aca642ab2be37e372fb86, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: UnityEngine.UI::UnityEngine.UI.Outline
   m_EffectColor: {r: 0.21568628, g: 0.21568628, b: 0.21568628, a: 0.5}
   m_EffectDistance: {x: 1, y: -1}
@@ -4572,7 +4577,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: fe87c0e1cc204ed48ad3b37840f39efc, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: UnityEngine.UI::UnityEngine.UI.Image
   m_Material: {fileID: 0}
   m_Color: {r: 0.21960786, g: 0.21960786, b: 0.21960786, a: 0}
@@ -4610,7 +4615,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 30649d3a9faa99c48a7b1166b86bf2a0, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: UnityEngine.UI::UnityEngine.UI.HorizontalLayoutGroup
   m_Padding:
     m_Left: 8
@@ -4685,7 +4690,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: f4688fdb7df04437aeb418b961361dc5, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: Unity.TextMeshPro::TMPro.TextMeshProUGUI
   m_Material: {fileID: 0}
   m_Color: {r: 1, g: 1, b: 1, a: 1}
@@ -4822,7 +4827,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 306cc8c2b49d7114eaa3623786fc2126, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: UnityEngine.UI::UnityEngine.UI.LayoutElement
   m_IgnoreLayout: 1
   m_MinWidth: -1
@@ -4842,7 +4847,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: f4688fdb7df04437aeb418b961361dc5, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: Unity.TextMeshPro::TMPro.TextMeshProUGUI
   m_Material: {fileID: 0}
   m_Color: {r: 1, g: 1, b: 1, a: 1}
@@ -5045,8 +5050,8 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 306cc8c2b49d7114eaa3623786fc2126, type: 3}
-  m_Name:
-  m_EditorClassIdentifier:
+  m_Name: 
+  m_EditorClassIdentifier: 
   m_IgnoreLayout: 1
   m_MinWidth: -1
   m_MinHeight: -1
@@ -5101,7 +5106,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 45eb61077cad9ba418b542bb551b1a00, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::ToastManager
   toastPanel: {fileID: 1136334885}
   panelOutline: {fileID: 1136334887}
@@ -5139,8 +5144,8 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: c95e554fd21fd4175bb759a1b817dca4, type: 3}
-  m_Name:
-  m_EditorClassIdentifier:
+  m_Name: 
+  m_EditorClassIdentifier: 
   netConfig:
     IPAddress: 192.168.1.133
     rightkeyptPortNum: 8087
@@ -5149,8 +5154,8 @@ MonoBehaviour:
     graphPortNum: 15001
     resolutionPortNum: 8095
     PausePortNum: 8100
-    LeftPausePortNum:
-    RightPausePortNum:
+    LeftPausePortNum: 
+    RightPausePortNum: 
   IPDisplay: {fileID: 0}
 --- !u!4 &1197026217
 Transform:
@@ -5214,8 +5219,8 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 1344c3c82d62a2a41a3576d8abb8e3ea, type: 3}
-  m_Name:
-  m_EditorClassIdentifier:
+  m_Name: 
+  m_EditorClassIdentifier: 
   m_Material: {fileID: 0}
   m_Color: {r: 0, g: 0, b: 0, a: 0}
   m_RaycastTarget: 0
@@ -5266,7 +5271,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 76c392e42b5098c458856cdf6ecaaaa1, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: UnityEngine.UI::UnityEngine.EventSystems.EventSystem
   m_FirstSelected: {fileID: 0}
   m_sendNavigationEvents: 1
@@ -5484,7 +5489,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: f4688fdb7df04437aeb418b961361dc5, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: Unity.TextMeshPro::TMPro.TextMeshProUGUI
   m_Material: {fileID: 0}
   m_Color: {r: 1, g: 1, b: 1, a: 1}
@@ -5721,8 +5726,8 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 306cc8c2b49d7114eaa3623786fc2126, type: 3}
-  m_Name:
-  m_EditorClassIdentifier:
+  m_Name: 
+  m_EditorClassIdentifier: 
   m_IgnoreLayout: 1
   m_MinWidth: -1
   m_MinHeight: -1
@@ -5814,7 +5819,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: fe87c0e1cc204ed48ad3b37840f39efc, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: UnityEngine.UI::UnityEngine.UI.Image
   m_Material: {fileID: 2100000, guid: 209bad0ea20ee1642942ed8c9c45e3a5, type: 2}
   m_Color: {r: 0, g: 0, b: 0, a: 0.392}
@@ -5927,7 +5932,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 0f19b6e60eb60c044b1e397f2cfbf47f, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::CanvasSwitch
   nextCanvas: {fileID: 191049804}
   alsoDisableCanvas: {fileID: 0}
@@ -5941,7 +5946,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 4e29b1a8efbd4b44bb3f3716e73f07ff, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: UnityEngine.UI::UnityEngine.UI.Button
   m_Navigation:
     m_Mode: 3
@@ -5984,7 +5989,7 @@ MonoBehaviour:
           m_ObjectArgumentAssemblyTypeName: UnityEngine.Object, UnityEngine
           m_IntArgument: 0
           m_FloatArgument: 0
-          m_StringArgument:
+          m_StringArgument: 
           m_BoolArgument: 0
         m_CallState: 2
 --- !u!114 &1527676675
@@ -5997,7 +6002,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: fe87c0e1cc204ed48ad3b37840f39efc, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: UnityEngine.UI::UnityEngine.UI.Image
   m_Material: {fileID: 0}
   m_Color: {r: 0.25882354, g: 0.25882354, b: 0.25882354, a: 1}
@@ -6074,7 +6079,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 87a2d2ae6061c1e40bf90858c2717819, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::HandMultiplierUI
   slider: {fileID: 90169685}
   valueText: {fileID: 1114040582}
@@ -6089,7 +6094,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 30649d3a9faa99c48a7b1166b86bf2a0, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: UnityEngine.UI::UnityEngine.UI.HorizontalLayoutGroup
   m_Padding:
     m_Left: 10
@@ -6183,7 +6188,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: f4688fdb7df04437aeb418b961361dc5, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: Unity.TextMeshPro::TMPro.TextMeshProUGUI
   m_Material: {fileID: 0}
   m_Color: {r: 1, g: 1, b: 1, a: 1}
@@ -6319,7 +6324,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: f4688fdb7df04437aeb418b961361dc5, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: Unity.TextMeshPro::TMPro.TextMeshProUGUI
   m_Material: {fileID: 0}
   m_Color: {r: 1, g: 1, b: 1, a: 1}
@@ -6455,7 +6460,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: f4688fdb7df04437aeb418b961361dc5, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: Unity.TextMeshPro::TMPro.TextMeshProUGUI
   m_Material: {fileID: 0}
   m_Color: {r: 1, g: 1, b: 1, a: 1}
@@ -6591,7 +6596,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: f4688fdb7df04437aeb418b961361dc5, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: Unity.TextMeshPro::TMPro.TextMeshProUGUI
   m_Material: {fileID: 0}
   m_Color: {r: 1, g: 1, b: 1, a: 1}
@@ -6762,7 +6767,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 3312d7739989d2b4e91e6319e9a96d76, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: UnityEngine.UI::UnityEngine.UI.RectMask2D
   m_Padding: {x: -8, y: -5, z: -8, w: -5}
   m_Softness: {x: 0, y: 0}
@@ -6797,8 +6802,8 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: dc42784cf147c0c48a680349fa168899, type: 3}
-  m_Name:
-  m_EditorClassIdentifier:
+  m_Name: 
+  m_EditorClassIdentifier: 
   m_IgnoreReversedGraphics: 1
   m_BlockingObjects: 0
   m_BlockingMask:
@@ -6814,8 +6819,8 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 0cd44c1031e13a943bb63640046fad76, type: 3}
-  m_Name:
-  m_EditorClassIdentifier:
+  m_Name: 
+  m_EditorClassIdentifier: 
   m_UiScaleMode: 0
   m_ReferencePixelsPerUnit: 100
   m_ScaleFactor: 1
@@ -6882,7 +6887,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: d57dc6cb7117e4b67b2b5fd52d828622, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::GraphStream
   image: {fileID: 2107541911}
 --- !u!114 &1930241856
@@ -6895,7 +6900,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 24fe941893f7f42cea42d9db922448ce, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::CameraOneStreamer
   image: {fileID: 40919616}
   statusBackground: {fileID: 1242621770}
@@ -6958,7 +6963,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: dc42784cf147c0c48a680349fa168899, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: UnityEngine.UI::UnityEngine.UI.GraphicRaycaster
   m_IgnoreReversedGraphics: 1
   m_BlockingObjects: 0
@@ -6998,7 +7003,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 0f19b6e60eb60c044b1e397f2cfbf47f, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::CanvasSwitch
   nextCanvas: {fileID: 191049804}
   alsoDisableCanvas: {fileID: 1930241850}
@@ -7012,7 +7017,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 4e29b1a8efbd4b44bb3f3716e73f07ff, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: UnityEngine.UI::UnityEngine.UI.Button
   m_Navigation:
     m_Mode: 3
@@ -7055,7 +7060,7 @@ MonoBehaviour:
           m_ObjectArgumentAssemblyTypeName: UnityEngine.Object, UnityEngine
           m_IntArgument: 0
           m_FloatArgument: 0
-          m_StringArgument:
+          m_StringArgument: 
           m_BoolArgument: 0
         m_CallState: 2
 --- !u!114 &1962918560
@@ -7068,7 +7073,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: fe87c0e1cc204ed48ad3b37840f39efc, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: UnityEngine.UI::UnityEngine.UI.Image
   m_Material: {fileID: 0}
   m_Color: {r: 0.25882354, g: 0.25882354, b: 0.25882354, a: 1}
@@ -7143,7 +7148,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: fe87c0e1cc204ed48ad3b37840f39efc, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: UnityEngine.UI::UnityEngine.UI.Image
   m_Material: {fileID: 2100000, guid: 209bad0ea20ee1642942ed8c9c45e3a5, type: 2}
   m_Color: {r: 0, g: 0, b: 0, a: 0.392}
@@ -7234,7 +7239,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 017c5e3933235514c9520e1dace2a4b2, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: Unity.XR.Interaction.Toolkit::UnityEngine.XR.Interaction.Toolkit.Inputs.InputActionManager
   m_ActionAssets:
   - {fileID: -944628639613478452, guid: c348712bda248c246b8c49b3db54643f, type: 3}
@@ -7248,7 +7253,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: e0cb9aa70a22847b5925ee5f067c10a9, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: Unity.XR.CoreUtils::Unity.XR.CoreUtils.XROrigin
   m_Camera: {fileID: 2054387524}
   m_OriginBaseGameObject: {fileID: 2019437032}
@@ -7281,7 +7286,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: fd9f82377aeb9704193bd866d119aaa5, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: Unity.XR.PICO::Unity.XR.PXR.PXR_Manager
   screenFade: 0
   eyeTracking: 0
@@ -7329,7 +7334,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 41e24597e86cd0642a0a2d98622a50c8, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: Unity.XR.PICO::PXR_CameraEffectBlock
   lutTex: {fileID: 0}
 --- !u!1 &2054387520
@@ -7376,7 +7381,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: c2fadf230d1919748a9aa21d40f74619, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: Unity.InputSystem::UnityEngine.InputSystem.XR.TrackedPoseDriver
   m_TrackingType: 0
   m_UpdateType: 0
@@ -7388,23 +7393,23 @@ MonoBehaviour:
       m_Type: 0
       m_ExpectedControlType: Vector3
       m_Id: f0c04a9c-537c-440c-bbed-d3d429d5d915
-      m_Processors:
-      m_Interactions:
+      m_Processors: 
+      m_Interactions: 
       m_SingletonActionBindings:
-      - m_Name:
+      - m_Name: 
         m_Id: 1fad7f27-84ac-44ca-9c2c-dec61d55206e
         m_Path: <XRHMD>/centerEyePosition
-        m_Interactions:
-        m_Processors:
-        m_Groups:
+        m_Interactions: 
+        m_Processors: 
+        m_Groups: 
         m_Action: Position
         m_Flags: 0
-      - m_Name:
+      - m_Name: 
         m_Id: 62989755-b1e6-44c1-b8cc-ba89f5479469
         m_Path: <HandheldARInputDevice>/devicePosition
-        m_Interactions:
-        m_Processors:
-        m_Groups:
+        m_Interactions: 
+        m_Processors: 
+        m_Groups: 
         m_Action: Position
         m_Flags: 0
       m_Flags: 0
@@ -7416,23 +7421,23 @@ MonoBehaviour:
       m_Type: 0
       m_ExpectedControlType: Quaternion
       m_Id: 7bc7d3d9-e47e-4640-88c3-82abf5c919dc
-      m_Processors:
-      m_Interactions:
+      m_Processors: 
+      m_Interactions: 
       m_SingletonActionBindings:
-      - m_Name:
+      - m_Name: 
         m_Id: 19958327-285b-41d9-ad7b-2456b9f2c612
         m_Path: <XRHMD>/centerEyeRotation
-        m_Interactions:
-        m_Processors:
-        m_Groups:
+        m_Interactions: 
+        m_Processors: 
+        m_Groups: 
         m_Action: Rotation
         m_Flags: 0
-      - m_Name:
+      - m_Name: 
         m_Id: 51ee72e0-f7db-42fa-a345-4ec74069294a
         m_Path: <HandheldARInputDevice>/deviceRotation
-        m_Interactions:
-        m_Processors:
-        m_Groups:
+        m_Interactions: 
+        m_Processors: 
+        m_Groups: 
         m_Action: Rotation
         m_Flags: 0
       m_Flags: 0
@@ -7444,35 +7449,35 @@ MonoBehaviour:
       m_Type: 0
       m_ExpectedControlType: Integer
       m_Id: d68c1d87-0b6c-4396-b80c-786bc1877257
-      m_Processors:
-      m_Interactions:
+      m_Processors: 
+      m_Interactions: 
       m_SingletonActionBindings:
-      - m_Name:
+      - m_Name: 
         m_Id: 85e5801f-270b-4dc5-942c-cca87fb0b6e0
         m_Path: <XRHMD>/trackingState
-        m_Interactions:
-        m_Processors:
-        m_Groups:
+        m_Interactions: 
+        m_Processors: 
+        m_Groups: 
         m_Action: Tracking State
         m_Flags: 0
       m_Flags: 0
     m_Reference: {fileID: 0}
   m_PositionAction:
-    m_Name:
+    m_Name: 
     m_Type: 0
-    m_ExpectedControlType:
+    m_ExpectedControlType: 
     m_Id: 16d60a8e-c67b-4078-8f98-a84da022f16b
-    m_Processors:
-    m_Interactions:
+    m_Processors: 
+    m_Interactions: 
     m_SingletonActionBindings: []
     m_Flags: 0
   m_RotationAction:
-    m_Name:
+    m_Name: 
     m_Type: 0
-    m_ExpectedControlType:
+    m_ExpectedControlType: 
     m_Id: 0db764f7-47a4-40cb-b8a3-06c91547cfbf
-    m_Processors:
-    m_Interactions:
+    m_Processors: 
+    m_Interactions: 
     m_SingletonActionBindings: []
     m_Flags: 0
 --- !u!81 &2054387523
@@ -7581,7 +7586,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: f4688fdb7df04437aeb418b961361dc5, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: Unity.TextMeshPro::TMPro.TextMeshProUGUI
   m_Material: {fileID: 0}
   m_Color: {r: 1, g: 1, b: 1, a: 1}
@@ -7733,8 +7738,8 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 1344c3c82d62a2a41a3576d8abb8e3ea, type: 3}
-  m_Name:
-  m_EditorClassIdentifier:
+  m_Name: 
+  m_EditorClassIdentifier: 
   m_Material: {fileID: 0}
   m_Color: {r: 0.8962264, g: 0.8962264, b: 0.8962264, a: 1}
   m_RaycastTarget: 0
@@ -7804,7 +7809,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 83e4e6cca11330d4088d729ab4fc9d9f, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: Unity.XR.Interaction.Toolkit::UnityEngine.XR.Interaction.Toolkit.XRInteractionManager
   m_StartingHoverFilters: []
   m_StartingSelectFilters: []
@@ -7870,7 +7875,7 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: fe87c0e1cc204ed48ad3b37840f39efc, type: 3}
-  m_Name:
+  m_Name: 
   m_EditorClassIdentifier: UnityEngine.UI::UnityEngine.UI.Image
   m_Material: {fileID: 0}
   m_Color: {r: 1, g: 1, b: 1, a: 1}
@@ -8046,7 +8051,7 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: -1185065108108141888, guid: ad88f1cd021f7e84193410be2350800d, type: 3}
       propertyPath: 'm_Materials.Array.data[0]'
-      value:
+      value: 
       objectReference: {fileID: 2100000, guid: 8a32e873523a4f248aa73b0f2d2eb54a, type: 2}
     - target: {fileID: 919132149155446097, guid: ad88f1cd021f7e84193410be2350800d, type: 3}
       propertyPath: m_Name
@@ -8166,7 +8171,7 @@ PrefabInstance:
     m_Modifications:
     - target: {fileID: -8721002785652668686, guid: 4e85f53470581cf47a1feb7558495287, type: 3}
       propertyPath: 'm_Materials.Array.data[0]'
-      value:
+      value: 
       objectReference: {fileID: 2100000, guid: f819a5fb044d1024baccaa5a88501df2, type: 2}
     - target: {fileID: -8679921383154817045, guid: 4e85f53470581cf47a1feb7558495287, type: 3}
       propertyPath: m_RootOrder
@@ -8214,7 +8219,7 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: -1185065108108141888, guid: 4e85f53470581cf47a1feb7558495287, type: 3}
       propertyPath: 'm_Materials.Array.data[0]'
-      value:
+      value: 
       objectReference: {fileID: 2100000, guid: f819a5fb044d1024baccaa5a88501df2, type: 2}
     - target: {fileID: 919132149155446097, guid: 4e85f53470581cf47a1feb7558495287, type: 3}
       propertyPath: m_Name
@@ -8290,8 +8295,8 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: f753f52cc8c63524f9ace6fcab377a5b, type: 3}
-  m_Name:
-  m_EditorClassIdentifier:
+  m_Name: 
+  m_EditorClassIdentifier: 
   handType: 0
   Basemesh: {fileID: 5141208930055444089}
   handJoints:
@@ -8596,8 +8601,8 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: f753f52cc8c63524f9ace6fcab377a5b, type: 3}
-  m_Name:
-  m_EditorClassIdentifier:
+  m_Name: 
+  m_EditorClassIdentifier: 
   handType: 1
   Basemesh: {fileID: 4981180550202822429}
   handJoints:

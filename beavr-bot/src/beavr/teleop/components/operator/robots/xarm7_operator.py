@@ -176,7 +176,10 @@ class XArmOperator(Operator):
         self.last_valid_hand_frame: Optional[np.ndarray] = None
         self.latest_hand_command: Optional[int] = None
         self._last_hand_data_time: float = 0.0
+        self._last_hand_frame_timestamp_s: float = 0.0
         self.hand_frame_timeout_s = float(hand_frame_timeout_s)
+        self._last_teleop_command_timestamp_s: float = 0.0
+        self._ignore_hand_frames_before_s: float = 0.0
         self._last_invalid_hand_frame_log_time: float = 0.0
         self._last_reset_pose_wait_log_time: float = 0.0
         self._last_reset_hand_wait_log_time: float = 0.0
@@ -195,6 +198,7 @@ class XArmOperator(Operator):
         # 位置和方向的分离滑动窗口限制 (Currently unused)
         self.orientation_average_limit = min(10, moving_average_limit * 2)  # 方向移动平均限制
         self.orientation_queue = []  # 方向队列
+        self._reset_hand_settle_frames = max(1, int(moving_average_limit))
 
         # 跟踪之前的朝向以进行稳定性检测 (Currently unused)
         self.prev_orientation: Optional[np.ndarray] = None  # 前一个方向
@@ -264,7 +268,11 @@ class XArmOperator(Operator):
     # ------------------------------
     # Frame / Matrix utilities
     # ------------------------------
-    def _get_hand_frame(self, use_cache: bool = True) -> Optional[np.ndarray]:
+    def _get_hand_frame(
+        self,
+        use_cache: bool = True,
+        min_timestamp_s: float = 0.0,
+    ) -> Optional[np.ndarray]:
         """
         从 ZMQ 订阅者获取最新的手部帧数据。
 
@@ -281,6 +289,14 @@ class XArmOperator(Operator):
         if data is not None:
             # 处理新数据 - 预期接收到包含 frame_vectors (帧向量) 的 InputFrame 对象
             try:
+                frame_timestamp_s = float(getattr(data, "timestamp_s", 0.0) or 0.0)
+                if min_timestamp_s and frame_timestamp_s and frame_timestamp_s < min_timestamp_s:
+                    logger.debug(
+                        f"{self.operator_name}: 丢弃resume/reset之前的手部帧 "
+                        f"frame_ts={frame_timestamp_s:.6f} min_ts={min_timestamp_s:.6f}"
+                    )
+                    return None
+
                 self.latest_hand_command = data.hand_command
                 if data.frame_vectors is not None:
                     # frame_vectors 应该是一个包含 4 个元组的序列 (origin + 3 basis vectors)
@@ -290,6 +306,7 @@ class XArmOperator(Operator):
                     if frame_data is not None:
                         self.last_valid_hand_frame = frame_data
                         self._last_hand_data_time = time.time()
+                        self._last_hand_frame_timestamp_s = frame_timestamp_s
                         return frame_data
                     else:
                         logger.debug(f"{self.operator_name}: 手部帧数据无效(NaN/退化),跳过")
@@ -318,8 +335,10 @@ class XArmOperator(Operator):
         self.last_valid_hand_frame = None
         self.latest_hand_command = None
         self._last_hand_data_time = 0.0
+        self._last_hand_frame_timestamp_s = 0.0
         self.hand_moving_h = None
         self.comp_filter = None
+        self._arm_transformed_keypoint_subscriber.recv_keypoints()
 
     def _warn_invalid_hand_frame(self, reason: str) -> None:
         current_time = time.time()
@@ -552,8 +571,10 @@ class XArmOperator(Operator):
         try:
             # Expect SessionCommand
             if data.command == robots.PAUSE:
+                self._last_teleop_command_timestamp_s = float(data.timestamp_s)
                 return robots.ARM_TELEOP_STOP
             elif data.command == robots.RESUME:
+                self._last_teleop_command_timestamp_s = float(data.timestamp_s)
                 return robots.ARM_TELEOP_CONT
             else:
                 return self.arm_teleop_state
@@ -564,7 +585,7 @@ class XArmOperator(Operator):
     # ------------------------------
     # Teleop reset logic
     # ------------------------------
-    def _reset_teleop(self) -> Optional[np.ndarray]:
+    def _reset_teleop(self, min_hand_timestamp_s: float = 0.0) -> Optional[np.ndarray]:
         """
         通过捕捉当前机器人和手的姿态来重置远程操作baseline.
         发送重置信号并等待机器人的当前位姿,获取后更新robot_moving_h、robot_init_h、hand_init_h.
@@ -573,7 +594,12 @@ class XArmOperator(Operator):
             The initial moving hand frame (4x3) captured after reset, or None on failure.
         """
 
-        logger.info(f"****** {self.operator_name}: RESETTING TELEOP ******")
+        reset_started_at = time.time()
+        min_hand_timestamp_s = max(float(min_hand_timestamp_s), reset_started_at)
+        logger.info(
+            f"****** {self.operator_name}: RESETTING TELEOP "
+            f"(min_hand_ts={min_hand_timestamp_s:.6f}) ******"
+        )
         # 1. 向下游（机器人或仿真器）发送重置请求，要求获取机器人当前的末端位姿
         # TODO: Remove the literal in the topic arg use a constant.
         self._publisher_manager.publish(
@@ -586,6 +612,12 @@ class XArmOperator(Operator):
 
         # Keep trying until we get a response
         while robot_frame_homo is None:
+            if self._get_arm_teleop_state() == robots.ARM_TELEOP_STOP:
+                self.arm_teleop_state = robots.ARM_TELEOP_STOP
+                self.is_first_frame = True
+                self._clear_hand_tracking_cache()
+                logger.info(f"{self.operator_name}: reset aborted because teleop paused while waiting robot pose")
+                return None
             self._log_reset_pose_wait()
             self._publisher_manager.publish(
                 host=self._publisher_host,
@@ -620,12 +652,26 @@ class XArmOperator(Operator):
         self.robot_moving_h = copy(self.robot_init_h)  # 初始化机器人移动姿态为初始姿态
         logger.info(f"{self.operator_name} Robot init H:\n{self.robot_init_h}")
 
-        # 4. 获取手部的初始位姿
+        # 4. 获取手部的初始位姿。连续读取几帧，避免使用 keypoint_transform
+        # 滑动平均里残留的暂停期间历史帧作为恢复后的 hand_init。
         first_hand_frame = None
-        while first_hand_frame is None:
+        fresh_hand_frame_count = 0
+        while fresh_hand_frame_count < self._reset_hand_settle_frames:
+            if self._get_arm_teleop_state() == robots.ARM_TELEOP_STOP:
+                self.arm_teleop_state = robots.ARM_TELEOP_STOP
+                self.is_first_frame = True
+                self._clear_hand_tracking_cache()
+                logger.info(f"{self.operator_name}: reset aborted because teleop paused while waiting hand frame")
+                return None
             self._log_reset_hand_wait()
             # 阻塞等待直到获取到有效的 VR 手部追踪数据
-            first_hand_frame = self._get_hand_frame(use_cache=False)  # 等待有效新手部帧
+            candidate_hand_frame = self._get_hand_frame(
+                use_cache=False,
+                min_timestamp_s=min_hand_timestamp_s,
+            )  # 等待有效新手部帧
+            if candidate_hand_frame is not None:
+                first_hand_frame = candidate_hand_frame
+                fresh_hand_frame_count += 1
             time.sleep(0.01)
 
         try:
@@ -691,15 +737,36 @@ class XArmOperator(Operator):
         # 确定是否需要触发重置：
         # - 第一次运行 (is_first_frame)
         # - 或者状态从 STOP 切换回 CONT（恢复运行）时
-        needs_reset = self.is_first_frame or (
+        resume_edge = (
             self.arm_teleop_state == robots.ARM_TELEOP_STOP and new_arm_teleop_state == robots.ARM_TELEOP_CONT
-        )  # 检查是否需要重置
+        )
 
-        # 在检查完状态跳变后，更新当前状态变量
         if new_arm_teleop_state == robots.ARM_TELEOP_STOP:
+            if self.arm_teleop_state != robots.ARM_TELEOP_STOP:
+                logger.info(
+                    f"{self.operator_name}: pause received, clearing hand baseline; "
+                    "next resume will use the current wrist pose as hand_init"
+                )
+            self.arm_teleop_state = robots.ARM_TELEOP_STOP
+            self.is_first_frame = True
+            self._ignore_hand_frames_before_s = time.time()
             self._clear_hand_tracking_cache()
+            return
+
+        needs_reset = self.is_first_frame or resume_edge  # 检查是否需要重置
 
         if needs_reset:
+            if resume_edge:
+                self._ignore_hand_frames_before_s = max(
+                    time.time(),
+                    self._last_teleop_command_timestamp_s,
+                )
+                logger.info(
+                    f"{self.operator_name}: resume edge detected, rebaseline hand/robot "
+                    f"with frames newer than {self._ignore_hand_frames_before_s:.6f}"
+                )
+            elif self.is_first_frame:
+                self._ignore_hand_frames_before_s = time.time()
             self._clear_hand_tracking_cache()
 
         self.arm_teleop_state = new_arm_teleop_state  # 更新遥操作状态
@@ -709,11 +776,18 @@ class XArmOperator(Operator):
 
         # 2. 处理重置逻辑（同步人手与机器人的起始位置）
         if needs_reset:
-            moving_hand_frame = self._reset_teleop()  # 调用重置方法，返回当前手部基准帧
+            moving_hand_frame = self._reset_teleop(
+                min_hand_timestamp_s=self._ignore_hand_frames_before_s,
+            )  # 调用重置方法，返回当前手部基准帧
             if moving_hand_frame is None:
-                logger.error(f"ERROR ({self.operator_name}): Reset failed, cannot proceed.")
+                if self.arm_teleop_state != robots.ARM_TELEOP_STOP:
+                    logger.error(f"ERROR ({self.operator_name}): Reset failed, cannot proceed.")
                 return  # Exit if reset failed
-            # Reset is done, is_first_frame is now False
+            logger.info(
+                f"{self.operator_name}: reset complete; suppressing first post-reset command "
+                f"so current hand pose becomes the new baseline"
+            )
+            return
         else:
             # 3. 正常运行模式：获取当前帧的手部追踪数据
             moving_hand_frame = self._get_hand_frame()  # 获取当前手部帧

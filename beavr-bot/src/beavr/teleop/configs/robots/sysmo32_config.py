@@ -143,7 +143,7 @@ class Sysmo32RealControlCfg:
                 joint_state_timeout_s=0.5,
             ),
             arm=Sysmo32ArmSafetyConfig(
-                speed_mode=0.0,
+                speed_mode=4.0,
                 reserved=(0.0, 0.0, 0.0, 0.0),
                 neck_joint=0.0,
                 max_joint_velocity_rad_s=tuple([0.8] * 12),

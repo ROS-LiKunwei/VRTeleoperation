@@ -52,7 +52,7 @@ from beavr.teleop.common.network.subscriber import ZMQSubscriber
 from beavr.teleop.common.network.utils import cleanup_zmq_resources
 from beavr.teleop.common.time.timer import FrequencyTimer
 from beavr.teleop.components import Component
-from beavr.teleop.components.detector.detector_types import InputFrame
+from beavr.teleop.components.detector.detector_types import InputFrame, SessionCommand
 from beavr.teleop.components.detector.vr.log_keypoints import KeypointLogger
 from beavr.teleop.configs.constants import robots
 
@@ -149,6 +149,12 @@ class TransformHandPositionCoords(Component):
             self.keypoint_subscriber = ZMQSubscriber(self.host, self.keypoint_sub_port, robots.RIGHT)
         else:
             self.keypoint_subscriber = ZMQSubscriber(self.host, self.keypoint_sub_port, robots.LEFT)
+        self.pause_subscriber = ZMQSubscriber(
+            self.host,
+            self.keypoint_sub_port,
+            robots.PAUSE,
+            message_type=SessionCommand,
+        )
 
         self.publisher_manager = ZMQPublisherManager.get_instance()
 
@@ -177,6 +183,10 @@ class TransformHandPositionCoords(Component):
         # 滑动平均队列
         self.moving_average_limit = moving_average_limit
         self.coord_moving_average_queue, self.frame_moving_average_queue = [], []
+        self.averaged_keypoints = None
+        self.averaged_coordinate_frame = None
+        self.arm_teleop_state = robots.ARM_TELEOP_CONT
+        self._resume_settle_frames_remaining = 0
 
         # 初始化关键点日志记录器
         self.keypoint_logger = None
@@ -191,6 +201,44 @@ class TransformHandPositionCoords(Component):
         self._last_no_raw_input_log_time = 0.0
         self._last_receive_raw_input_log_time = 0.0
         self._last_publish_frame_log_time = 0.0
+
+    def _clear_smoothing_state(self):
+        self.coord_moving_average_queue.clear()
+        self.frame_moving_average_queue.clear()
+        self.averaged_keypoints = None
+        self.averaged_coordinate_frame = None
+
+    def _get_arm_teleop_state(self):
+        data = self.pause_subscriber.recv_keypoints()
+        if data is None:
+            return self.arm_teleop_state
+
+        try:
+            if data.command == robots.PAUSE:
+                new_state = robots.ARM_TELEOP_STOP
+            elif data.command == robots.RESUME:
+                new_state = robots.ARM_TELEOP_CONT
+            else:
+                return self.arm_teleop_state
+        except Exception:
+            return self.arm_teleop_state
+
+        previous_state = self.arm_teleop_state
+        if new_state != previous_state:
+            self._clear_smoothing_state()
+            self.keypoint_subscriber.recv_keypoints()
+            if new_state == robots.ARM_TELEOP_STOP:
+                self._resume_settle_frames_remaining = 0
+                logger.info(f"{self.hand_side}_hand_keypoint_transform: pause received, stop publishing hand frames")
+            else:
+                self._resume_settle_frames_remaining = max(1, int(self.moving_average_limit))
+                logger.info(
+                    f"{self.hand_side}_hand_keypoint_transform: resume received, "
+                    f"rebuilding baseline input over {self._resume_settle_frames_remaining} frames"
+                )
+
+        self.arm_teleop_state = new_state
+        return self.arm_teleop_state
 
     def _warn_invalid_frame(self, reason):
         current_time = time.time()
@@ -483,6 +531,12 @@ class TransformHandPositionCoords(Component):
         """
         while True:
             self.timer.start_loop()
+            if self._get_arm_teleop_state() == robots.ARM_TELEOP_STOP:
+                self._clear_smoothing_state()
+                self.keypoint_subscriber.recv_keypoints()
+                self.timer.end_loop()
+                continue
+
             # 1.从pico4.py订阅原始关键点数据
             data_type, hand_coords, hand_command = self._get_hand_coords()
 
@@ -534,6 +588,11 @@ class TransformHandPositionCoords(Component):
             # 重构正交帧
             self.averaged_coordinate_frame = [origin, x_vec, y_vec, z_vec]
 
+            if self._resume_settle_frames_remaining > 0:
+                self._resume_settle_frames_remaining -= 1
+                self.timer.end_loop()
+                continue
+
             # 6. 封装为InputFrame对象
             data = InputFrame(
                 timestamp_s=time.time(),
@@ -571,6 +630,7 @@ class TransformHandPositionCoords(Component):
             self.keypoint_logger.save_data()
 
         self.keypoint_subscriber.stop()
+        self.pause_subscriber.stop()
         cleanup_zmq_resources()
 
     def __del__(self):

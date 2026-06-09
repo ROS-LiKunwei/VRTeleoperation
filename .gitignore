@@ -18,8 +18,16 @@ env/
 # 构建产物
 build/
 dist/
+BeaVR-app/BeaVR-Unity/.utmp/
+BeaVR-app/BeaVR_BurstDebugInformation_DoNotShip/
+
+# 本机生成的构建状态
+beavr-bot/log/latest_build
+
+# 本机网络配置
+BeaVR-app/BeaVR-Unity/Assets/Resources/Configurations/Network.json
+beavr-bot/src/beavr/teleop/configs/constants/network.py
 
 # 缓存文件
 __pycache__/
 *.pyc
-

@@ -128,9 +128,6 @@ class Sysmo32ArmSafetyConfig:
         ):
             if len(values) != 12:
                 raise ValueError(f"{name} must contain 12 values")
-        if self.speed_mode == 4.0:
-            raise ValueError("speed_mode=4.0 is not allowed as a default for real SYSMO-32 control")
-
 
 class Sysmo32CommandBuilder:
     """Build the exact 18-field ``Float64MultiArray.data`` payload."""
