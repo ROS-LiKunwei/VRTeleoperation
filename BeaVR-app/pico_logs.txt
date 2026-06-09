@@ -8478,7 +8478,8 @@
 06-09 14:54:13.397   980  6013 E Stationservice: L1:_SetStationWifiFrequency, get recv ACK:1,center frequency:0, brandwidth:0
 06-09 14:54:13.398  1342  1581 W BroadcastQueue: Background execution not allowed: receiving Intent { act=android.net.wifi.STATE_CHANGE flg=0x4000010 (has extras) } to com.android.wifiauthorize/.WifiAuthReceiver
 06-09 14:54:13.399  1342  1829 I chatty  : uid=1000(system) WifiP2pService expire 6 lines
-06-09 14:54:13.401   980 12507 E Stationservice: KEYLOG:STLOG<F> app: set_tx_power:8db,r:2.4G-OFF,5G
+06-09 14:54:13.401   980 12507 E Stationservice: KEYLOG:STLOG<F> app: set_tx_power:8db,r:2.4G-OFF,5G
+
 06-09 14:54:13.401  4173 13027 E rtmp_server: aio_rtmp_server_onaccept code: 32
 06-09 14:54:13.402   749  1517 I Netd    : Destroyed 29 sockets on 192.168.10.102 in 1.2 ms
 06-09 14:54:13.402  4431 12998 W ByteCast: HTTPServer:DLNA_SINKHttp server run exception:Socket closed
@@ -8488,7 +8489,8 @@
 06-09 14:54:13.404   980  6013 E Stationservice: L1:_SetStationWifiFrequency, get recv ACK:1,center frequency:0, brandwidth:0
 06-09 14:54:13.405   749  9370 I netd    : interfaceClearAddrs("wlan0") <0.51ms>
 06-09 14:54:13.409  1342  1534 I chatty  : uid=1000(system) android.fg expire 10 lines
-06-09 14:54:13.410   980 12507 E Stationservice: KEYLOG:STLOG<F> app: set_tx_power:8db,r:2.4G-OFF,5G
+06-09 14:54:13.410   980 12507 E Stationservice: KEYLOG:STLOG<F> app: set_tx_power:8db,r:2.4G-OFF,5G
+
 06-09 14:54:13.410  1342  1867 I chatty  : uid=1000(system) NetProber expire 4 lines
 06-09 14:54:13.413  1342  1833 I FrozenObject: target process is frozen, client name:system_server pid:1342 uid:1000
 06-09 14:54:13.413  1342  1833 I addErrorToDropBox: Ready to get DropboxManagerService!
@@ -8527,7 +8529,8 @@
 06-09 14:54:13.424  4173  4870 W MediaCapture: ByteMediaRecorder:already stopped!
 06-09 14:54:13.424  4173 12946 E ByteCast: ByteLinkSourceImpl2:71efa9bc:onDisconnect, gitInfo:1.0a07ed4, reason:REASON_WIFI_DISCONNECTED, message:wifi is disconnected
 06-09 14:54:13.424  1342  4662 I chatty  : uid=1000(system) networkstatus expire 10 lines
-06-09 14:54:13.425   980 12507 E Stationservice: KEYLOG:STLOG<F> app: set_tx_power:8db,r:2.4G-OFF,5G
+06-09 14:54:13.425   980 12507 E Stationservice: KEYLOG:STLOG<F> app: set_tx_power:8db,r:2.4G-OFF,5G
+
 06-09 14:54:13.427   749  9370 I netd    : networkDestroy(132) <1.20ms>
 06-09 14:54:13.427   749  9370 I netd    : destroyNetworkCache(132) <0.02ms>
 06-09 14:54:13.427  1342  1833 W ConnectivityService: wifi disabled, send msg to release lock after 5000ms
@@ -13711,7 +13714,8 @@
 06-09 14:58:55.613   974  2547 I pxrhmdservice : setParameter:name(backlightoffset), value(0,1680)
 06-09 14:58:55.613   974  2547 I pxrhmdservice : Debug <setParameter> - CreateGd32ipdClient client=[0x73873d1750] [0x72fc09d038 0x72fc09d038 0x72fc09d220 0x72fc09d230 0x72fc09d240]
 06-09 14:58:55.613   974  2547 E gd32ipdclient: L1:SetBacklightOffset type=0 offset=1680
-06-09 14:58:55.617   980 14711 E Stationservice: KEYLOG:STLOG<F> app: ap_spi_discovery_mode 01 02 00
+06-09 14:58:55.617   980 14711 E Stationservice: KEYLOG:STLOG<F> app: ap_spi_discovery_mode 01 02 00
+
 06-09 14:58:55.617   974  2547 I pxrhmdservice : Debug <setParameter> - SetBacklightOffset client=[0x73873d1750] type=[0] offset=[1680] ret=[0]
 06-09 14:58:55.617   974  2547 I pxrhmdservice : Info <setParameter> - backlightoffset key=backlightoffset, value=0,1680
 06-09 14:58:55.626   966 14835 E npu_user_driver: npu_set_property status: 0
@@ -24280,7 +24284,8 @@
 06-09 15:02:28.307   980  1145 E Stationservice: L1:_SetStationWifiFrequency, get recv ACK:1,center frequency:0, brandwidth:0
 06-09 15:02:28.309  1342  1867 W NetProber: IOException when sendHttpProbe
 06-09 15:02:28.309  1342  1581 W ProcessStats: Tracking association SourceState{c8714cd com.Sysmo.BeaVR.beta/10156 Top #21858} whose proc state 1 is better than process ProcessState{480b35b com.pico.mrservice/1000 pkg=com.pico.mrservice} proc state 2 (14 skipped)
-06-09 15:02:28.309   980 14711 E Stationservice: KEYLOG:STLOG<F> app: set_tx_power:8db,r:2.4G-OFF,5G
+06-09 15:02:28.309   980 14711 E Stationservice: KEYLOG:STLOG<F> app: set_tx_power:8db,r:2.4G-OFF,5G
+
 06-09 15:02:28.311  1342  1833 I FrozenObject: target process is frozen, client name:system_server pid:1342 uid:1000
 06-09 15:02:28.311  1342  1833 I addErrorToDropBox: Ready to get DropboxManagerService!
 06-09 15:02:28.311  1342  1833 I addErrorToDropBox: processName: system_server dropboxTag: system_server_customerror
@@ -24323,14 +24328,16 @@
 06-09 15:02:28.322  4173  4868 I ByteCast: NetworkChangeBehavior:onLost
 06-09 15:02:28.322   749  9370 I netd    : idletimerRemoveInterface("wlan0", 15, "1") <0.97ms>
 06-09 15:02:28.323  4173  4868 I ByteCast: NetworkChangeBehavior:isNetworkAvailable:false
-06-09 15:02:28.324   980 14711 E Stationservice: KEYLOG:STLOG<F> app: set_tx_power:8db,r:2.4G-OFF,5G
+06-09 15:02:28.324   980 14711 E Stationservice: KEYLOG:STLOG<F> app: set_tx_power:8db,r:2.4G-OFF,5G
+
 06-09 15:02:28.328   980  1145 E Stationservice: L1:_SetStationWifiFrequency, get recv ACK:1,center frequency:0, brandwidth:0
 06-09 15:02:28.328  4173  4867 E ByteCast: ByteCast:71efa9bc:Vast_Cast[NetWorkChangeListener] WIFI disconnect state:0
 06-09 15:02:28.330   749  9370 I netd    : networkDestroy(133) <5.24ms>
 06-09 15:02:28.331   749  9370 I netd    : bandwidthSetGlobalAlert(2097152) <0.05ms>
 06-09 15:02:28.331   749   749 I netd    : destroyNetworkCache(133) <0.02ms>
 06-09 15:02:28.331  1342  1833 W ConnectivityService: wifi disabled, send msg to release lock after 5000ms
-06-09 15:02:28.332   980 14711 E Stationservice: KEYLOG:STLOG<F> app: set_tx_power:8db,r:2.4G-OFF,5G
+06-09 15:02:28.332   980 14711 E Stationservice: KEYLOG:STLOG<F> app: set_tx_power:8db,r:2.4G-OFF,5G
+
 06-09 15:02:28.354  4431  5118 W System  : A resource failed to call close. 
 06-09 15:02:28.803   980   980 I PxrConfigServiceClient: PROPERTY String8(property).string():{"CFG_VER":"1.0","CFG_HASH_ALG":"sha256","OUT_DIR":"\/mnt\/vendor\/pvr\/firmwareupdate\/asset_100004009_20260410","BASE_FW_DIR_CONTROLLER":"\/system\/etc\/ctlbin","BASE_FW_DIR_TRACKER":"\/system\/etc\/trackerbin","UPDATED_FW_DIR_CONTROLLER":"\/mnt\/vendor\/pvr\/firmwareupdate\/asset_100004009_20260410\/controller","FW_HASH_SparrowCtrl_sv1.36_PR_tv01_20241012_b136_app.bin":"ebe7333af3d6b25fcccd86afbfe7b3d816e0e5e7f6dc4819f722ba3a6b9f3bd1"} =======443
 06-09 15:02:29.163   974  2565 I pxrhmdservice : Call <getCommonDataThread> - boot_completed=[1] ------------------------
