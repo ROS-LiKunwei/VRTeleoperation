@@ -396,6 +396,7 @@ class Sysmo32Config:
                     fps=30,
                     width=640,
                     height=480,
+                    rotation=180,
                 )
             ]
 
