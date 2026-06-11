@@ -144,3 +144,36 @@ def test_operator_rejects_nan_hand_frame():
     )
 
     assert op._sanitize_hand_frame(frame) is None
+
+
+def test_operator_rebaseline_after_hand_frame_timeout():
+    op = XArmOperator.__new__(XArmOperator)
+    op.operator_name = "xarm7_right_operator"
+    op.hand_frame_timeout_s = 0.01
+    op._last_hand_data_time = time.time() - 1.0
+    op._last_hand_frame_timestamp_s = time.time() - 1.0
+    op.last_valid_hand_frame = np.zeros((4, 3), dtype=np.float64)
+    op.latest_hand_command = 1
+    op.hand_moving_h = np.eye(4)
+    op.comp_filter = object()
+    op.is_first_frame = False
+    op.hand_init_h = np.eye(4)
+    op.hand_init_t = np.zeros(3)
+    op._ignore_hand_frames_before_s = 0.0
+    op._arm_transformed_keypoint_subscriber = type(
+        "EmptyHandFrameSubscriber",
+        (),
+        {"recv_keypoints": lambda self: None},
+    )()
+
+    result = op._get_hand_frame()
+
+    assert result is None
+    assert op.is_first_frame is True
+    assert op.hand_init_h is None
+    assert op.hand_init_t is None
+    assert op.last_valid_hand_frame is None
+    assert op.latest_hand_command is None
+    assert op._last_hand_data_time == 0.0
+    assert op._last_hand_frame_timestamp_s == 0.0
+    assert op._ignore_hand_frames_before_s > 0.0

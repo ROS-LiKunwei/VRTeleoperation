@@ -35,15 +35,16 @@ def test_sysmo32_adapter_receives_and_builds_bimanual_action(monkeypatch, bus):
     robot = make_robot_from_config(cfg)
     robot.connect()
 
-    right_action = [0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 1.0]
-    left_action = [-0.1, -0.2, 0.4, 0.0, 0.0, 0.707, 0.707]
+    right_state_0 = [1, 2, 3, 4, 5, 6]
+    left_state_0 = [7, 8, 9, 10, 11, 12]
+    right_state_1 = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
+    left_state_1 = [-0.1, -0.2, -0.3, -0.4, -0.5, -0.6]
     bus.publish(
         "127.0.0.1",
         ports.XARM_STATE_PUBLISH_PORT + 2,
         "sysmo32_right",
         {
-            "joint_states": {"joint_position": [1, 2, 3, 4, 5, 6]},
-            "commanded_cartesian_state": {"commanded_cartesian_position": right_action},
+            "joint_states": {"joint_position": right_state_0},
         },
     )
     bus.publish(
@@ -51,17 +52,39 @@ def test_sysmo32_adapter_receives_and_builds_bimanual_action(monkeypatch, bus):
         ports.XARM_STATE_PUBLISH_PORT + 4,
         "sysmo32_left",
         {
-            "joint_states": {"joint_position": [7, 8, 9, 10, 11, 12]},
-            "commanded_cartesian_state": {"commanded_cartesian_position": left_action},
+            "joint_states": {"joint_position": left_state_0},
         },
     )
 
     observation, action = robot.teleop_step(record_data=True)
 
     assert observation is not None
-    assert observation["observation.state"].tolist() == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+    assert observation["observation.state"].tolist() == left_state_0 + right_state_0
+    assert action is None
+
+    bus.publish(
+        "127.0.0.1",
+        ports.XARM_STATE_PUBLISH_PORT + 2,
+        "sysmo32_right",
+        {
+            "joint_states": {"joint_position": right_state_1},
+        },
+    )
+    bus.publish(
+        "127.0.0.1",
+        ports.XARM_STATE_PUBLISH_PORT + 4,
+        "sysmo32_left",
+        {
+            "joint_states": {"joint_position": left_state_1},
+        },
+    )
+
+    observation, action = robot.teleop_step(record_data=True)
+
+    assert observation is not None
+    assert observation["observation.state"].tolist() == left_state_0 + right_state_0
     assert action is not None
-    assert action["action"].tolist() == pytest.approx(right_action + left_action)
+    assert action["action"].tolist() == pytest.approx(left_state_1 + right_state_1)
 
 
 def test_control_loop_records_observation_only_dataset(monkeypatch):

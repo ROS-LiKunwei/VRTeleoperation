@@ -98,12 +98,135 @@ def is_headless():
         print(
             "Error trying to import pynput. Switching to headless mode. "
             "As a result, the video stream from the cameras won't be shown, "
-            "and you won't be able to change the control flow with keyboards. "
+            "and keyboard control will fall back to the current terminal when possible. "
             "For more info, see traceback below.\n"
         )
         traceback.print_exc()
         print()
         return True
+
+
+def _apply_recording_key_event(key_name: str, events: dict) -> bool:
+    if key_name == "right":
+        if not events.get("exit_early", False):
+            print("Right arrow key pressed. Exiting loop...")
+        events["exit_early"] = True
+        return True
+    if key_name == "left":
+        if not events.get("rerecord_episode", False):
+            print("Left arrow key pressed. Exiting loop and rerecord the last episode...")
+        events["rerecord_episode"] = True
+        events["exit_early"] = True
+        return True
+    if key_name == "esc":
+        if not events.get("stop_recording", False):
+            print("Escape key pressed. Stopping data recording...")
+        events["stop_recording"] = True
+        events["exit_early"] = True
+        return True
+    return False
+
+
+def _terminal_sequence_to_recording_key(sequence: bytes) -> str | None:
+    if sequence in {b"\x1b[C", b"\x1bOC"}:
+        return "right"
+    if sequence in {b"\x1b[D", b"\x1bOD"}:
+        return "left"
+    if sequence == b"\x1b":
+        return "esc"
+    return None
+
+
+class _TerminalKeyboardListener:
+    """Read arrow-key escape sequences from the current terminal."""
+
+    def __init__(self, events: dict):
+        self.events = events
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._fd = None
+        self._old_termios = None
+        self._os = None
+        self._select = None
+        self._termios = None
+
+    def start(self) -> bool:
+        try:
+            import os
+            import select
+            import sys
+            import termios
+        except Exception:
+            return False
+
+        if not sys.stdin or not sys.stdin.isatty():
+            return False
+
+        try:
+            self._fd = sys.stdin.fileno()
+            self._old_termios = termios.tcgetattr(self._fd)
+            new_termios = termios.tcgetattr(self._fd)
+            new_termios[3] &= ~(termios.ICANON | termios.ECHO)
+            new_termios[6][termios.VMIN] = 0
+            new_termios[6][termios.VTIME] = 0
+            termios.tcsetattr(self._fd, termios.TCSADRAIN, new_termios)
+        except Exception as e:
+            logging.debug(f"Terminal keyboard listener unavailable: {e}")
+            return False
+
+        self._os = os
+        self._select = select
+        self._termios = termios
+        self._thread = threading.Thread(target=self._run, name="record-terminal-keyboard", daemon=True)
+        self._thread.start()
+        return True
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._termios is not None and self._fd is not None and self._old_termios is not None:
+            with suppress(Exception):
+                self._termios.tcsetattr(self._fd, self._termios.TCSADRAIN, self._old_termios)
+        if self._thread is not None:
+            self._thread.join(timeout=0.2)
+
+    def _read_sequence(self) -> bytes:
+        if self._fd is None or self._os is None or self._select is None:
+            return b""
+        ready, _, _ = self._select.select([self._fd], [], [], 0.05)
+        if not ready:
+            return b""
+
+        sequence = self._os.read(self._fd, 1)
+        if sequence != b"\x1b":
+            return sequence
+
+        deadline_s = time.monotonic() + 0.02
+        while time.monotonic() < deadline_s and len(sequence) < 3:
+            timeout_s = max(0.0, deadline_s - time.monotonic())
+            ready, _, _ = self._select.select([self._fd], [], [], timeout_s)
+            if not ready:
+                break
+            sequence += self._os.read(self._fd, 1)
+        return sequence
+
+    def _run(self) -> None:
+        while not self._stop_event.is_set():
+            sequence = self._read_sequence()
+            if not sequence:
+                continue
+            key_name = _terminal_sequence_to_recording_key(sequence)
+            if key_name is not None:
+                _apply_recording_key_event(key_name, self.events)
+
+
+class _RecordingKeyboardListener:
+    def __init__(self, listeners):
+        self._listeners = listeners
+
+    def stop(self) -> None:
+        for listener in self._listeners:
+            with suppress(Exception):
+                listener.stop()
 
 
 def predict_action(
@@ -170,35 +293,41 @@ def init_keyboard_listener():
     events["rerecord_episode"] = False
     events["stop_recording"] = False
 
-    if is_headless():
-        logging.warning(
-            "Headless environment detected. On-screen cameras display and keyboard inputs will not be available."
-        )
-        listener = None
-        return listener, events
+    listeners = []
 
-    # Only import pynput if not in a headless environment
-    from pynput import keyboard
-
-    def on_press(key):
+    if not is_headless():
         try:
-            if key == keyboard.Key.right:
-                print("Right arrow key pressed. Exiting loop...")
-                events["exit_early"] = True
-            elif key == keyboard.Key.left:
-                print("Left arrow key pressed. Exiting loop and rerecord the last episode...")
-                events["rerecord_episode"] = True
-                events["exit_early"] = True
-            elif key == keyboard.Key.esc:
-                print("Escape key pressed. Stopping data recording...")
-                events["stop_recording"] = True
-                events["exit_early"] = True
+            # Only import pynput if not in a headless environment
+            from pynput import keyboard
+
+            def on_press(key):
+                try:
+                    if key == keyboard.Key.right:
+                        _apply_recording_key_event("right", events)
+                    elif key == keyboard.Key.left:
+                        _apply_recording_key_event("left", events)
+                    elif key == keyboard.Key.esc:
+                        _apply_recording_key_event("esc", events)
+                except Exception as e:
+                    print(f"Error handling key press: {e}")
+
+            pynput_listener = keyboard.Listener(on_press=on_press)
+            pynput_listener.start()
+            listeners.append(pynput_listener)
         except Exception as e:
-            print(f"Error handling key press: {e}")
+            logging.warning(f"pynput keyboard listener unavailable; trying terminal stdin fallback: {e}")
+    else:
+        logging.warning(
+            "Headless environment detected. On-screen cameras display and pynput keyboard input will not be available."
+        )
 
-    listener = keyboard.Listener(on_press=on_press)
-    listener.start()
+    terminal_listener = _TerminalKeyboardListener(events)
+    if terminal_listener.start():
+        listeners.append(terminal_listener)
+    elif not listeners:
+        logging.warning("No keyboard listener is available; recording flow can still be stopped with Ctrl+C.")
 
+    listener = _RecordingKeyboardListener(listeners) if listeners else None
     return listener, events
 
 
@@ -463,6 +592,11 @@ def reset_environment(robot, events, reset_time_s, fps):
     if has_method(robot, "teleop_stop"):
         robot.teleop_stop()
 
+    # A right-arrow event used to finish the recording phase must not also
+    # skip the reset phase. Once reset starts, a new right-arrow press can
+    # still set exit_early again and move to the next episode immediately.
+    events["exit_early"] = False
+
     # During environment reset we explicitly *disable* teleoperation so that
     # any operator-driven commands (e.g. from a VR controller) do not
     # interfere with the homing motion issued above.  Teleoperation will be
@@ -480,7 +614,7 @@ def reset_environment(robot, events, reset_time_s, fps):
 def stop_recording(robot, listener, display_data):
     robot.disconnect()
 
-    if not is_headless() and listener is not None:
+    if listener is not None:
         listener.stop()
 
 

@@ -37,6 +37,7 @@ class BeavrBot(Robot):
         op_state_port: int = 8089,
         handshake_host: str = "127.0.0.1",
         record_actions: bool = True,
+        record_next_joint_state_action: bool = False,
     ):
         """Initialize the multi-robot adapter.
 
@@ -57,6 +58,8 @@ class BeavrBot(Robot):
         self.robot_type = robot_type
         self.robot_configs = robot_configs
         self.record_actions = record_actions
+        self.record_next_joint_state_action = record_next_joint_state_action
+        self.manage_teleop_state = True
 
         # Create ZMQ subscribers for each robot
         self.robot_subscribers = {}
@@ -163,6 +166,7 @@ class BeavrBot(Robot):
         self._publish_pool = ThreadPoolExecutor(max_workers=max(4, len(self.command_publishers)))
 
         self._last_quaternions: dict[str, np.ndarray] = {}
+        self._pending_observation_frame: Frame | None = None
         self.handshake_host = handshake_host
 
         # Initialize handshake coordinator
@@ -178,8 +182,8 @@ class BeavrBot(Robot):
         The features are organized such that:
         - All arm joint states come first in the observation array
         - All hand joint states follow the arm states in the observation array
-        - All arm actions (6D cartesian) come first in the action array
-        - All hand actions follow the arm actions in the action array
+        - Action entries either mirror the next joint-state vector or use the
+          command-space action configured for each robot.
         """
         features = {}
 
@@ -202,12 +206,13 @@ class BeavrBot(Robot):
         }
 
         if self.record_actions:
-            total_action_dim = sum(
-                7 if c["robot_type"] == "arm" else c["joint_count"] for c in sorted_configs
-            )
             action_names = []
             for config in sorted_configs:
-                if config["robot_type"] == "arm":
+                if self.record_next_joint_state_action:
+                    action_names.extend(
+                        [f"{config['name']}_next_joint_{i}_rad" for i in range(config["joint_count"])]
+                    )
+                elif config["robot_type"] == "arm":
                     action_names.extend(
                         [f"{config['name']}_{dim}" for dim in ["x", "y", "z", "qx", "qy", "qz", "qw"]]
                     )
@@ -215,7 +220,7 @@ class BeavrBot(Robot):
                     action_names.extend([f"{config['name']}_cmd_{i}" for i in range(config["joint_count"])])
 
             features["action"] = {
-                "shape": (total_action_dim,),
+                "shape": (len(action_names),),
                 "dtype": "float32",
                 "names": action_names,
             }
@@ -415,6 +420,34 @@ class BeavrBot(Robot):
         if not self.record_actions:
             return observation_frame, None
 
+        if self.record_next_joint_state_action:
+            current_state = observation_frame.get("observation.state")
+            if current_state is None:
+                logging.debug("No observation.state available for next-state action; skipping frame.")
+                return observation_frame, None
+
+            if isinstance(current_state, torch.Tensor):
+                next_joint_state = current_state.detach().cpu().numpy()
+            else:
+                next_joint_state = np.asarray(current_state, dtype=np.float32)
+            next_joint_state = np.asarray(next_joint_state, dtype=np.float32).flatten()
+
+            expected_action_dim = self.features["action"]["shape"][0]
+            if next_joint_state.size != expected_action_dim:
+                logging.warning(
+                    "Next-state action dim mismatch: expected %s values but got %s.",
+                    expected_action_dim,
+                    next_joint_state.size,
+                )
+                return observation_frame, None
+
+            previous_observation = self._pending_observation_frame
+            self._pending_observation_frame = observation_frame
+            if previous_observation is None:
+                return observation_frame, None
+
+            return previous_observation, {"action": next_joint_state.copy()}
+
         # Build combined action array (raw, in native units)
         combined_action = []
 
@@ -447,6 +480,10 @@ class BeavrBot(Robot):
 
     def teleop_stop(self):
         """Send a stop signal to all operators to pause teleoperation."""
+        if not self.manage_teleop_state:
+            logging.info("Skipping teleop stop because recorder teleop-state management is disabled")
+            return
+
         # Use guaranteed delivery for critical teleop stop
         registered_subscribers = self.handshake_coordinator.get_registered_subscribers()
 
@@ -476,6 +513,10 @@ class BeavrBot(Robot):
 
     def teleop_resume(self):
         """Send a resume signal to all operators to resume teleoperation."""
+        if not self.manage_teleop_state:
+            logging.info("Skipping teleop resume because recorder teleop-state management is disabled")
+            return
+
         # Use guaranteed delivery for critical teleop resume
         registered_subscribers = self.handshake_coordinator.get_registered_subscribers()
 

@@ -707,6 +707,7 @@ class BeavrBotConfig(RobotConfig):
     # Overall robot type identifier
     robot_type: str = "multi_robot"
     record_actions: bool = True
+    record_next_joint_state_action: bool = False
 
     mock: bool = False
 
@@ -838,28 +839,10 @@ class Sysmo32AdapterConfig(BeavrBotConfig):
     )
     robot_type: str = "sysmo32"
     record_actions: bool = True
+    record_next_joint_state_action: bool = True
 
     def __post_init__(self):
         self.robot_configs = [
-            {
-                "name": "sysmo32_right",
-                "host": network.HOST_ADDRESS,
-                "state_port": ports.XARM_STATE_PUBLISH_PORT + 2,
-                "state_topic": "sysmo32_right",
-                "robot_type": "arm",
-                "observation_key": "right_arm_state",
-                "action_key": "right_arm_action",
-                "joint_count": 6,
-                "joint_state_path": ["joint_states", "joint_position"],
-                "command_state_path": [
-                    "commanded_cartesian_state",
-                    "commanded_cartesian_position",
-                ],
-                "endeff_publish_port": ports.XARM_ENDEFF_SUBSCRIBE_PORT + 2,
-                "command_topic": "endeff_coords",
-                "home_subscribe_port": ports.XARM_HOME_SUBSCRIBE_PORT,
-                "teleop_port": ports.XARM_TELEOPERATION_STATE_PORT,
-            },
             {
                 "name": "sysmo32_left",
                 "host": network.HOST_ADDRESS,
@@ -867,7 +850,7 @@ class Sysmo32AdapterConfig(BeavrBotConfig):
                 "state_topic": "sysmo32_left",
                 "robot_type": "arm",
                 "observation_key": "left_arm_state",
-                "action_key": "left_arm_action",
+                "action_key": "left_arm_next_joint_action",
                 "joint_count": 6,
                 "joint_state_path": ["joint_states", "joint_position"],
                 "command_state_path": [
@@ -875,6 +858,25 @@ class Sysmo32AdapterConfig(BeavrBotConfig):
                     "commanded_cartesian_position",
                 ],
                 "endeff_publish_port": ports.XARM_ENDEFF_SUBSCRIBE_PORT + 4,
+                "command_topic": "endeff_coords",
+                "home_subscribe_port": ports.XARM_HOME_SUBSCRIBE_PORT,
+                "teleop_port": ports.XARM_TELEOPERATION_STATE_PORT,
+            },
+            {
+                "name": "sysmo32_right",
+                "host": network.HOST_ADDRESS,
+                "state_port": ports.XARM_STATE_PUBLISH_PORT + 2,
+                "state_topic": "sysmo32_right",
+                "robot_type": "arm",
+                "observation_key": "right_arm_state",
+                "action_key": "right_arm_next_joint_action",
+                "joint_count": 6,
+                "joint_state_path": ["joint_states", "joint_position"],
+                "command_state_path": [
+                    "commanded_cartesian_state",
+                    "commanded_cartesian_position",
+                ],
+                "endeff_publish_port": ports.XARM_ENDEFF_SUBSCRIBE_PORT + 2,
                 "command_topic": "endeff_coords",
                 "home_subscribe_port": ports.XARM_HOME_SUBSCRIBE_PORT,
                 "teleop_port": ports.XARM_TELEOPERATION_STATE_PORT,

@@ -276,8 +276,8 @@ class XArmOperator(Operator):
         """
         从 ZMQ 订阅者获取最新的手部帧数据。
 
-        当手部追踪数据丢失或无效时返回 None,使调用方跳过本轮发布,
-        从而让机器人手臂保持在当前位置不动。
+        当手部追踪数据丢失或无效时返回 None,使调用方跳过本轮发布。
+        如果缓存帧超过 hand_frame_timeout_s,会触发下一轮重新初始化 hand_init。
 
         返回:
             一个 4x3 的 numpy 数组，代表手部坐标帧 ([t; R_列1; R_列2; R_列3])
@@ -317,18 +317,29 @@ class XArmOperator(Operator):
 
         # 如果没有新数据或处理失败，正常控制时可短暂复用缓存帧；reset时必须等待新帧。
         if use_cache and self.last_valid_hand_frame is not None:
-            if (
-                hasattr(self, "_last_hand_data_time")
-                and (time.time() - self._last_hand_data_time) > self.hand_frame_timeout_s
-            ):
-                logger.debug(
-                    f"{self.operator_name}: 手部数据超时(>{self.hand_frame_timeout_s:.2f}s),手臂保持原位"
-                )
+            now_s = time.time()
+            last_hand_data_time = getattr(self, "_last_hand_data_time", None)
+            if last_hand_data_time is not None and (now_s - last_hand_data_time) > self.hand_frame_timeout_s:
+                self._request_hand_timeout_rebaseline(now_s)
                 return None
             return self.last_valid_hand_frame
 
         # 如果既没有新数据也没有缓存帧，返回 None
         return None
+
+    def _request_hand_timeout_rebaseline(self, now_s: float) -> None:
+        """Force the next control loop to rebuild hand_init after tracking is stale."""
+        if self.is_first_frame:
+            return
+        logger.warning(
+            f"{self.operator_name}: 手部数据超时(>{self.hand_frame_timeout_s:.2f}s), "
+            "已清除hand_init, 等待新VR手帧后自动重新初始化"
+        )
+        self.is_first_frame = True
+        self._ignore_hand_frames_before_s = now_s
+        self.hand_init_h = None
+        self.hand_init_t = None
+        self._clear_hand_tracking_cache()
 
     def _clear_hand_tracking_cache(self) -> None:
         """Clear hand-frame state so the next resume/reset cannot use stale VR data."""
@@ -550,9 +561,9 @@ class XArmOperator(Operator):
 
             # Update internal resolution scale based on mode
             if scale_mode == robots.ARM_HIGH_RESOLUTION:
-                self.resolution_scale = 1.0
+                self.resolution_scale = 1.5
             elif scale_mode == robots.ARM_LOW_RESOLUTION:
-                self.resolution_scale = 0.6
+                self.resolution_scale = 1.5
             return self.resolution_scale  # Return the updated scale
         except Exception as e:
             logger.error(f"Error processing resolution scale data: {e}")

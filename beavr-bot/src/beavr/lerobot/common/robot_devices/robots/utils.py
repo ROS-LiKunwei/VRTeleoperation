@@ -101,6 +101,7 @@ def make_robot_from_config(config: RobotConfig):
             cameras=config.cameras,
             robot_type=config.robot_type,
             record_actions=config.record_actions,
+            record_next_joint_state_action=getattr(config, "record_next_joint_state_action", False),
         )
     else:
         from beavr.lerobot.common.robot_devices.robots.stretch import StretchRobot

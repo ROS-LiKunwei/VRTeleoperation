@@ -90,6 +90,9 @@ class RecordControlConfig(ControlConfig):
     # Dataset layout to leave on disk after recording. The internal recorder still writes v2.1 incrementally
     # and finalizes to v3.0 at the end when requested.
     dataset_format: str = "v3.0"
+    # When false, the recorder will not publish teleop pause/resume/home signals.
+    # Use this when an external teleop stack is already running and should keep full control.
+    manage_teleop_state: bool = True
 
     def __post_init__(self):
         # HACK: We parse again the cli args here to get the pretrained path if there was one.
