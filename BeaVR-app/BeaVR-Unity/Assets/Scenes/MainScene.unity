@@ -1614,12 +1614,12 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 9f025dc8af99e80e4b8146e9fb885129, type: 3}
   m_Name:
   m_EditorClassIdentifier:
-  EnableKeypointLogging: 1
+  EnableKeypointLogging: 0
   KeypointLogIntervalSeconds: 1
   EnableSendFrequencyLogging: 1
-  EnableWristDataLogging: 1
+  EnableWristDataLogging: 0
   MinGestureSendDeltaMeters: 0.001
-  EnableFullJointLogging: 1
+  EnableFullJointLogging: 0
   MenuButton: {fileID: 113637716}
   ResolutionButton: {fileID: 0}
   HighResolutionButton: {fileID: 0}
@@ -1632,10 +1632,13 @@ MonoBehaviour:
   EnableHeadGestureControl: 1
   NodStartButton: {fileID: 248164267}
   ShakeEndButton: {fileID: 1962918559}
-  HeadGestureAngleThresholdDegrees: 12
+  HeadGestureAngleThresholdDegrees: 10
   HeadGestureWindowSeconds: 0.8
   HeadGestureCooldownSeconds: 1.2
   HeadNeutralFollowSpeed: 1.5
+  ControlKeepAliveIntervalSeconds: 1
+  HeadGesturePauseBurstCount: 4
+  HeadGesturePauseBurstIntervalSeconds: 0.08
   EnablePinchStreamingControl: 0
 --- !u!1 &248164262
 GameObject:

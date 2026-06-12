@@ -55,7 +55,7 @@ class Sysmo32Ros2Topics:
     right_hand_topic: str = "/right_topic_to_hand"
     arm_command_queue_size: int = 60
     hand_command_queue_size: int = 10
-    joint_state_timeout_s: float = 0.5
+    joint_state_timeout_s: float = 1.0
 
 
 @dataclass
@@ -78,13 +78,37 @@ class Sysmo32RealControlConfig:
     arm: Sysmo32ArmSafetyConfig = field(default_factory=Sysmo32ArmSafetyConfig)  # 手臂安全配置
     hand: Sysmo32HandConfig = field(default_factory=Sysmo32HandConfig)  # 手部配置
     state_publish_fps: float = 30.0  # LeRobot录制状态发布频率
-    hand_frame_timeout_s: float = 0.3  # 手部帧超时时间：0.3s
+    hand_frame_timeout_s: float = 1.0  # 手部帧超时时间：1.0s
     safety_hold_arm_on_pause: bool = True  # 暂停时保持手臂位置
     pause_hold_heartbeat_hz: float = 20.0  # 暂停保持命令心跳频率
     allow_placeholder_ik_for_mujoco: bool = False  # 允许降级 IK
     allow_mujoco_mirror_without_joint_state: bool = True
     mujoco_mirror_max_joint_velocity_rad_s: float = 3.0
     publish_arm_command_topic_in_mujoco: bool = False
+    ik_nullspace_gain: float = 0.03
+    ik_nullspace_step_limit_rad: float = 0.015
+    ik_nullspace_reference_joints_rad: Optional[Sequence[float]] = None
+    ik_orientation_weight: float = 0.2
+    ik_max_joint_step_rad: float = 0.12
+    ik_max_iter: int = 5
+    ik_pos_tol_m: float = 1e-3
+    ik_ori_tol_rad: float = 2e-2
+    ik_profile_log_period_s: float = 1.0
+
+    def __post_init__(self):
+        self.ik_nullspace_gain = max(0.0, float(self.ik_nullspace_gain))
+        self.ik_nullspace_step_limit_rad = max(0.0, float(self.ik_nullspace_step_limit_rad))
+        self.ik_orientation_weight = max(0.0, float(self.ik_orientation_weight))
+        self.ik_max_joint_step_rad = max(0.0, float(self.ik_max_joint_step_rad))
+        self.ik_max_iter = max(1, int(self.ik_max_iter))
+        self.ik_pos_tol_m = max(0.0, float(self.ik_pos_tol_m))
+        self.ik_ori_tol_rad = max(0.0, float(self.ik_ori_tol_rad))
+        self.ik_profile_log_period_s = max(0.0, float(self.ik_profile_log_period_s))
+        if self.ik_nullspace_reference_joints_rad is not None:
+            reference = np.asarray(self.ik_nullspace_reference_joints_rad, dtype=np.float64)
+            if reference.shape != (12,) or not np.all(np.isfinite(reference)):
+                raise ValueError("ik_nullspace_reference_joints_rad must contain 12 finite values")
+            self.ik_nullspace_reference_joints_rad = tuple(float(value) for value in reference)
 
 
 # ROS2 桥接类,负责 ROS2 通信
@@ -286,6 +310,7 @@ class Sysmo32RealControl(Component):
         self._dry_joint_cache = Sysmo32JointStateCache(self.config.ros2.joint_state_timeout_s)
         self._dry_joint_cache.update(np.zeros(6), np.zeros(6), now_s=time.time())
         self._kinematics = Sysmo32MujocoKinematics(urdf_path)
+        self._configure_ik_nullspace()
 
         self._builder = Sysmo32CommandBuilder(self.config.arm)
         self._limiter = Sysmo32CommandLimiter(self.config.arm)
@@ -318,6 +343,38 @@ class Sysmo32RealControl(Component):
         self._next_state_publish_time_s = 0.0
         self._pause_hold_command: Optional[Sysmo32ArmCommand] = None
         self._last_pause_hold_publish_time = 0.0
+        self._target_receive_count = {robots.LEFT: 0, robots.RIGHT: 0}
+        self._last_target_rate_log_time = {robots.LEFT: 0.0, robots.RIGHT: 0.0}
+        self._last_target_receive_time = {robots.LEFT: 0.0, robots.RIGHT: 0.0}
+        self._arm_publish_count = 0
+        self._last_arm_rate_log_time = 0.0
+        self.enable_arm_command_value_debug = False
+        self._last_arm_publish_time = 0.0
+        self._last_real_timing_log_time = 0.0
+
+    def _configure_ik_nullspace(self) -> None:
+        if not hasattr(self._kinematics, "configure_nullspace"):
+            return
+        try:
+            self._kinematics.configure_nullspace(
+                reference_joints_rad=self.config.ik_nullspace_reference_joints_rad,
+                gain=self.config.ik_nullspace_gain,
+                step_limit_rad=self.config.ik_nullspace_step_limit_rad,
+                orientation_weight=self.config.ik_orientation_weight,
+                max_joint_step_rad=self.config.ik_max_joint_step_rad,
+                max_iter=self.config.ik_max_iter,
+                pos_tol_m=self.config.ik_pos_tol_m,
+                ori_tol_rad=self.config.ik_ori_tol_rad,
+                profile_log_period_s=self.config.ik_profile_log_period_s,
+            )
+        except TypeError:
+            self._kinematics.configure_nullspace(
+                reference_joints_rad=self.config.ik_nullspace_reference_joints_rad,
+                gain=self.config.ik_nullspace_gain,
+                step_limit_rad=self.config.ik_nullspace_step_limit_rad,
+                orientation_weight=self.config.ik_orientation_weight,
+                max_joint_step_rad=self.config.ik_max_joint_step_rad,
+            )
 
     def _validate_backend(self) -> None:
         if self.control_backend not in ("real", "mujoco", "real_with_mujoco"):
@@ -364,6 +421,12 @@ class Sysmo32RealControl(Component):
         msg = self._pause_subscriber.recv_keypoints()
         if msg is None:
             return
+        logger.info(
+            "[Diag][REAL_SESSION_RX] command=%s teleop_active=%s needs_reset=%s",
+            msg.command,
+            self._teleop_active,
+            self._needs_reset,
+        )
         if msg.command == robots.PAUSE:
             self._last_session_command = robots.PAUSE
             self._enter_pause("pause command")
@@ -565,6 +628,38 @@ class Sysmo32RealControl(Component):
                 self._warn_safety(f"{hand_side}_wrong_target_side", f"wrong target side: {msg.hand_side}")
                 continue
             self._latest_targets[hand_side] = msg
+            self._log_target_receive_diag(hand_side, msg)
+
+    def _log_target_receive_diag(self, hand_side: str, target: CartesianTarget) -> None:
+        now = time.time()
+        last_receive = self._last_target_receive_time[hand_side]
+        if last_receive > 0.0:
+            gap_s = now - last_receive
+            if gap_s > 0.20:
+                logger.warning(
+                    "[Diag][REAL_TARGET_GAP] side=%s gap_ms=%.1f target_age_ms=%.1f port=%d",
+                    hand_side,
+                    gap_s * 1000.0,
+                    (now - float(getattr(target, "timestamp_s", now) or now)) * 1000.0,
+                    getattr(self._left_target_subscriber, "_port", -1)
+                    if hand_side == robots.LEFT
+                    else getattr(self._right_target_subscriber, "_port", -1),
+                )
+        self._last_target_receive_time[hand_side] = now
+        if self._last_target_rate_log_time[hand_side] == 0.0:
+            self._last_target_rate_log_time[hand_side] = now
+        self._target_receive_count[hand_side] += 1
+        window_s = now - self._last_target_rate_log_time[hand_side]
+        if window_s >= 1.0:
+            logger.info(
+                "[Diag][REAL_TARGET_RATE] side=%s hz=%.1f count=%d last_target_age_ms=%.1f",
+                hand_side,
+                self._target_receive_count[hand_side] / window_s,
+                self._target_receive_count[hand_side],
+                (now - float(getattr(target, "timestamp_s", now) or now)) * 1000.0,
+            )
+            self._target_receive_count[hand_side] = 0
+            self._last_target_rate_log_time[hand_side] = now
 
     def _publish_lerobot_joint_states(self) -> None:
         """Publish per-arm state dictionaries consumed by the LeRobot BeavrBot adapter."""
@@ -627,6 +722,7 @@ class Sysmo32RealControl(Component):
         )
 
     def _publish_arm_command_if_safe(self) -> None:
+        loop_start_s = time.perf_counter()
         # 检查状态
         if not self._teleop_active:
             return
@@ -651,6 +747,7 @@ class Sysmo32RealControl(Component):
         desired_left = current[:6].copy()
         desired_right = current[6:].copy()
         any_target = False
+        timing_entries = []
         # 对每个手臂求解 IK
         for hand_side in (robots.LEFT, robots.RIGHT):
             target = self._latest_targets[hand_side]
@@ -658,12 +755,18 @@ class Sysmo32RealControl(Component):
                 continue
             # 检查手部关键点是否weakly valid
             if not self._cartesian_target_fresh(target):
-                self._warn_safety(f"{hand_side}_target_stale", f"{hand_side} arm held: CartesianTarget stale")
+                self._warn_safety(
+                    f"{hand_side}_target_stale",
+                    f"{hand_side} arm held: CartesianTarget stale",
+                )
+                self._latest_targets[hand_side] = None
                 continue
             target = self._sanitize_cartesian_target(hand_side, target)
             if target is None:
                 continue
+            ik_start_s = time.perf_counter()
             solved = self._solve_ik(hand_side, target, current)
+            ik_ms = (time.perf_counter() - ik_start_s) * 1000.0
             if solved is None:
                 self._warn_safety(f"{hand_side}_ik_fail", f"{hand_side} IK failed; arm held")
                 continue
@@ -673,11 +776,19 @@ class Sysmo32RealControl(Component):
                 desired_right = solved
             self._last_accepted_targets[hand_side] = target
             any_target = True
+            timing_entries.append(
+                (
+                    hand_side,
+                    float(getattr(target, "timestamp_s", time.time()) or time.time()),
+                    ik_ms,
+                )
+            )
 
         if not any_target:
             return
         # 构建命令并限幅
         mirror_only = self.control_backend == "mujoco"
+        build_limit_start_s = time.perf_counter()
         try:
             command = self._builder.build(desired_left, desired_right, timestamp_s=time.time())
             limiter = self._mujoco_limiter if mirror_only else self._limiter
@@ -688,22 +799,92 @@ class Sysmo32RealControl(Component):
         if limited is None:
             self._warn_safety("command_limited_reject", f"arm command rejected: {reason}")
             return
+        build_limit_ms = (time.perf_counter() - build_limit_start_s) * 1000.0
+        publish_start_s = time.perf_counter()
         if not self._publish_arm_command_outputs(
             limited,
             real_joint_state_fresh=real_joint_state_fresh,
             require_real_reset=True,
         ):
             return
+        publish_ms = (time.perf_counter() - publish_start_s) * 1000.0
 
         suffix = f" ({reason})" if reason else ""
         mode_suffix = " mirror_only" if mirror_only else ""
-        logger.debug(
-            "SYSMO-32 arm command published backend=%s%s%s values=%s",
-            self.control_backend,
-            mode_suffix,
-            suffix,
-            limited.values,
+        self._log_arm_publish_diag()
+        self._log_real_timing_diag(
+            timing_entries,
+            build_limit_ms,
+            publish_ms,
+            (time.perf_counter() - loop_start_s) * 1000.0,
+            reason,
         )
+        if self.enable_arm_command_value_debug:
+            logger.debug(
+                "SYSMO-32 arm command published backend=%s%s%s values=%s",
+                self.control_backend,
+                mode_suffix,
+                suffix,
+                limited.values,
+            )
+
+    def _log_real_timing_diag(
+        self,
+        timing_entries: list[tuple[str, float, float]],
+        build_limit_ms: float,
+        publish_ms: float,
+        loop_ms: float,
+        limit_reason: str,
+    ) -> None:
+        now = time.time()
+        if now - self._last_real_timing_log_time < 1.0:
+            return
+        self._last_real_timing_log_time = now
+        if timing_entries:
+            source_to_publish_ms = max((now - ts) * 1000.0 for _, ts, _ in timing_entries)
+            ik_detail = ",".join(f"{side}:{ik_ms:.1f}" for side, _, ik_ms in timing_entries)
+            sides = ",".join(side for side, _, _ in timing_entries)
+        else:
+            source_to_publish_ms = 0.0
+            ik_detail = ""
+            sides = ""
+        logger.info(
+            "[Diag][TIMING_REAL] backend=%s sides=%s source_to_publish_ms=%.1f ik_ms=%s "
+            "build_limit_ms=%.1f publish_ms=%.1f loop_ms=%.1f limit=%s",
+            self.control_backend,
+            sides,
+            source_to_publish_ms,
+            ik_detail,
+            build_limit_ms,
+            publish_ms,
+            loop_ms,
+            limit_reason or "none",
+        )
+
+    def _log_arm_publish_diag(self) -> None:
+        now = time.time()
+        if self._last_arm_publish_time > 0.0:
+            gap_s = now - self._last_arm_publish_time
+            if gap_s > 0.20:
+                logger.warning(
+                    "[Diag][REAL_ARM_COMMAND_GAP] backend=%s gap_ms=%.1f",
+                    self.control_backend,
+                    gap_s * 1000.0,
+                )
+        self._last_arm_publish_time = now
+        if self._last_arm_rate_log_time == 0.0:
+            self._last_arm_rate_log_time = now
+        self._arm_publish_count += 1
+        window_s = now - self._last_arm_rate_log_time
+        if window_s >= 1.0:
+            logger.info(
+                "[Diag][REAL_ARM_COMMAND_RATE] backend=%s hz=%.1f count=%d",
+                self.control_backend,
+                self._arm_publish_count / window_s,
+                self._arm_publish_count,
+            )
+            self._arm_publish_count = 0
+            self._last_arm_rate_log_time = now
 
     def _publish_arm_command_outputs(
         self,

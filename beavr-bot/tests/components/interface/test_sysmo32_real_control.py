@@ -25,6 +25,15 @@ from beavr.teleop.components.interface.robots.sysmo32_real_control import (
     Sysmo32RealControl,
     Sysmo32RealControlConfig,
 )
+from beavr.teleop.components.interface.robots.sysmo32_kinematics import (
+    SYSMO32_LEFT_ELBOW_INDEX,
+    SYSMO32_RIGHT_ELBOW_INDEX,
+    Sysmo32MujocoKinematics,
+    _damped_least_squares_delta,
+    _default_nullspace_reference_joints,
+    _elbow_sign_satisfied,
+    _select_elbow_preferred_result,
+)
 from beavr.teleop.components.operator.operator_types import CartesianTarget
 from beavr.teleop.components.simulation.sysmo32_mujoco_command_sim import (
     Sysmo32MujocoCommandMirror,
@@ -78,6 +87,76 @@ def test_sysmo32_speed_mode_4_is_allowed():
     )
 
     assert command.speed_mode == 4.0
+
+
+def test_sysmo32_ik_nullspace_delta_moves_only_unconstrained_joint_toward_reference():
+    jacobian = np.array(
+        [
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ],
+        dtype=np.float64,
+    )
+    current_qpos = np.array([0.25, -0.25, 1.0], dtype=np.float64)
+    reference_qpos = np.array([-1.0, 1.0, -1.0], dtype=np.float64)
+
+    delta = _damped_least_squares_delta(
+        jacobian,
+        np.zeros(2, dtype=np.float64),
+        current_qpos,
+        reference_qpos,
+        damping=1e-6,
+        nullspace_gain=0.2,
+        nullspace_step_limit_rad=0.3,
+    )
+
+    np.testing.assert_allclose(delta[:2], np.zeros(2), atol=1e-8)
+    assert delta[2] < 0.0
+    assert np.linalg.norm(delta) <= 0.3 + 1e-9
+
+
+def test_sysmo32_default_nullspace_reference_uses_human_elbow_signs():
+    reference = _default_nullspace_reference_joints()
+
+    assert reference[SYSMO32_LEFT_ELBOW_INDEX] < 0.0
+    assert reference[SYSMO32_RIGHT_ELBOW_INDEX] > 0.0
+    assert _elbow_sign_satisfied(robots.LEFT, reference[:6])
+    assert _elbow_sign_satisfied(robots.RIGHT, reference[6:12])
+
+
+def test_sysmo32_nullspace_config_keeps_human_elbow_signs_for_zero_reference():
+    kinematics = Sysmo32MujocoKinematics.__new__(Sysmo32MujocoKinematics)
+    kinematics._nullspace_reference_joints = np.zeros(12, dtype=np.float64)
+    kinematics._nullspace_gain = 0.0
+    kinematics._nullspace_step_limit_rad = 0.0
+
+    kinematics.configure_nullspace([0.0] * 12, gain=0.03, step_limit_rad=0.015)
+
+    assert kinematics._nullspace_reference_joints[SYSMO32_LEFT_ELBOW_INDEX] < 0.0
+    assert kinematics._nullspace_reference_joints[SYSMO32_RIGHT_ELBOW_INDEX] > 0.0
+
+
+def test_sysmo32_elbow_preference_does_not_override_large_task_error():
+    tracking_best = np.zeros(6, dtype=np.float64)
+    elbow_valid = np.ones(6, dtype=np.float64)
+
+    selected = _select_elbow_preferred_result(
+        tracking_best,
+        best_task_error=0.005,
+        best_valid_qpos=elbow_valid,
+        best_valid_task_error=0.04,
+    )
+
+    np.testing.assert_array_equal(selected, tracking_best)
+
+    selected = _select_elbow_preferred_result(
+        tracking_best,
+        best_task_error=0.005,
+        best_valid_qpos=elbow_valid,
+        best_valid_task_error=0.015,
+    )
+
+    np.testing.assert_array_equal(selected, elbow_valid)
 
 
 def test_sysmo32_limiter_clips_joint_position_and_limits_velocity():
@@ -151,6 +230,33 @@ def test_sysmo32_cartesian_target_jump_is_clamped_not_rejected():
     assert np.allclose(clamped.position_m, (0.02, 0.0, 0.0))
 
 
+def test_sysmo32_stale_cartesian_target_is_dropped_after_hold():
+    controller = Sysmo32RealControl.__new__(Sysmo32RealControl)
+    controller.control_backend = "mujoco"
+    controller.config = Sysmo32RealControlConfig(hand_frame_timeout_s=0.1)
+    controller._teleop_active = True
+    controller._latest_targets = {
+        robots.LEFT: CartesianTarget(
+            timestamp_s=1.0,
+            hand_side=robots.LEFT,
+            frame_id="base",
+            position_m=(0.0, 0.0, 0.0),
+            orientation_xyzw=(0.0, 0.0, 0.0, 1.0),
+        ),
+        robots.RIGHT: None,
+    }
+    controller._last_safety_log_time = {}
+    controller._real_joint_state_fresh = lambda: True
+    controller._current_joint_snapshot = lambda: SimpleNamespace(all_joints=np.zeros(12))
+    warnings = []
+    controller._warn_safety = lambda key, message: warnings.append((key, message))
+
+    controller._publish_arm_command_if_safe()
+
+    assert controller._latest_targets[robots.LEFT] is None
+    assert warnings == [(f"{robots.LEFT}_target_stale", f"{robots.LEFT} arm held: CartesianTarget stale")]
+
+
 def test_hand_gesture_mapper_hysteresis_pause_and_timeout_release():
     mapper = Sysmo32HandGestureMapper(confirm_frames=3, hand_frame_timeout_s=0.3)
     now = 10.0
@@ -195,6 +301,95 @@ def test_joint_state_cache_parses_and_rejects_stale_state():
     assert snapshot.right_arm == tuple(float(v) for v in range(6, 12))
     assert cache.is_fresh(now_s=10.4)
     assert not cache.is_fresh(now_s=10.6)
+
+
+def test_real_control_reset_does_not_replace_ik_elbow_reference_with_current_joints(monkeypatch, bus):
+    import beavr.teleop.components.interface.robots.sysmo32_real_control as real_mod
+
+    class FakeSubscriber:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def recv_keypoints(self):
+            return None
+
+        def stop(self):
+            return None
+
+    kinematics_instances = []
+
+    class FakeKinematics:
+        available = True
+
+        def __init__(self, urdf_path):
+            self.urdf_path = urdf_path
+            self.nullspace_calls = []
+            kinematics_instances.append(self)
+
+        def configure_nullspace(
+            self,
+            reference_joints_rad=None,
+            gain=None,
+            step_limit_rad=None,
+            orientation_weight=None,
+            max_joint_step_rad=None,
+        ):
+            self.nullspace_calls.append(
+                {
+                    "reference": None
+                    if reference_joints_rad is None
+                    else tuple(float(v) for v in reference_joints_rad),
+                    "gain": gain,
+                    "step_limit_rad": step_limit_rad,
+                    "orientation_weight": orientation_weight,
+                    "max_joint_step_rad": max_joint_step_rad,
+                }
+            )
+
+        def fk(self, hand_side, all_joints):
+            return np.eye(4, dtype=np.float64)
+
+    monkeypatch.setattr(real_mod, "ZMQSubscriber", FakeSubscriber)
+    monkeypatch.setattr(real_mod, "Sysmo32MujocoKinematics", FakeKinematics)
+    monkeypatch.setattr(real_mod, "cleanup_zmq_resources", lambda: None)
+
+    controller = Sysmo32RealControl(
+        host="127.0.0.1",
+        control_backend="mujoco",
+        right_target_port=10011,
+        left_target_port=10013,
+        right_state_publish_port=10012,
+        left_state_publish_port=10014,
+        teleoperation_state_port=ports.XARM_TELEOPERATION_STATE_PORT,
+        transformed_right_port=ports.KEYPOINT_TRANSFORM_PORT,
+        transformed_left_port=ports.LEFT_KEYPOINT_TRANSFORM_PORT,
+        config=Sysmo32RealControlConfig(
+            control_backend="mujoco",
+            ik_nullspace_gain=0.07,
+            ik_nullspace_step_limit_rad=0.02,
+            ik_orientation_weight=0.18,
+            ik_max_joint_step_rad=0.06,
+        ),
+    )
+    kinematics = kinematics_instances[0]
+    expected_nullspace_calls = [
+        {
+            "reference": None,
+            "gain": 0.07,
+            "step_limit_rad": 0.02,
+            "orientation_weight": 0.18,
+            "max_joint_step_rad": 0.06,
+        }
+    ]
+    assert kinematics.nullspace_calls == expected_nullspace_calls
+
+    controller._dry_joint_cache.update(range(6), range(6, 12), now_s=time.time())
+
+    controller._publish_current_endeff_homo(robots.RIGHT, publish_port=10012)
+
+    assert kinematics.nullspace_calls == expected_nullspace_calls
+    assert bus.recv_latest(10012, "endeff_homo") is not None
+    controller.cleanup()
 
 
 def test_real_control_publishes_lerobot_joint_states_at_configured_rate(monkeypatch, bus):
@@ -857,13 +1052,15 @@ def test_sysmo32_config_routes_backends():
     assert robot_cfg.left_endeff_publish_port == ports.XARM_ENDEFF_PUBLISH_PORT + 4
     assert robot_cfg.right_state_publish_port == ports.XARM_STATE_PUBLISH_PORT + 2
     assert robot_cfg.left_state_publish_port == ports.XARM_STATE_PUBLISH_PORT + 4
+    assert robot_cfg.config.ros2.joint_state_timeout_s == 1.0
+    assert robot_cfg.config.hand_frame_timeout_s == 1.0
     assert real_cfg.robots[0].teleoperation_state_port == ports.XARM_TELEOPERATION_STATE_PORT
     assert real_cfg.operators[0].endeff_publish_port == robot_cfg.right_target_port
     assert real_cfg.operators[0].endeff_subscribe_port == robot_cfg.right_endeff_publish_port
     assert real_cfg.operators[1].endeff_publish_port == robot_cfg.left_target_port
     assert real_cfg.operators[1].endeff_subscribe_port == robot_cfg.left_endeff_publish_port
     assert real_cfg.operators[0].teleoperation_state_port == ports.XARM_TELEOPERATION_STATE_PORT
-    assert real_cfg.operators[0].hand_frame_timeout_s == 0.3
+    assert real_cfg.operators[0].hand_frame_timeout_s == 1.0
     assert real_cfg.operators[0].rotation_delta_frame == "base"
 
     real_with_mujoco_cfg = load_robot_config(

@@ -337,12 +337,18 @@ class UnifiedPICO4VRHandDetectorCfg:
     pico4_pub_port: int = ports.KEYPOINT_STREAM_PORT
     button_port: int = ports.RESOLUTION_BUTTON_PORT
     teleop_reset_port: int = ports.TELEOP_RESET_PORT
+    teleop_state_pub_port: int = ports.XARM_TELEOPERATION_STATE_PORT
     hand_config: str = robots.RIGHT
     hand_side: str = robots.RIGHT  # 用于标识目的
 
     def __post_init__(self):
         """验证端口配置。"""
-        all_ports = [self.pico4_pub_port, self.button_port, self.teleop_reset_port]
+        all_ports = [
+            self.pico4_pub_port,
+            self.button_port,
+            self.teleop_reset_port,
+            self.teleop_state_pub_port,
+        ]
         if len(set(all_ports)) != len(all_ports):
             logger.error("Duplicate ports found in UnifiedPICO4VRHandDetector configuration!")
             raise ValueError("Duplicate ports in configuration")
@@ -352,6 +358,7 @@ class UnifiedPICO4VRHandDetectorCfg:
             ("pico4_pub_port", self.pico4_pub_port),
             ("button_port", self.button_port),
             ("teleop_reset_port", self.teleop_reset_port),
+            ("teleop_state_pub_port", self.teleop_state_pub_port),
         ]:
             if not (1 <= port_value <= 65535):
                 raise ValueError(f"{port_name} out of valid range (1-65535): {port_value}")
@@ -363,6 +370,7 @@ class UnifiedPICO4VRHandDetectorCfg:
             "pico4_pub_port": self.pico4_pub_port,
             "button_port": self.button_port,
             "teleop_reset_port": self.teleop_reset_port,
+            "teleop_state_pub_port": self.teleop_state_pub_port,
             "hand_config": self.hand_config,
         }
 

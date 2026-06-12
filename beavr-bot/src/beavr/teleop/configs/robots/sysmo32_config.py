@@ -142,15 +142,15 @@ class Sysmo32RealControlCfg:
                 right_hand_topic="/right_topic_to_hand",
                 arm_command_queue_size=60,
                 hand_command_queue_size=10,
-                joint_state_timeout_s=0.5,
+                joint_state_timeout_s=1.0,
             ),
             arm=Sysmo32ArmSafetyConfig(
                 speed_mode=4.0,
                 reserved=(0.0, 0.0, 0.0, 0.0),
                 neck_joint=0.0,
-                max_joint_velocity_rad_s=tuple([0.8] * 12),
-                max_translation_step_m=0.02,
-                max_rotation_step_rad=0.08,
+                max_joint_velocity_rad_s=tuple([1.6] * 12),
+                max_translation_step_m=0.04,
+                max_rotation_step_rad=0.12,
             ),
             hand=Sysmo32HandConfig(
                 default_action=1,
@@ -164,13 +164,35 @@ class Sysmo32RealControlCfg:
                 force_release_on_timeout=True,
             ),
             state_publish_fps=30.0,
-            hand_frame_timeout_s=0.3,
+            hand_frame_timeout_s=1.0,
             safety_hold_arm_on_pause=True,
             pause_hold_heartbeat_hz=20.0,
             allow_placeholder_ik_for_mujoco=True,
             allow_mujoco_mirror_without_joint_state=True,
             mujoco_mirror_max_joint_velocity_rad_s=3.0,
             publish_arm_command_topic_in_mujoco=False,
+            ik_nullspace_gain=0.03,
+            ik_nullspace_step_limit_rad=0.015,
+            ik_orientation_weight=0.2,
+            ik_max_joint_step_rad=0.12,
+            ik_max_iter=5,
+            ik_pos_tol_m=1e-3,
+            ik_ori_tol_rad=2e-2,
+            ik_profile_log_period_s=1.0,
+            ik_nullspace_reference_joints_rad=(
+                0.0,
+                0.0,
+                0.0,
+                -0.75,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.75,
+                0.0,
+                0.0,
+            ),
         )
     )
 
@@ -225,7 +247,7 @@ class Sysmo32OperatorCfg:
     arm_resolution_port: int = ports.KEYPOINT_STREAM_PORT
     use_filter: bool = False
     teleoperation_state_port: int = ports.XARM_TELEOPERATION_STATE_PORT
-    hand_frame_timeout_s: float = 0.3
+    hand_frame_timeout_s: float = 1.0
     rotation_delta_frame: str = "base"
     logging_config: dict[str, Any] = field(
         default_factory=lambda: {

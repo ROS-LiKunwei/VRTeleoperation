@@ -54,7 +54,7 @@ class XArmOperator(Operator):
         teleoperation_state_port: Optional[int] = None,
         logging_config: Optional[Dict[str, Any]] = None,
         hand_side: str = robots.RIGHT,
-        hand_frame_timeout_s: float = 0.15,
+        hand_frame_timeout_s: float = 0.5,
         rotation_delta_frame: str = "body",
     ):
         """
@@ -185,6 +185,11 @@ class XArmOperator(Operator):
         self._last_reset_hand_wait_log_time: float = 0.0
         self._last_no_hand_frame_log_time: float = 0.0
         self._last_publish_command_log_time: float = 0.0
+        self._last_hand_frame_diag_time: float = 0.0
+        self._last_command_publish_time: float = 0.0
+        self._command_publish_count: int = 0
+        self._last_command_rate_log_time: float = 0.0
+        self._last_timing_log_time: float = 0.0
 
         # Filter setup
         self.use_filter = use_filter  # 是否使用滤波器
@@ -304,8 +309,19 @@ class XArmOperator(Operator):
                     frame_data = np.array(data.frame_vectors, dtype=np.float64).reshape(4, 3)
                     frame_data = self._sanitize_hand_frame(frame_data)
                     if frame_data is not None:
+                        now_s = time.time()
+                        if self._last_hand_frame_diag_time > 0.0:
+                            gap_s = now_s - self._last_hand_frame_diag_time
+                            if gap_s > 0.20:
+                                logger.warning(
+                                    "[Diag][OP_HAND_FRAME_GAP] operator=%s gap_ms=%.1f frame_ts=%.6f",
+                                    self.operator_name,
+                                    gap_s * 1000.0,
+                                    frame_timestamp_s,
+                                )
+                        self._last_hand_frame_diag_time = now_s
                         self.last_valid_hand_frame = frame_data
-                        self._last_hand_data_time = time.time()
+                        self._last_hand_data_time = now_s
                         self._last_hand_frame_timestamp_s = frame_timestamp_s
                         return frame_data
                     else:
@@ -389,6 +405,30 @@ class XArmOperator(Operator):
 
     def _log_published_cartesian_command(self, cartesian_cmd: CartesianTarget) -> None:
         current_time = time.time()
+        if self._last_command_publish_time > 0.0:
+            gap_s = current_time - self._last_command_publish_time
+            if gap_s > 0.20:
+                logger.warning(
+                    "[Diag][OP_COMMAND_GAP] operator=%s gap_ms=%.1f topic=endeff_coords port=%d",
+                    self.operator_name,
+                    gap_s * 1000.0,
+                    self._publisher_port,
+                )
+        self._last_command_publish_time = current_time
+        if self._last_command_rate_log_time == 0.0:
+            self._last_command_rate_log_time = current_time
+        self._command_publish_count += 1
+        rate_window_s = current_time - self._last_command_rate_log_time
+        if rate_window_s >= 1.0:
+            logger.info(
+                "[Diag][OP_COMMAND_RATE] operator=%s hz=%.1f count=%d port=%d",
+                self.operator_name,
+                self._command_publish_count / rate_window_s,
+                self._command_publish_count,
+                self._publisher_port,
+            )
+            self._command_publish_count = 0
+            self._last_command_rate_log_time = current_time
         if current_time - self._last_publish_command_log_time >= 1.0:
             self._last_publish_command_log_time = current_time
             logger.debug(
@@ -583,9 +623,21 @@ class XArmOperator(Operator):
             # Expect SessionCommand
             if data.command == robots.PAUSE:
                 self._last_teleop_command_timestamp_s = float(data.timestamp_s)
+                logger.info(
+                    "[Diag][OP_TELEOP_STATE_RX] operator=%s command=%s timestamp_s=%.6f",
+                    self.operator_name,
+                    data.command,
+                    self._last_teleop_command_timestamp_s,
+                )
                 return robots.ARM_TELEOP_STOP
             elif data.command == robots.RESUME:
                 self._last_teleop_command_timestamp_s = float(data.timestamp_s)
+                logger.info(
+                    "[Diag][OP_TELEOP_STATE_RX] operator=%s command=%s timestamp_s=%.6f",
+                    self.operator_name,
+                    data.command,
+                    self._last_teleop_command_timestamp_s,
+                )
                 return robots.ARM_TELEOP_CONT
             else:
                 return self.arm_teleop_state
@@ -816,6 +868,9 @@ class XArmOperator(Operator):
             self.is_first_frame = True  # Force reset on next cycle
             return
 
+        operator_process_start_s = time.perf_counter()
+        source_timestamp_s = float(self._last_hand_frame_timestamp_s or time.time())
+
         # 4. Convert current hand frame(4x3) to Homogeneous Matrix
         try:
             self.hand_moving_h = self._turn_frame_to_homo_mat(moving_hand_frame)  # 转换为齐次矩阵
@@ -905,7 +960,7 @@ class XArmOperator(Operator):
 
         # 11. 构建统一的 Contract 对象进行发布
         cartesian_cmd = CartesianTarget(
-            timestamp_s=time.time(),
+            timestamp_s=source_timestamp_s,
             hand_side=self.hand_side,
             frame_id="base",  # 坐标参考系为机器人基座
             position_m=(float(position[0]), float(position[1]), float(position[2])),  # 目标位置
@@ -929,6 +984,7 @@ class XArmOperator(Operator):
                     data=cartesian_cmd,  # 发布数据
                 )
                 self._log_published_cartesian_command(cartesian_cmd)
+                self._log_timing_diag(source_timestamp_s, operator_process_start_s)
             except (ConnectionError, SerializationError) as e:
                 logger.error(f"Failed to publish end-effector command: {e}")
             except Exception as e:
@@ -952,6 +1008,18 @@ class XArmOperator(Operator):
                     )
             except Exception as e:
                 logger.error(f"Error logging frame ({self.operator_name}): {e}")
+
+    def _log_timing_diag(self, source_timestamp_s: float, process_start_s: float) -> None:
+        now = time.time()
+        if now - self._last_timing_log_time < 1.0:
+            return
+        self._last_timing_log_time = now
+        logger.info(
+            "[Diag][TIMING_OPERATOR] operator=%s source_to_pub_ms=%.1f operator_ms=%.1f",
+            self.operator_name,
+            (now - float(source_timestamp_s or now)) * 1000.0,
+            (time.perf_counter() - process_start_s) * 1000.0,
+        )
 
     def moving_average(self, action: np.ndarray, queue: list, limit: int) -> np.ndarray:
         """

@@ -12,6 +12,12 @@ using System.IO;
 /// </summary>
 public class NetMQController : MonoBehaviour
 {
+    [Header("网络诊断日志")]
+    public bool EnableForwardFrequencyLogging = true;
+    public bool EnableForwardPayloadLogging = false;
+    public bool EnableForwardWristLogging = false;
+    public bool EnableForwardFullJointLogging = false;
+
     // 单例实例
     private static NetMQController _instance;
     public static NetMQController Instance
@@ -334,7 +340,8 @@ public class NetMQController : MonoBehaviour
             // 转发频率统计
             _sendCounts[socketName]++;
             float currentTime = Time.time;
-            if (currentTime - _lastSendFreqLogTime[socketName] >= NETMQ_FREQ_CALC_INTERVAL)
+            if (EnableForwardFrequencyLogging &&
+                currentTime - _lastSendFreqLogTime[socketName] >= NETMQ_FREQ_CALC_INTERVAL)
             {
                 _sendFrequencies[socketName] = _sendCounts[socketName] / (currentTime - _lastSendFreqLogTime[socketName]);
                 _sendCounts[socketName] = 0;
@@ -343,7 +350,8 @@ public class NetMQController : MonoBehaviour
             }
 
             // 定期打印转发位姿信息
-            if (currentTime - _lastForwardLogTime >= FORWARD_LOG_INTERVAL)
+            if (EnableForwardPayloadLogging &&
+                currentTime - _lastForwardLogTime >= FORWARD_LOG_INTERVAL)
             {
                 _lastForwardLogTime = currentTime;
                 string poseInfo = message.Length > 100 ? message.Substring(0, 100) + "..." : message;
@@ -352,7 +360,8 @@ public class NetMQController : MonoBehaviour
             }
 
             // 定期打印手腕部数据（只对Hand类型的消息）
-            if ((socketName == "RightHand" || socketName == "LeftHand") &&
+            if (EnableForwardWristLogging &&
+                (socketName == "RightHand" || socketName == "LeftHand") &&
                 currentTime - _lastWristLogTime >= WRIST_LOG_INTERVAL)
             {
                 _lastWristLogTime = currentTime;
@@ -362,7 +371,8 @@ public class NetMQController : MonoBehaviour
             }
 
             // 定期打印26个坐标系数据（只对Hand类型的消息）
-            if ((socketName == "RightHand" || socketName == "LeftHand") &&
+            if (EnableForwardFullJointLogging &&
+                (socketName == "RightHand" || socketName == "LeftHand") &&
                 currentTime - _lastFullJointLogTime >= FULL_JOINT_LOG_INTERVAL)
             {
                 _lastFullJointLogTime = currentTime;

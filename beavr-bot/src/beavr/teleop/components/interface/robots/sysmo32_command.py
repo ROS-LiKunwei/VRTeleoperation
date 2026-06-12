@@ -106,10 +106,10 @@ class Sysmo32ArmSafetyConfig:
     neck_joint: float = 0.0
     joint_lower_limits_rad: Tuple[float, ...] = field(default_factory=lambda: tuple([-3.14] * 12))
     joint_upper_limits_rad: Tuple[float, ...] = field(default_factory=lambda: tuple([3.14] * 12))
-    max_joint_velocity_rad_s: Tuple[float, ...] = field(default_factory=lambda: tuple([0.8] * 12))
+    max_joint_velocity_rad_s: Tuple[float, ...] = field(default_factory=lambda: tuple([1.6] * 12))
     max_joint_jump_rad: float = 0.2  # 最大跳转角度，单个控制周期内的最大角度变化
-    max_translation_step_m: float = 0.02
-    max_rotation_step_rad: float = 0.08
+    max_translation_step_m: float = 0.04
+    max_rotation_step_rad: float = 0.12
     workspace_limits: Dict[str, Tuple[float, float]] = field(
         default_factory=lambda: {
             "x": (-1.0, 1.0),
@@ -231,7 +231,7 @@ class Sysmo32JointStateSnapshot:
 class Sysmo32JointStateCache:
     """Parse and cache ``sensor_msgs/JointState`` arm positions."""
 
-    def __init__(self, joint_state_timeout_s: float = 0.5):
+    def __init__(self, joint_state_timeout_s: float = 0.8):
         self.joint_state_timeout_s = joint_state_timeout_s
         self._snapshot: Optional[Sysmo32JointStateSnapshot] = None
 
@@ -287,7 +287,7 @@ class Sysmo32HandGestureMapper:
         grasp_enter_threshold_m: float = 0.035,
         grasp_exit_threshold_m: float = 0.055,
         confirm_frames: int = 3,
-        hand_frame_timeout_s: float = 0.3,
+        hand_frame_timeout_s: float = 0.5,
     ):
         self.default_action = default_action
         self.grasp_action = grasp_action

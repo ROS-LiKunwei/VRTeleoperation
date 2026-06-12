@@ -201,6 +201,7 @@ class TransformHandPositionCoords(Component):
         self._last_no_raw_input_log_time = 0.0
         self._last_receive_raw_input_log_time = 0.0
         self._last_publish_frame_log_time = 0.0
+        self._last_timing_log_time = 0.0
 
     def _clear_smoothing_state(self):
         self.coord_moving_average_queue.clear()
@@ -304,17 +305,17 @@ class TransformHandPositionCoords(Component):
         从pico4.py发布的InputFrame对象中提取关键点数据,并将其reshape为(26, 3)的形状。
 
         Returns:
-            tuple: (data_type, coordinates, hand_command)
+            tuple: (data_type, coordinates, hand_command, source_timestamp_s)
                 - data_type: HandMode.RELATIVE 或 HandMode.ABSOLUTE
                 - coordinates: numpy数组,形状为(26, 3),26个关节的xyz坐标
                 - hand_command: 灵巧手命令，1=松开，2=抓取；无数据时为None。
-                - 无数据时返回 (None, None, None)
+                - 无数据时返回 (None, None, None, None)
         """
         # 1. 接收数据：从 ZMQ 网络队列中非阻塞地拉取最新的一帧手部数据
         input_frame = self.keypoint_subscriber.recv_keypoints()
         if input_frame is None:
             self._log_no_raw_input()
-            return None, None, None
+            return None, None, None, None
 
         # 2. 转换为 Numpy 数组：将接收到的通常是 Python List 格式的数据转化为高效的 numpy 数组
         keypoints = np.asanyarray(input_frame.keypoints)
@@ -334,7 +335,7 @@ class TransformHandPositionCoords(Component):
                 f"Expected {expected_count} elements ({robots.OCULUS_NUM_KEYPOINTS} points × 3 coords), "
                 f"got {actual_count}. Skipping this frame."
             )
-            return None, None, None
+            return None, None, None, None
 
         # 4. 判断坐标系模式：根据传过来的标志位，判断这组坐标是绝对世界坐标 (ABSOLUTE) 还是相对坐标 (RELATIVE)
         data_type = self.relative_mode if input_frame.is_relative else self.absolute_mode
@@ -347,7 +348,7 @@ class TransformHandPositionCoords(Component):
             f"Shape: {reshaped_keypoints.shape}, Wrist position: {reshaped_keypoints[0]}"
         )
 
-        return data_type, reshaped_keypoints, input_frame.hand_command
+        return data_type, reshaped_keypoints, input_frame.hand_command, input_frame.timestamp_s
 
     def _orthogonalize_frame(self, x_vec, y_vec, z_vec):
         """
@@ -537,8 +538,10 @@ class TransformHandPositionCoords(Component):
                 self.timer.end_loop()
                 continue
 
+            transform_start_s = time.perf_counter()
+
             # 1.从pico4.py订阅原始关键点数据
-            data_type, hand_coords, hand_command = self._get_hand_coords()
+            data_type, hand_coords, hand_command, source_timestamp_s = self._get_hand_coords()
 
             if hand_coords is None or data_type is None:
                 self.timer.end_loop()
@@ -595,7 +598,7 @@ class TransformHandPositionCoords(Component):
 
             # 6. 封装为InputFrame对象
             data = InputFrame(
-                timestamp_s=time.time(),
+                timestamp_s=source_timestamp_s or time.time(),
                 hand_side=self.hand_side,
                 keypoints=self.averaged_keypoints,
                 is_relative=data_type == self.relative_mode,
@@ -619,9 +622,22 @@ class TransformHandPositionCoords(Component):
                 topic=self.frame_topic,
                 data=data,
             )
+            self._log_timing_diag(data.timestamp_s, transform_start_s)
             self._log_publish_frame(self.averaged_coordinate_frame, hand_command)
 
             self.timer.end_loop()
+
+    def _log_timing_diag(self, source_timestamp_s: float, transform_start_s: float) -> None:
+        now = time.time()
+        if now - self._last_timing_log_time < 1.0:
+            return
+        self._last_timing_log_time = now
+        logger.info(
+            "[Diag][TIMING_TRANSFORM] side=%s source_to_pub_ms=%.1f transform_loop_ms=%.1f",
+            self.hand_side,
+            (now - float(source_timestamp_s or now)) * 1000.0,
+            (time.perf_counter() - transform_start_s) * 1000.0,
+        )
 
     def cleanup(self):
         """清理资源并保存日志数据。"""

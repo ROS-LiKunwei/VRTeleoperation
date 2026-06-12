@@ -45,7 +45,7 @@ from beavr.teleop.components.detector.detector_types import (
     InputFrame,
     SessionCommand,
 )
-from beavr.teleop.configs.constants import network, robots
+from beavr.teleop.configs.constants import network, ports, robots
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +83,7 @@ class PICO4VRHandDetector(Component):
         pico4_pub_port: int,
         button_port: int,
         teleop_reset_port: int,
+        teleop_state_pub_port: int = ports.XARM_TELEOPERATION_STATE_PORT,
         hand_config: Union[str, str] = robots.RIGHT,
         right_hand_port: Optional[int] = None,
         left_hand_port: Optional[int] = None,
@@ -95,6 +96,7 @@ class PICO4VRHandDetector(Component):
             pico4_pub_port: 发布关键点数据的端口号（发布给keypoint_transform.py）。
             button_port: 按钮事件的端口号（接收分辨率切换命令）。
             teleop_reset_port: 遥控重置命令的端口号（接收暂停/恢复命令）。
+            teleop_state_pub_port: 发布暂停/恢复SessionCommand给operator和real-control的端口号。
             hand_config: 配置模式 - 'left'（左手）、'right'（右手）或 'bimanual'（双手）。
             right_hand_port: 右手数据端口（右手/双手模式需要），默认8087。
             left_hand_port: 左手数据端口（左手/双手模式需要），默认8110。
@@ -105,6 +107,7 @@ class PICO4VRHandDetector(Component):
         self.pico4_pub_port = pico4_pub_port
         self.button_port = button_port
         self.teleop_reset_port = teleop_reset_port
+        self.teleop_state_pub_port = teleop_state_pub_port
         self.hand_config = hand_config
 
         # 根据配置验证并设置手部端口
@@ -125,8 +128,14 @@ class PICO4VRHandDetector(Component):
         self._last_full_joint_log_time = 0.0
         self._last_invalid_frame_log_time = {}
         self._last_no_socket_data_log_time = {}
+        self._last_success_receive_time = {}
+        self._last_pause_command_log_time = 0.0
         self._freq_calc_interval = 1.0  # 1秒计算一次频率
         self._frame_index = 0  # 帧索引，用于匹配三个环节的数据
+        self.enable_receive_frequency_logging = True
+        self.enable_receive_sample_logging = False
+        self.enable_publish_debug_logging = False
+        self._last_timing_log_time = {}
 
     def _configure_hand_ports(self, right_hand_port: Optional[int], left_hand_port: Optional[int]):
         """
@@ -371,7 +380,19 @@ class PICO4VRHandDetector(Component):
             return None
         try:
             data = self.sockets[socket_name].recv(zmq.NOBLOCK)
-            self.last_received[socket_name] = int(time.time())
+            now = time.time()
+            last_success = self._last_success_receive_time.get(socket_name)
+            if last_success is not None:
+                gap_s = now - last_success
+                if socket_name in ("RightHand", "LeftHand") and gap_s > 0.20:
+                    logger.warning(
+                        "[Diag][PICO_RX_GAP] socket=%s gap_ms=%.1f host=%s",
+                        socket_name,
+                        gap_s * 1000.0,
+                        self.host,
+                    )
+            self._last_success_receive_time[socket_name] = now
+            self.last_received[socket_name] = int(now)
             return data
         except zmq.Again:
             self._log_no_socket_data(socket_name)
@@ -529,8 +550,11 @@ class PICO4VRHandDetector(Component):
                 keypoint_data = self._receive_data(socket_key)
 
                 if keypoint_data is not None:
+                    receive_time_s = time.time()
+                    parse_start_s = time.perf_counter()
                     # 处理并发布此手的关键点（包含时间戳解析）
                     keypoints, send_timestamp, hand_command = self._process_keypoints(keypoint_data)
+                    parse_ms = (time.perf_counter() - parse_start_s) * 1000.0
 
                     # 计算延迟
                     delay_ms = self._calculate_delay(send_timestamp)
@@ -549,7 +573,7 @@ class PICO4VRHandDetector(Component):
                         port=self.pico4_pub_port,
                         topic=hand_side,
                         data=InputFrame(
-                            timestamp_s=time.time(),
+                            timestamp_s=receive_time_s,
                             hand_side=hand_side,
                             keypoints=keypoints,
                             is_relative=is_relative,
@@ -557,6 +581,7 @@ class PICO4VRHandDetector(Component):
                             hand_command=hand_command,
                         ),
                     )
+                    self._log_timing_diag(socket_key, receive_time_s, parse_ms)
 
                     # 接收频率统计
                     if socket_key not in self._receive_counts:
@@ -569,8 +594,11 @@ class PICO4VRHandDetector(Component):
                     self._receive_counts[socket_key] += 1
                     current_time = time.time()
                     if (
-                        current_time - self._last_receive_freq_log_time[socket_key]
-                        >= self._freq_calc_interval
+                        self.enable_receive_frequency_logging
+                        and (
+                            current_time - self._last_receive_freq_log_time[socket_key]
+                            >= self._freq_calc_interval
+                        )
                     ):
                         self._receive_frequencies[socket_key] = self._receive_counts[socket_key] / (
                             current_time - self._last_receive_freq_log_time[socket_key]
@@ -583,7 +611,13 @@ class PICO4VRHandDetector(Component):
                         )
 
                     # 定期打印手腕部数据（每3秒）
-                    if current_time - getattr(self, "_last_wrist_log_time", 0) >= 3.0:
+                    if (
+                        self.enable_receive_sample_logging
+                        and (
+                            current_time - getattr(self, "_last_wrist_log_time", 0)
+                            >= 3.0
+                        )
+                    ):
                         self._last_wrist_log_time = current_time
                         wrist_data = self._parse_wrist_data(keypoint_data)
                         delay_str = f", 延迟={delay_ms:.1f}ms" if delay_ms else ""
@@ -593,7 +627,13 @@ class PICO4VRHandDetector(Component):
                         self._frame_index += 1
 
                     # 定期打印26个坐标系数据（每5秒）
-                    if current_time - getattr(self, "_last_full_joint_log_time", 0) >= 5.0:
+                    if (
+                        self.enable_receive_sample_logging
+                        and (
+                            current_time - getattr(self, "_last_full_joint_log_time", 0)
+                            >= 5.0
+                        )
+                    ):
                         self._last_full_joint_log_time = current_time
                         full_joint_data = self._parse_full_joint_data(keypoint_data)
                         logger.debug(
@@ -602,16 +642,23 @@ class PICO4VRHandDetector(Component):
                         self._frame_index += 1
 
                     # 定期打印接收到的位姿信息
-                    if current_time - self._last_receive_time.get(socket_key, 0) >= 3.0:
+                    if (
+                        self.enable_receive_sample_logging
+                        and (
+                            current_time - self._last_receive_time.get(socket_key, 0)
+                            >= 3.0
+                        )
+                    ):
                         self._last_receive_time[socket_key] = current_time
                         pose_sample = keypoints[:9] if len(keypoints) >= 9 else keypoints
                         logger.debug(f"[Bot接收] {socket_key} 位姿样本: {pose_sample}")
 
-                    delay_str = f", 延迟={delay_ms:.1f}ms" if delay_ms else ""
-                    logger.debug(
-                        f"PICO4: 发布 {hand_side} 手数据到端口 {self.pico4_pub_port}, "
-                        f"关键点数量: {len(keypoints)}, 相对模式: {is_relative}{delay_str}"
-                    )
+                    if self.enable_publish_debug_logging:
+                        delay_str = f", 延迟={delay_ms:.1f}ms" if delay_ms else ""
+                        logger.debug(
+                            f"PICO4: 发布 {hand_side} 手数据到端口 {self.pico4_pub_port}, "
+                            f"关键点数量: {len(keypoints)}, 相对模式: {is_relative}{delay_str}"
+                        )
 
             # 处理并发布按钮状态（在手部之间共享）
             if button_data := self._receive_data(robots.BUTTON):
@@ -635,15 +682,27 @@ class PICO4VRHandDetector(Component):
 
             # 处理并发布暂停状态（在手部之间共享）
             if pause_data := self._receive_data(robots.PAUSE):
-                self.publisher_manager.publish(
-                    host=self.host,
-                    port=self.pico4_pub_port,
-                    topic=robots.PAUSE,
-                    data=SessionCommand(
-                        timestamp_s=time.time(),
-                        command=robots.RESUME if pause_data == b"High" else robots.PAUSE,
-                    ),
+                pause_command = robots.RESUME if pause_data == b"High" else robots.PAUSE
+                now = time.time()
+                if now - self._last_pause_command_log_time >= 0.2:
+                    self._last_pause_command_log_time = now
+                    logger.info(
+                        "[Diag][PICO_PAUSE_RX] command=%s raw=%r port=%d",
+                        pause_command,
+                        pause_data,
+                        self.teleop_reset_port,
+                    )
+                command = SessionCommand(
+                    timestamp_s=time.time(),
+                    command=pause_command,
                 )
+                for publish_port in sorted({self.pico4_pub_port, self.teleop_state_pub_port}):
+                    self.publisher_manager.publish(
+                        host=self.host,
+                        port=publish_port,
+                        topic=robots.PAUSE,
+                        data=command,
+                    )
 
             self.timer.end_loop()
 
@@ -653,3 +712,15 @@ class PICO4VRHandDetector(Component):
             socket.close()
             logger.info(f"Closed {name} socket")
         logger.info("Stopped PICO4 VR hand detection process.")
+
+    def _log_timing_diag(self, socket_key: str, receive_time_s: float, parse_ms: float) -> None:
+        now = time.time()
+        if now - self._last_timing_log_time.get(socket_key, 0.0) < 1.0:
+            return
+        self._last_timing_log_time[socket_key] = now
+        logger.info(
+            "[Diag][TIMING_PICO] socket=%s recv_to_pub_ms=%.1f parse_ms=%.1f",
+            socket_key,
+            (now - receive_time_s) * 1000.0,
+            parse_ms,
+        )

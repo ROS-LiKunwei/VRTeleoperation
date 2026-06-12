@@ -85,9 +85,10 @@ def test_process_keypoints_accepts_unity_trailing_colon():
     detector = _detector()
     coords = "|".join(f"{i + 0.1},{i + 0.2},{i + 0.3}" for i in range(26))
 
-    values, send_timestamp = detector._process_keypoints(f"absolute:{coords}:".encode())
+    values, send_timestamp, hand_command = detector._process_keypoints(f"absolute:{coords}:".encode())
 
     assert send_timestamp is None
+    assert hand_command is None
     assert len(values) == 78
     assert values[-3:] == [25.1, 25.2, 25.3]
 

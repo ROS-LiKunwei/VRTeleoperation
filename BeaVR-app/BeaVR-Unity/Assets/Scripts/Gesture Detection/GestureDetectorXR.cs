@@ -40,7 +40,7 @@ public class GestureDetectorXR : MonoBehaviour
 
 	// PICO手腕部数据打印
 	[Header("PICO手腕部数据打印")]
-	public bool EnableWristDataLogging = true;
+	public bool EnableWristDataLogging = false;
 	private float _lastWristLogTime = 0f;
 	private const float WRIST_LOG_INTERVAL = 2.0f;
 
@@ -70,7 +70,7 @@ public class GestureDetectorXR : MonoBehaviour
 
 	// PICO 26个坐标系数据打印
     [Header("PICO 26个坐标系数据打印")]
-    public bool EnableFullJointLogging = true;
+    public bool EnableFullJointLogging = false;
     private float _lastFullJointLogTime = 0f;
     private const float FULL_JOINT_LOG_INTERVAL = 5.0f;
 
@@ -121,6 +121,27 @@ public class GestureDetectorXR : MonoBehaviour
 	// 网络
 	private NetworkManager netConfig;
 	private bool connectionAttemptInProgress = false;
+	private bool _wasConnected = false;
+
+	[Header("辅助通道发送")]
+	[Tooltip("Pause/Resolution状态不变化时的低频保活发送间隔。单位：秒。")]
+	public float ControlKeepAliveIntervalSeconds = 1.0f;
+	[Tooltip("头部手势触发后，重复强制发送Pause状态的次数，降低单帧控制命令丢失概率。")]
+	[Range(1, 10)] public int HeadGesturePauseBurstCount = 4;
+	[Tooltip("头部手势Pause重复发送间隔。单位：秒。")]
+	[Range(0.02f, 0.5f)] public float HeadGesturePauseBurstIntervalSeconds = 0.08f;
+	private string _lastPauseStateSent = null;
+	private string _lastResolutionStateSent = null;
+	private float _lastPauseStateSendTime = -999f;
+	private float _lastResolutionStateSendTime = -999f;
+	private string _pendingPauseBurstState = null;
+	private int _pendingPauseBurstRemaining = 0;
+	private float _nextPauseBurstSendTime = 0f;
+
+	[Header("Android性能保持")]
+	public bool EnableAndroidPerformanceMode = true;
+	public bool RequestIgnoreBatteryOptimizations = true;
+	private bool _batteryOptimizationRequestSent = false;
 
 	// 模式
 	bool StreamRelativeData = false;
@@ -174,6 +195,8 @@ public class GestureDetectorXR : MonoBehaviour
     /// </summary>
     void Start()
     {
+		EnableForegroundPerformanceMode();
+
 		// 网络配置
 		GameObject netConfGameObject = GameObject.Find("NetworkConfigsLoader");
 		if (netConfGameObject != null)
@@ -297,6 +320,7 @@ public class GestureDetectorXR : MonoBehaviour
 		bool isConnected = NetMQController.Instance.AreSocketsConnected();
 		if (!isConnected)
 		{
+			_wasConnected = false;
 			SetStreamBorder(StreamBorderRed);
 			string ipAddress = netConfig != null ? netConfig.netConfig.IPAddress : null;
 			bool hasIP = !string.IsNullOrEmpty(ipAddress) && ipAddress != "undefined";
@@ -316,14 +340,20 @@ public class GestureDetectorXR : MonoBehaviour
 		}
 
 		connectionAttemptInProgress = false;
+		if (!_wasConnected)
+		{
+			_wasConnected = true;
+			ForceSendAuxiliaryChannels();
+		}
 
 		// 处理手势（左手捏合）
 		if (EnablePinchStreamingControl)
 			StreamPauser();
 
-		// 发送辅助通道
+		// 辅助通道只在状态变化时立即发送，平时低频保活，避免抢占手部数据通道。
 		SendResolutionThroughController();
 		SendPauseStatusThroughController();
+		ProcessPendingPauseBurst();
 
 		// 发送手部数据
 		if (StreamAbsoluteData)
@@ -486,14 +516,28 @@ public class GestureDetectorXR : MonoBehaviour
 		float yawRange = _maxYawDeltaInWindow - _minYawDeltaInWindow;
 		bool nodTriggered = pitchRange >= threshold * 1.6f && pitchRange >= yawRange;
 		bool shakeTriggered = yawRange >= threshold * 1.4f && yawRange > pitchRange * 1.1f;
+		bool nodAlternating = UpdateAlternatingHeadGesture(
+			pitchDelta,
+			ref _nodStage,
+			ref _nodDirection,
+			ref _nodStageStartTime,
+			threshold,
+			currentTime);
+		bool shakeAlternating = UpdateAlternatingHeadGesture(
+			yawDelta,
+			ref _shakeStage,
+			ref _shakeDirection,
+			ref _shakeStageStartTime,
+			threshold,
+			currentTime);
 
-		if (shakeTriggered && yawRange >= pitchRange)
+		if ((shakeTriggered || shakeAlternating) && yawRange >= pitchRange * 0.8f)
 		{
 			_lastHeadGestureTriggerTime = currentTime;
 			ResetHeadGestureState();
 			TriggerEndFromHeadGesture();
 		}
-		else if (nodTriggered)
+		else if (nodTriggered || nodAlternating)
 		{
 			_lastHeadGestureTriggerTime = currentTime;
 			ResetHeadGestureState();
@@ -624,6 +668,8 @@ public class GestureDetectorXR : MonoBehaviour
 			StreamAbsoluteData = false;
 			ShouldContinueArmTeleop = true;
 			SetStreamBorder(StreamBorderGreen);
+			SendPauseStatusThroughController(force: true);
+			QueuePauseStatusBurst("High");
 			return;
 		}
 
@@ -634,7 +680,8 @@ public class GestureDetectorXR : MonoBehaviour
 		ResetLastSentHandFrame("RightHand");
 		ResetLastSentHandFrame("LeftHand");
 		SetStreamBorder(StreamBorderRed);
-		NetMQController.Instance.SendMessage("Pause", "Low");
+		SendPauseStatusThroughController(force: true);
+		QueuePauseStatusBurst("Low");
 	}
 
 	/// <summary>
@@ -992,7 +1039,7 @@ public class GestureDetectorXR : MonoBehaviour
 	/// <summary>
 	/// 通过控制器发送分辨率状态
 	/// </summary>
-	void SendResolutionThroughController()
+	void SendResolutionThroughController(bool force = false)
 	{
 		try
 		{
@@ -1005,7 +1052,16 @@ public class GestureDetectorXR : MonoBehaviour
 			{
 				state = "Low";
 			}
+			float currentTime = Time.time;
+			float keepAliveInterval = Mathf.Max(0.25f, ControlKeepAliveIntervalSeconds);
+			bool changed = state != _lastResolutionStateSent;
+			bool keepAliveDue = currentTime - _lastResolutionStateSendTime >= keepAliveInterval;
+			if (!force && !changed && !keepAliveDue)
+				return;
+
 			NetMQController.Instance.SendMessage("Resolution", state);
+			_lastResolutionStateSent = state;
+			_lastResolutionStateSendTime = currentTime;
 		}
 		catch (Exception e)
 		{
@@ -1016,17 +1072,69 @@ public class GestureDetectorXR : MonoBehaviour
 	/// <summary>
 	/// 通过控制器发送暂停状态
 	/// </summary>
-	void SendPauseStatusThroughController()
+	void SendPauseStatusThroughController(bool force = false)
 	{
 		try
 		{
 			string pauseState = ShouldContinueArmTeleop ? "High" : "Low";
-			NetMQController.Instance.SendMessage("Pause", pauseState);
+			SendPauseStateThroughController(pauseState, force);
 		}
 		catch (Exception e)
 		{
 			Debug.LogError("发送暂停状态错误: " + e.Message);
 		}
+	}
+
+	bool SendPauseStateThroughController(string pauseState, bool force = false)
+	{
+		try
+		{
+			float currentTime = Time.time;
+			float keepAliveInterval = Mathf.Max(0.25f, ControlKeepAliveIntervalSeconds);
+			bool changed = pauseState != _lastPauseStateSent;
+			bool keepAliveDue = currentTime - _lastPauseStateSendTime >= keepAliveInterval;
+			if (!force && !changed && !keepAliveDue)
+				return false;
+
+			bool sent = NetMQController.Instance.SendMessage("Pause", pauseState);
+			if (sent)
+			{
+				_lastPauseStateSent = pauseState;
+				_lastPauseStateSendTime = currentTime;
+				Debug.Log($"头部/控制暂停状态已发送: {pauseState}");
+			}
+			return sent;
+		}
+		catch (Exception e)
+		{
+			Debug.LogError("发送暂停状态错误: " + e.Message);
+			return false;
+		}
+	}
+
+	void QueuePauseStatusBurst(string pauseState)
+	{
+		_pendingPauseBurstState = pauseState;
+		_pendingPauseBurstRemaining = Mathf.Max(0, HeadGesturePauseBurstCount - 1);
+		_nextPauseBurstSendTime = Time.time + Mathf.Max(0.02f, HeadGesturePauseBurstIntervalSeconds);
+	}
+
+	void ProcessPendingPauseBurst()
+	{
+		if (_pendingPauseBurstRemaining <= 0 || string.IsNullOrEmpty(_pendingPauseBurstState))
+			return;
+		if (Time.time < _nextPauseBurstSendTime)
+			return;
+
+		SendPauseStateThroughController(_pendingPauseBurstState, force: true);
+		_pendingPauseBurstRemaining--;
+		_nextPauseBurstSendTime = Time.time + Mathf.Max(0.02f, HeadGesturePauseBurstIntervalSeconds);
+	}
+
+	void ForceSendAuxiliaryChannels()
+	{
+		SendResolutionThroughController(force: true);
+		SendPauseStatusThroughController(force: true);
 	}
 
 	/// <summary>
@@ -1089,6 +1197,8 @@ public class GestureDetectorXR : MonoBehaviour
 	{
 		try
 		{
+			EnableForegroundPerformanceMode();
+
 			string normalized = (mode ?? "relative").ToLowerInvariant();
 			StreamResolution = false;
 			if (normalized == "absolute")
@@ -1105,6 +1215,7 @@ public class GestureDetectorXR : MonoBehaviour
 			}
 			ToggleMenuButton(false);
 			ShouldContinueArmTeleop = true;
+			SendPauseStatusThroughController(force: true);
 		}
 		catch (Exception e)
 		{
@@ -1127,7 +1238,7 @@ public class GestureDetectorXR : MonoBehaviour
 			ResetLastSentHandFrame("LeftHand");
 			SetStreamBorder(StreamBorderRed);
 			ToggleMenuButton(true);
-			NetMQController.Instance.SendMessage("Pause", "Low");
+			SendPauseStatusThroughController(force: true);
 		}
 		catch (Exception e)
 		{
@@ -1160,11 +1271,37 @@ public class GestureDetectorXR : MonoBehaviour
 		}
 	}
 
+	private void EnableForegroundPerformanceMode()
+	{
+		if (!EnableAndroidPerformanceMode)
+			return;
+
+		AndroidPerformanceMode.Acquire();
+		if (RequestIgnoreBatteryOptimizations && !_batteryOptimizationRequestSent)
+		{
+			_batteryOptimizationRequestSent = true;
+			AndroidPerformanceMode.RequestIgnoreBatteryOptimizationsOnce();
+		}
+	}
+
+	void OnApplicationPause(bool pauseStatus)
+	{
+		if (pauseStatus)
+		{
+			AndroidPerformanceMode.Release();
+		}
+		else
+		{
+			EnableForegroundPerformanceMode();
+		}
+	}
+
 	/// <summary>
 	/// 应用程序退出时调用
 	/// </summary>
 	void OnApplicationQuit()
 	{
+		AndroidPerformanceMode.Release();
 	}
 
 	/// <summary>
@@ -1172,5 +1309,6 @@ public class GestureDetectorXR : MonoBehaviour
 	/// </summary>
 	void OnDestroy()
 	{
+		AndroidPerformanceMode.Release();
 	}
 }
