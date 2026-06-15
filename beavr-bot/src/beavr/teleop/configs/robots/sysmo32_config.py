@@ -180,6 +180,14 @@ class Sysmo32RealControlCfg:
             ik_pos_tol_m=1e-3,
             ik_ori_tol_rad=2e-2,
             ik_profile_log_period_s=1.0,
+            # minimum snap configuration
+            enable_arm_min_snap=True,
+            arm_min_snap_segment_time=0.18,
+            arm_min_snap_min_duration=0.06,
+            arm_min_snap_replan_threshold_rad=0.0005,
+            arm_min_snap_max_velocity_rad_s=3.0,
+            arm_min_snap_max_acceleration_rad_s2=10.0,
+            # IK nullspace
             ik_nullspace_reference_joints_rad=(
                 0.0,
                 0.0,
@@ -197,19 +205,22 @@ class Sysmo32RealControlCfg:
         )
     )
 
-    def __post_init__(self):
+    def _apply_backend_overrides(self):
         self.config.control_backend = self.control_backend
         if self.control_backend == "mujoco":
             self.config.publish_arm_command_topic_in_mujoco = True
+            if self.config.arm_min_snap_segment_time == 0.18:
+                self.config.arm_min_snap_segment_time = 0.10
+            if self.config.arm_min_snap_min_duration == 0.06:
+                self.config.arm_min_snap_min_duration = 0.04
         if self.control_backend == "real_with_mujoco":
             self.config.allow_mujoco_mirror_without_joint_state = False
 
+    def __post_init__(self):
+        self._apply_backend_overrides()
+
     def build(self):
-        self.config.control_backend = self.control_backend
-        if self.control_backend == "mujoco":
-            self.config.publish_arm_command_topic_in_mujoco = True
-        if self.control_backend == "real_with_mujoco":
-            self.config.allow_mujoco_mirror_without_joint_state = False
+        self._apply_backend_overrides()
         return Sysmo32RealControl(
             host=self.host,
             control_backend=self.control_backend,

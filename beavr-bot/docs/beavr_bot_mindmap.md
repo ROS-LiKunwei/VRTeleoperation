@@ -58,11 +58,15 @@ mindmap
         手部运动重定向
       Robot Interface
         XArm7Robot
-        Sysmo32Robot
+        Sysmo32RealControl
+        Sysmo32CommandBuilder
+        Sysmo32CommandLimiter
+        Sysmo32MujocoKinematics
         LeapHandRobot
         接收命令并发布状态
       Simulation
         MuJoCoSysmoSimulator
+        Sysmo32MujocoCommandMirror
         URDF 加载
         endeff site
         Jacobian IK
@@ -109,6 +113,10 @@ mindmap
     LeRobot
       Dataset
         lerobot_dataset.py
+        AsyncImageWriter
+        deferred episode finalization
+        v2.1 incremental write
+        v3.0 final conversion
         compute_stats.py
         sampler.py
       Policies
@@ -195,12 +203,47 @@ sequenceDiagram
 
 ```mermaid
 flowchart LR
-  A[PICO4 Unity<br/>GestureDetectorXR.cs] -->|ZMQ PUSH<br/>8087/8110| B[pico4.py<br/>PICO4VRHandDetector]
-  B -->|InputFrame<br/>PUB 8088| C[keypoint_transform.py<br/>TransformHandPositionCoords]
-  C -->|transformed frame<br/>8092/8093| D[sysmo32_operator.py<br/>Sysmo32Operator]
-  D -->|CartesianTarget<br/>10011/10013| E[sysmo32_robot.py<br/>Sysmo32Robot]
-  D -->|CartesianTarget<br/>10011/10013| F[mujoco_sim.py<br/>MuJoCoSysmoSimulator]
-  E -->|state<br/>10012/10014| D
+  PICO[PICO4 Unity<br/>GestureDetectorXR.cs<br/>60Hz hand tracking] -->|ZMQ PUSH<br/>right 8087 / left 8110| Detector[pico4.py<br/>PICO4VRHandDetector]
+  Detector -->|InputFrame<br/>PUB 8088<br/>right / left / button / pause| Transform[keypoint_transform.py<br/>TransformHandPositionCoords]
+  Transform -->|right transformed frame<br/>8092| OpR[sysmo32_operator.py<br/>Sysmo32Operator right]
+  Transform -->|left transformed frame<br/>8093| OpL[sysmo32_operator.py<br/>Sysmo32Operator left]
+
+  OpR -->|CartesianTarget<br/>10011| Real[sysmo32_real_control.py<br/>Sysmo32RealControl]
+  OpL -->|CartesianTarget<br/>10013| Real
+  Real -->|current EE/state<br/>10012 / 10014| OpR
+  Real -->|current EE/state<br/>10012 / 10014| OpL
+
+  Real -->|IK seed from /joint_states<br/>nullspace posture bias<br/>joint/cartesian limit| IK[sysmo32_kinematics.py<br/>Sysmo32MujocoKinematics]
+  IK -->|12 arm joints + hands<br/>18-field command| ROS[ROS2 / hardware board<br/>/sysmo_*_arm_controller/commands]
+  Real -->|command mirror<br/>arm + hand action| Mirror[sysmo32_mujoco_command_sim.py<br/>Sysmo32MujocoCommandMirror]
+  Mirror -->|MuJoCo visualization / dry run| MuJoCo[MuJoCo sysmo32.urdf]
+
+  Real -->|LeRobot state topics<br/>joint/cartesian/command state| Recorder[control_robot.py<br/>sysmo32_adapter recorder]
+```
+
+## LeRobot 录制链路
+
+```mermaid
+flowchart TB
+  Teleop[外部 teleop 栈<br/>PICO4 -> Transform -> Operator -> RealControl] --> State[Sysmo32RealControl<br/>发布 state/action cache]
+  Cam[OpenCV camera<br/>640x480 @ 30fps] --> Adapter[Sysmo32Adapter<br/>capture_observation]
+  State --> Adapter
+  Adapter --> Loop[control_robot.py record loop<br/>fps=30]
+
+  Loop -->|add_frame| Buffer[LeRobotDataset episode_buffer]
+  Buffer -->|PNG 临时帧<br/>compress_level=1| ImageWriter[AsyncImageWriter<br/>thread/process queue]
+  Loop -->|save_episode| Parquet[data/chunk-xxx<br/>episode_xxxxxx.parquet]
+  Loop -->|save metadata only| Meta[meta/info.json<br/>meta/episodes.jsonl]
+  Loop -->|defer| Pending[deferred episode finalization queue]
+
+  Pending -->|Stop recording 后统一执行| Finalize[wait_for_async_video_encoding]
+  Finalize -->|wait image writer| ImageWriter
+  Finalize -->|compute_episode_stats| Stats[meta/episodes_stats.jsonl]
+  Finalize -->|encode_video_frames<br/>SVT-AV1 mp4| Videos[videos/chunk-xxx/...mp4]
+  Finalize -->|update video info| Meta
+  Finalize -->|dataset_format=v3.0| Convert[convert_dataset_v21_to_v30]
+
+  Note[默认 manage_teleop_state=false<br/>record 进程不抢 8089 pause/resume] -.-> Loop
 ```
 
 ## 子进程启动后做什么
@@ -235,26 +278,44 @@ flowchart TB
     O1 --> O2 --> O3 --> O4 --> O5 --> O6
   end
 
-  subgraph RobotProc[Robot 进程]
+  subgraph RobotProc[RealControl 进程]
     R1[SUB CartesianTarget]
-    R2[调用控制器或 mock 控制]
-    R3[维护关节和笛卡尔状态]
-    R4[PUB robot state]
-    R1 --> R2 --> R3 --> R4
+    R2[读取 /joint_states 作为 IK seed]
+    R3[Sysmo32MujocoKinematics 逆解]
+    R4[零空间姿态偏置]
+    R5[关节/笛卡尔安全限幅]
+    R6[发布 ROS2 arm command]
+    R7[PUB LeRobot state/action cache]
+    R8[PUB command mirror]
+    R1 --> R2 --> R3 --> R4 --> R5 --> R6
+    R5 --> R7
+    R5 --> R8
   end
 
-  subgraph SimProc[MuJoCo 进程]
+  subgraph MirrorProc[MuJoCo Mirror 进程]
     S1[加载 sysmo32.urdf]
-    S2[添加 left/right endeff site]
-    S3[SUB CartesianTarget]
-    S4[Jacobian 伪逆 IK]
-    S5[驱动 MuJoCo 渲染]
+    S2[SUB 18维 arm command mirror]
+    S3[SUB hand action mirror]
+    S4[驱动 MuJoCo 关节]
+    S5[渲染/干跑验证]
     S1 --> S2 --> S3 --> S4 --> S5
+  end
+
+  subgraph RecordProc[LeRobot Record 进程]
+    L1[Sysmo32Adapter 订阅 state/action]
+    L2[OpenCV camera 640x480@30]
+    L3[episode_buffer + AsyncImageWriter]
+    L4[立即写 parquet/episode metadata]
+    L5[结束录制后 deferred finalization]
+    L6[stats + SVT-AV1 mp4 + v3.0 转换]
+    L1 --> L3
+    L2 --> L3 --> L4 --> L5 --> L6
   end
 
   DetectorProc --> TransformProc --> OperatorProc
   OperatorProc --> RobotProc
-  OperatorProc --> SimProc
+  RobotProc --> MirrorProc
+  RobotProc --> RecordProc
 ```
 
 ## 初始化关键点

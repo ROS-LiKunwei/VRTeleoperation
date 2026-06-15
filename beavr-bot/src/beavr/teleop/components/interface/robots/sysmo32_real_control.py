@@ -37,6 +37,10 @@ from beavr.teleop.components.interface.robots.sysmo32_command import (
     quaternion_angle_delta_rad,
 )
 from beavr.teleop.components.interface.robots.sysmo32_kinematics import Sysmo32MujocoKinematics
+from beavr.teleop.components.interface.robots.sysmo32_trajectory import (
+    Sysmo32ArmTrajectoryConfig,
+    Sysmo32ArmTrajectorySmoother,
+)
 from beavr.teleop.components.operator.operator_types import CartesianTarget
 from beavr.teleop.configs.constants import ports, robots
 
@@ -94,6 +98,12 @@ class Sysmo32RealControlConfig:
     ik_pos_tol_m: float = 1e-3
     ik_ori_tol_rad: float = 2e-2
     ik_profile_log_period_s: float = 1.0
+    enable_arm_min_snap: bool = True
+    arm_min_snap_segment_time: float = 0.18
+    arm_min_snap_min_duration: float = 0.06
+    arm_min_snap_replan_threshold_rad: float = 0.0005
+    arm_min_snap_max_velocity_rad_s: float = 0.5
+    arm_min_snap_max_acceleration_rad_s2: float = 0.5
 
     def __post_init__(self):
         self.ik_nullspace_gain = max(0.0, float(self.ik_nullspace_gain))
@@ -104,6 +114,15 @@ class Sysmo32RealControlConfig:
         self.ik_pos_tol_m = max(0.0, float(self.ik_pos_tol_m))
         self.ik_ori_tol_rad = max(0.0, float(self.ik_ori_tol_rad))
         self.ik_profile_log_period_s = max(0.0, float(self.ik_profile_log_period_s))
+        self.arm_min_snap_segment_time = max(0.0, float(self.arm_min_snap_segment_time))
+        self.arm_min_snap_min_duration = max(1e-4, float(self.arm_min_snap_min_duration))
+        self.arm_min_snap_replan_threshold_rad = max(
+            0.0, float(self.arm_min_snap_replan_threshold_rad)
+        )
+        self.arm_min_snap_max_velocity_rad_s = max(1e-6, float(self.arm_min_snap_max_velocity_rad_s))
+        self.arm_min_snap_max_acceleration_rad_s2 = max(
+            1e-6, float(self.arm_min_snap_max_acceleration_rad_s2)
+        )
         if self.ik_nullspace_reference_joints_rad is not None:
             reference = np.asarray(self.ik_nullspace_reference_joints_rad, dtype=np.float64)
             if reference.shape != (12,) or not np.all(np.isfinite(reference)):
@@ -315,6 +334,14 @@ class Sysmo32RealControl(Component):
         self._builder = Sysmo32CommandBuilder(self.config.arm)
         self._limiter = Sysmo32CommandLimiter(self.config.arm)
         self._mujoco_limiter = Sysmo32CommandLimiter(self._make_mujoco_arm_safety_config())
+        self._left_arm_smoother = Sysmo32ArmTrajectorySmoother(
+            self._make_arm_trajectory_config(robots.LEFT),
+            name="left",
+        )
+        self._right_arm_smoother = Sysmo32ArmTrajectorySmoother(
+            self._make_arm_trajectory_config(robots.RIGHT),
+            name="right",
+        )
         self._hand_mapper = Sysmo32HandGestureMapper(
             default_action=self.config.hand.default_action,
             grasp_action=self.config.hand.grasp_action,
@@ -351,6 +378,7 @@ class Sysmo32RealControl(Component):
         self.enable_arm_command_value_debug = False
         self._last_arm_publish_time = 0.0
         self._last_real_timing_log_time = 0.0
+        self._last_published_arm_command: Optional[Sysmo32ArmCommand] = None
 
     def _configure_ik_nullspace(self) -> None:
         if not hasattr(self._kinematics, "configure_nullspace"):
@@ -393,6 +421,42 @@ class Sysmo32RealControl(Component):
             for v in self.config.arm.max_joint_velocity_rad_s
         )
         return replace(self.config.arm, max_joint_velocity_rad_s=mirror_velocity)
+
+    def _make_arm_trajectory_config(self, hand_side: str) -> Sysmo32ArmTrajectoryConfig:
+        offset = 0 if hand_side == robots.LEFT else 6
+        return Sysmo32ArmTrajectoryConfig(
+            enabled=self.config.enable_arm_min_snap,
+            segment_time_s=self.config.arm_min_snap_segment_time,
+            min_duration_s=self.config.arm_min_snap_min_duration,
+            replan_threshold_rad=self.config.arm_min_snap_replan_threshold_rad,
+            max_joint_velocity_rad_s=tuple(
+                [float(self.config.arm_min_snap_max_velocity_rad_s)] * 6
+            ),
+            max_joint_acceleration_rad_s2=tuple(
+                [float(self.config.arm_min_snap_max_acceleration_rad_s2)] * 6
+            ),
+            joint_lower_limits_rad=tuple(
+                float(v) for v in self.config.arm.joint_lower_limits_rad[offset : offset + 6]
+            ),
+            joint_upper_limits_rad=tuple(
+                float(v) for v in self.config.arm.joint_upper_limits_rad[offset : offset + 6]
+            ),
+        )
+
+    def _reset_arm_smoothers(self, current_joints_rad: Optional[Sequence[float]] = None) -> None:
+        if not hasattr(self, "_left_arm_smoother") or not hasattr(self, "_right_arm_smoother"):
+            return
+        if current_joints_rad is None:
+            self._left_arm_smoother.reset()
+            self._right_arm_smoother.reset()
+            return
+        joints = np.asarray(current_joints_rad, dtype=np.float64)
+        if joints.shape != (12,) or not np.all(np.isfinite(joints)):
+            self._left_arm_smoother.reset()
+            self._right_arm_smoother.reset()
+            return
+        self._left_arm_smoother.reset(joints[:6])
+        self._right_arm_smoother.reset(joints[6:])
 
     def stream(self):
         logger.info("Starting SYSMO-32 real-interface controller backend=%s", self.control_backend)
@@ -463,6 +527,7 @@ class Sysmo32RealControl(Component):
         if snapshot is not None:
             self._limiter.reset(snapshot.all_joints)
             self._mujoco_limiter.reset(snapshot.all_joints)
+            self._reset_arm_smoothers(snapshot.all_joints)
             if self.config.safety_hold_arm_on_pause:
                 self._pause_hold_command = self._builder.build(
                     snapshot.left_arm,
@@ -614,6 +679,7 @@ class Sysmo32RealControl(Component):
         self._real_reset_ready = real_joint_state_fresh
         self._limiter.reset(snapshot.all_joints)
         self._mujoco_limiter.reset(snapshot.all_joints)
+        self._reset_arm_smoothers(snapshot.all_joints)
         logger.info("SYSMO-32 reset pose published for %s on port %d", hand_side, publish_port)
 
     def _receive_cartesian_targets(self) -> None:
@@ -713,6 +779,16 @@ class Sysmo32RealControl(Component):
                 ],
                 "timestamp_s": getattr(target, "timestamp_s", publish_time_s),
             }
+        if self._last_published_arm_command is not None:
+            command_joints = (
+                self._last_published_arm_command.left_arm
+                if hand_side == robots.LEFT
+                else self._last_published_arm_command.right_arm
+            )
+            state["commanded_joint_states"] = {
+                "joint_position": [float(value) for value in command_joints],
+                "timestamp_s": self._last_published_arm_command.timestamp_s,
+            }
 
         self._publisher_manager.publish(
             host=self.host,
@@ -760,6 +836,7 @@ class Sysmo32RealControl(Component):
                     f"{hand_side} arm held: CartesianTarget stale",
                 )
                 self._latest_targets[hand_side] = None
+                self._reset_arm_smoothers(current)
                 continue
             target = self._sanitize_cartesian_target(hand_side, target)
             if target is None:
@@ -799,6 +876,11 @@ class Sysmo32RealControl(Component):
         if limited is None:
             self._warn_safety("command_limited_reject", f"arm command rejected: {reason}")
             return
+        limited = self._smooth_limited_arm_command(
+            limited,
+            current,
+            limiter=limiter,
+        )
         build_limit_ms = (time.perf_counter() - build_limit_start_s) * 1000.0
         publish_start_s = time.perf_counter()
         if not self._publish_arm_command_outputs(
@@ -811,7 +893,7 @@ class Sysmo32RealControl(Component):
 
         suffix = f" ({reason})" if reason else ""
         mode_suffix = " mirror_only" if mirror_only else ""
-        self._log_arm_publish_diag()
+        self._log_arm_publish_diag(limited, current)
         self._log_real_timing_diag(
             timing_entries,
             build_limit_ms,
@@ -861,7 +943,11 @@ class Sysmo32RealControl(Component):
             limit_reason or "none",
         )
 
-    def _log_arm_publish_diag(self) -> None:
+    def _log_arm_publish_diag(
+        self,
+        command: Optional[Sysmo32ArmCommand] = None,
+        current_joints_rad: Optional[Sequence[float]] = None,
+    ) -> None:
         now = time.time()
         if self._last_arm_publish_time > 0.0:
             gap_s = now - self._last_arm_publish_time
@@ -883,6 +969,20 @@ class Sysmo32RealControl(Component):
                 self._arm_publish_count / window_s,
                 self._arm_publish_count,
             )
+            if command is not None and current_joints_rad is not None:
+                current = np.asarray(current_joints_rad, dtype=np.float64)
+                commanded = np.asarray(command.values[:12], dtype=np.float64)
+                if current.shape == (12,) and commanded.shape == (12,):
+                    error = commanded - current
+                    logger.info(
+                        "[Diag][REAL_ARM_COMMAND_DELTA] max_abs_error_rad=%.4f "
+                        "command_range_rad=(%.4f,%.4f) current_range_rad=(%.4f,%.4f)",
+                        float(np.max(np.abs(error))),
+                        float(np.min(commanded)),
+                        float(np.max(commanded)),
+                        float(np.min(current)),
+                        float(np.max(current)),
+                    )
             self._arm_publish_count = 0
             self._last_arm_rate_log_time = now
 
@@ -932,7 +1032,29 @@ class Sysmo32RealControl(Component):
         if self.control_backend in ("mujoco", "real_with_mujoco"):
             self._dry_joint_cache.update(command.left_arm, command.right_arm, now_s=command.timestamp_s)
 
+        self._last_published_arm_command = command
         return True
+
+    def _smooth_limited_arm_command(
+        self,
+        command: Sysmo32ArmCommand,
+        current_joints_rad: Sequence[float],
+        limiter: Sysmo32CommandLimiter,
+    ) -> Sysmo32ArmCommand:
+        current = np.asarray(current_joints_rad, dtype=np.float64)
+        if current.shape != (12,) or not np.all(np.isfinite(current)):
+            self._reset_arm_smoothers()
+            return command
+
+        now_s = command.timestamp_s
+        left_smooth = self._left_arm_smoother.sample(command.left_arm, current[:6], now_s=now_s)
+        right_smooth = self._right_arm_smoother.sample(command.right_arm, current[6:], now_s=now_s)
+        smoothed = self._builder.build(left_smooth, right_smooth, timestamp_s=now_s)
+
+        # Keep the downstream jump/velocity limiter state aligned with the command
+        # that is actually sent to ROS2/MuJoCo/LeRobot.
+        limiter.reset(smoothed.values[:12])
+        return smoothed
 
     def _current_joint_snapshot(self) -> Optional[Sysmo32JointStateSnapshot]:
         # 真实模式：通过 _ros2.joint_cache 获取关节状态（来自 ROS2）;
