@@ -584,10 +584,9 @@ def reset_environment(robot, events, reset_time_s, fps):
        :class:`~beavr.interfaces.xarm7_robot.XArm7Robot`) receives this
        message, calls ``home_arm()`` and idles until further commands arrive.
 
-    2. Call :pyfunc:`control_loop` with *teleoperate=False* so that the
-       high-level control pipeline does **not** forward any operator-driven
-       commands during the reset phase.  This guarantees that the robots stay
-       in their neutral pose until the next recording episode starts.
+    2. Wait for *reset_time_s* while polling keyboard events.  The high-level
+       control pipeline is deliberately not run during this phase, so camera or
+       state reads cannot block the operator from skipping reset.
     """
     if has_method(robot, "teleop_stop"):
         robot.teleop_stop()
@@ -597,18 +596,24 @@ def reset_environment(robot, events, reset_time_s, fps):
     # still set exit_early again and move to the next episode immediately.
     events["exit_early"] = False
 
-    # During environment reset we explicitly *disable* teleoperation so that
-    # any operator-driven commands (e.g. from a VR controller) do not
-    # interfere with the homing motion issued above.  Teleoperation will be
-    # re-enabled automatically at the start of the next episode recording
-    # cycle.
-    control_loop(
-        robot=robot,
-        control_time_s=reset_time_s,
-        events=events,
-        fps=fps,
-        teleoperate=False,
-    )
+    # During environment reset we only need to keep teleoperation paused and
+    # wait for the operator. Do not call capture_observation() here: camera or
+    # state reads can block after video encoding, which would also prevent the
+    # keyboard listener from skipping the reset with the right arrow key.
+    start_t = time.perf_counter()
+    target_dt = 1.0 / fps if fps else 0.02
+    while time.perf_counter() - start_t < reset_time_s:
+        if events.get("rerecord_episode", False):
+            # Left-arrow rerecord only makes sense while an episode is being
+            # recorded. During reset, treat it as a reset skip and prevent the
+            # stale rerecord request from poisoning the next episode.
+            events["rerecord_episode"] = False
+            events["exit_early"] = False
+            break
+        if events.get("exit_early", False) or events.get("stop_recording", False):
+            events["exit_early"] = False
+            break
+        time.sleep(max(0.001, target_dt))
 
 
 def stop_recording(robot, listener, display_data):

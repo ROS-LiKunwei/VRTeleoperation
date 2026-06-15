@@ -36,7 +36,7 @@ class Robot:
         # Add these attributes to the Robot class
         self._max_step_distance = 50.0  # Maximum allowed movement in mm
         self._last_command_time = 0  # Fix for the attribute error
-        self._command_interval = 1.0 / robots.VR_FREQ  # Use VR_FREQ constant (50Hz = 0.02s)
+        self._command_interval = 1.0 / robots.VR_FREQ
 
         # Add performance metrics
         self._metrics = {

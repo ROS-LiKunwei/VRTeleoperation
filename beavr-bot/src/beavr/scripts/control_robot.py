@@ -352,6 +352,7 @@ def record(
     try:
         if hasattr(robot, "manage_teleop_state"):
             robot.manage_teleop_state = cfg.manage_teleop_state
+            logging.info("Recorder teleop-state management: %s", cfg.manage_teleop_state)
 
         # TODO: Add option to record logs
         # 处理数据集初始化：如果是断点续录(resume)，则加载已有数据集；否则新建。
@@ -378,6 +379,8 @@ def record(
                 image_writer_processes=cfg.num_image_writer_processes,
                 image_writer_threads=cfg.num_image_writer_threads_per_camera * len(robot.cameras),
             )
+        if cfg.video:
+            dataset.set_async_video_encoding(cfg.async_video_encoding)
 
         # 如果配置了策略（Policy），则实例化 AI 模型。如果是人类录制，这里为 None。
         policy = None if cfg.policy is None else make_policy(cfg.policy, ds_meta=dataset.meta)
@@ -406,8 +409,16 @@ def record(
             if recorded_episodes >= cfg.num_episodes:
                 break
 
+            loop_start_t = time.perf_counter()
+            logging.info(
+                "[RecordTiming] episode_loop_start dataset_episode=%s recorded_episodes=%s pending_finalizations=%s",
+                dataset.num_episodes,
+                recorded_episodes,
+                len(getattr(dataset, "_pending_episode_finalizations", [])),
+            )
             log_say(f"Recording episode {dataset.num_episodes}", cfg.play_sounds)
             # 执行单个片段(episode)的录制
+            record_start_t = time.perf_counter()
             record_episode(
                 robot=robot,
                 dataset=dataset,
@@ -418,6 +429,17 @@ def record(
                 fps=cfg.fps,
                 single_task=cfg.single_task,
             )
+            logging.info(
+                "[RecordTiming] record_episode_done dataset_episode=%s dt=%.3fs buffer_size=%s events=%s",
+                dataset.num_episodes,
+                time.perf_counter() - record_start_t,
+                _episode_buffer_size(dataset),
+                {k: events.get(k) for k in ["exit_early", "rerecord_episode", "stop_recording"]},
+            )
+            if events["stop_recording"]:
+                if events["rerecord_episode"] or _episode_buffer_size(dataset) == 0:
+                    dataset.clear_episode_buffer()
+                    break
             # 键盘事件：用户按下要求重新录制当前片段
             if events["rerecord_episode"]:
                 if not events["stop_recording"]:
@@ -442,7 +464,14 @@ def record(
                     reset_environment(robot, events, cfg.reset_time_s, cfg.fps)
                 continue
             # 保存有效片段
+            save_start_t = time.perf_counter()
             dataset.save_episode()
+            logging.info(
+                "[RecordTiming] save_episode_done saved_episode=%s dt=%.3fs pending_finalizations=%s",
+                dataset.num_episodes - 1,
+                time.perf_counter() - save_start_t,
+                len(getattr(dataset, "_pending_episode_finalizations", [])),
+            )
             recorded_episodes += 1
 
             if events["stop_recording"]:
@@ -453,10 +482,18 @@ def record(
             # 每个片段录制完后，留出时间让操作员把物体和机器人放回初始位置
             if recorded_episodes < cfg.num_episodes:
                 log_say("Reset the environment", cfg.play_sounds)
+                reset_start_t = time.perf_counter()
                 reset_environment(robot, events, cfg.reset_time_s, cfg.fps)
+                logging.info(
+                    "[RecordTiming] reset_done dt=%.3fs events=%s total_loop_dt=%.3fs",
+                    time.perf_counter() - reset_start_t,
+                    {k: events.get(k) for k in ["exit_early", "rerecord_episode", "stop_recording"]},
+                    time.perf_counter() - loop_start_t,
+                )
         # 录制结束，清理键盘监听
         log_say("Stop recording", cfg.play_sounds, blocking=True)
         stop_recording(robot, listener, cfg.display_data)
+        dataset.wait_for_async_video_encoding(shutdown=True)
         # 处理数据集格式转换
         if cfg.dataset_format == "v3.0":
             convert_dataset_v21_to_v30(dataset.root)

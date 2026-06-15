@@ -27,12 +27,15 @@ from beavr.teleop.components.interface.robots.sysmo32_real_control import (
 )
 from beavr.teleop.components.interface.robots.sysmo32_kinematics import (
     SYSMO32_LEFT_ELBOW_INDEX,
+    SYSMO32_LEFT_WRIST_YAW_INDEX,
     SYSMO32_RIGHT_ELBOW_INDEX,
+    SYSMO32_RIGHT_WRIST_YAW_INDEX,
     Sysmo32MujocoKinematics,
     _damped_least_squares_delta,
     _default_nullspace_reference_joints,
     _elbow_sign_satisfied,
     _select_elbow_preferred_result,
+    _wrist_yaw_reference_error,
 )
 from beavr.teleop.components.operator.operator_types import CartesianTarget
 from beavr.teleop.components.simulation.sysmo32_mujoco_command_sim import (
@@ -120,8 +123,12 @@ def test_sysmo32_default_nullspace_reference_uses_human_elbow_signs():
 
     assert reference[SYSMO32_LEFT_ELBOW_INDEX] < 0.0
     assert reference[SYSMO32_RIGHT_ELBOW_INDEX] > 0.0
+    assert reference[SYSMO32_LEFT_WRIST_YAW_INDEX] == 0.0
+    assert reference[SYSMO32_RIGHT_WRIST_YAW_INDEX] == 0.0
     assert _elbow_sign_satisfied(robots.LEFT, reference[:6])
     assert _elbow_sign_satisfied(robots.RIGHT, reference[6:12])
+    assert _wrist_yaw_reference_error(robots.LEFT, reference[:6], reference[:6]) == 0.0
+    assert _wrist_yaw_reference_error(robots.RIGHT, reference[6:12], reference[6:12]) == 0.0
 
 
 def test_sysmo32_nullspace_config_keeps_human_elbow_signs_for_zero_reference():
@@ -134,6 +141,41 @@ def test_sysmo32_nullspace_config_keeps_human_elbow_signs_for_zero_reference():
 
     assert kinematics._nullspace_reference_joints[SYSMO32_LEFT_ELBOW_INDEX] < 0.0
     assert kinematics._nullspace_reference_joints[SYSMO32_RIGHT_ELBOW_INDEX] > 0.0
+
+
+def test_sysmo32_nullspace_weights_pull_wrist_yaw_harder():
+    jacobian = np.array(
+        [
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ],
+        dtype=np.float64,
+    )
+    current_qpos = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+    reference_qpos = np.zeros(3, dtype=np.float64)
+
+    unweighted = _damped_least_squares_delta(
+        jacobian,
+        np.zeros(2, dtype=np.float64),
+        current_qpos,
+        reference_qpos,
+        damping=1e-6,
+        nullspace_gain=0.1,
+        nullspace_step_limit_rad=1.0,
+    )
+    weighted = _damped_least_squares_delta(
+        jacobian,
+        np.zeros(2, dtype=np.float64),
+        current_qpos,
+        reference_qpos,
+        damping=1e-6,
+        nullspace_gain=0.1,
+        nullspace_step_limit_rad=1.0,
+        nullspace_weights=np.array([1.0, 1.0, 4.0], dtype=np.float64),
+    )
+
+    assert weighted[2] < unweighted[2]
+    np.testing.assert_allclose(weighted[:2], np.zeros(2), atol=1e-8)
 
 
 def test_sysmo32_elbow_preference_does_not_override_large_task_error():

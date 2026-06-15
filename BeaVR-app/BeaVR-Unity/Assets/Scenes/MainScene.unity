@@ -1639,6 +1639,9 @@ MonoBehaviour:
   ControlKeepAliveIntervalSeconds: 1
   HeadGesturePauseBurstCount: 4
   HeadGesturePauseBurstIntervalSeconds: 0.08
+  EnableAndroidPerformanceMode: 1
+  RequestIgnoreBatteryOptimizations: 1
+  TargetApplicationFrameRate: 60
   EnablePinchStreamingControl: 0
 --- !u!1 &248164262
 GameObject:

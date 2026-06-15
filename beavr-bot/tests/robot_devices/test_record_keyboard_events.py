@@ -53,19 +53,57 @@ def test_escape_stops_recording():
 def test_reset_environment_clears_stale_exit_event(monkeypatch):
     events = _events()
     events["exit_early"] = True
-    seen_events = {}
 
     class RobotWithoutTeleopStop:
         pass
 
-    def fake_control_loop(*, events, **kwargs):
-        seen_events["exit_early_at_reset_start"] = events["exit_early"]
+    reset_environment(RobotWithoutTeleopStop(), events, reset_time_s=0.0, fps=30)
+
+    assert events["exit_early"] is False
+
+
+def test_reset_environment_ignores_rerecord_event(monkeypatch):
+    events = _events()
+    events["rerecord_episode"] = True
+    events["exit_early"] = True
+
+    class RobotWithoutTeleopStop:
+        pass
+
+    reset_environment(RobotWithoutTeleopStop(), events, reset_time_s=1.0, fps=30)
+
+    assert events["rerecord_episode"] is False
+    assert events["exit_early"] is False
+
+
+def test_reset_environment_is_skippable_without_observation_capture(monkeypatch):
+    events = _events()
+    clock = {"t": 0.0}
+
+    class Robot:
+        teleop_stop_called = False
+
+        def teleop_stop(self):
+            self.teleop_stop_called = True
+
+        def capture_observation(self):
+            raise AssertionError("reset_environment must not capture observations")
+
+    def fake_sleep(_duration):
+        events["exit_early"] = True
+        clock["t"] += 0.001
 
     monkeypatch.setattr(
-        "beavr.lerobot.common.robot_devices.control_utils.control_loop",
-        fake_control_loop,
+        "beavr.lerobot.common.robot_devices.control_utils.time.perf_counter",
+        lambda: clock["t"],
+    )
+    monkeypatch.setattr(
+        "beavr.lerobot.common.robot_devices.control_utils.time.sleep",
+        fake_sleep,
     )
 
-    reset_environment(RobotWithoutTeleopStop(), events, reset_time_s=5, fps=30)
+    robot = Robot()
+    reset_environment(robot, events, reset_time_s=10.0, fps=30)
 
-    assert seen_events["exit_early_at_reset_start"] is False
+    assert robot.teleop_stop_called is True
+    assert events["exit_early"] is False

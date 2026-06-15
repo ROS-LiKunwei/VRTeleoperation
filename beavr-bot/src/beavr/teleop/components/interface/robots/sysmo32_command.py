@@ -106,10 +106,10 @@ class Sysmo32ArmSafetyConfig:
     neck_joint: float = 0.0
     joint_lower_limits_rad: Tuple[float, ...] = field(default_factory=lambda: tuple([-3.14] * 12))
     joint_upper_limits_rad: Tuple[float, ...] = field(default_factory=lambda: tuple([3.14] * 12))
-    max_joint_velocity_rad_s: Tuple[float, ...] = field(default_factory=lambda: tuple([1.6] * 12))
-    max_joint_jump_rad: float = 0.2  # 最大跳转角度，单个控制周期内的最大角度变化
-    max_translation_step_m: float = 0.04
-    max_rotation_step_rad: float = 0.12
+    max_joint_velocity_rad_s: Tuple[float, ...] = field(default_factory=lambda: tuple([3.0] * 12))
+    max_joint_jump_rad: float = 0.35  # 最大跳转角度，单个控制周期内的最大角度变化
+    max_translation_step_m: float = 0.08
+    max_rotation_step_rad: float = 0.24
     workspace_limits: Dict[str, Tuple[float, float]] = field(
         default_factory=lambda: {
             "x": (-1.0, 1.0),

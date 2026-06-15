@@ -16,6 +16,7 @@
 import contextlib
 import logging
 import shutil
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable
 
@@ -253,7 +254,8 @@ class LeRobotDatasetMetadata:
         episode_index: int,
         episode_length: int,
         episode_tasks: list[str],
-        episode_stats: dict[str, dict],
+        episode_stats: dict[str, dict] | None,
+        update_video_info: bool = True,
     ) -> None:
         self.info["total_episodes"] += 1
         self.info["total_frames"] += episode_length
@@ -264,7 +266,7 @@ class LeRobotDatasetMetadata:
 
         self.info["splits"] = {"train": f"0:{self.info['total_episodes']}"}
         self.info["total_videos"] += len(self.video_keys)
-        if len(self.video_keys) > 0:
+        if update_video_info and len(self.video_keys) > 0:
             self.update_video_info()
 
         write_info(self.info, self.root)
@@ -277,6 +279,10 @@ class LeRobotDatasetMetadata:
         self.episodes[episode_index] = episode_dict
         write_episode(episode_dict, self.root)
 
+        if episode_stats is not None:
+            self.save_episode_stats(episode_index, episode_stats)
+
+    def save_episode_stats(self, episode_index: int, episode_stats: dict[str, dict]) -> None:
         self.episodes_stats[episode_index] = episode_stats
         self.stats = aggregate_stats([self.stats, episode_stats]) if self.stats else episode_stats
         write_episode_stats(episode_index, episode_stats, self.root)
@@ -483,6 +489,10 @@ class LeRobotDataset(torch.utils.data.Dataset):
         # Unused attributes
         self.image_writer = None
         self.episode_buffer = None
+        self._async_video_encoding = False
+        self._video_encoder: ThreadPoolExecutor | None = None
+        self._video_encoding_futures: list[Future] = []
+        self._pending_episode_finalizations: list[tuple[int, dict]] = []
 
         self.root.mkdir(exist_ok=True, parents=True)
 
@@ -879,17 +889,33 @@ class LeRobotDataset(torch.utils.data.Dataset):
                 continue
             episode_buffer[key] = np.stack(episode_buffer[key])
 
-        self._wait_image_writer()
+        encode_videos_async = self._async_video_encoding and len(self.meta.video_keys) > 0
+        if not encode_videos_async:
+            self._wait_image_writer()
+
         self._save_episode_table(episode_buffer, episode_index)
-        ep_stats = compute_episode_stats(episode_buffer, self.features)
+        episode_stats_buffer = {
+            key: value.copy() if hasattr(value, "copy") else value for key, value in episode_buffer.items()
+        }
 
         if len(self.meta.video_keys) > 0:
-            video_paths = self.encode_episode_videos(episode_index)
+            video_paths = self._get_episode_video_paths(episode_index)
             for key in self.meta.video_keys:
                 episode_buffer[key] = video_paths[key]
 
-        # `meta.save_episode` be executed after encoding the videos
-        self.meta.save_episode(episode_index, episode_length, episode_tasks, ep_stats)
+            if not encode_videos_async:
+                self.encode_episode_videos(episode_index)
+
+        episode_stats = (
+            None if encode_videos_async else compute_episode_stats(episode_stats_buffer, self.features)
+        )
+        self.meta.save_episode(
+            episode_index,
+            episode_length,
+            episode_tasks,
+            episode_stats,
+            update_video_info=not encode_videos_async,
+        )
 
         ep_data_index = get_episode_data_index(self.meta.episodes, [episode_index])
         ep_data_index_np = {k: t.numpy() for k, t in ep_data_index.items()}
@@ -901,16 +927,17 @@ class LeRobotDataset(torch.utils.data.Dataset):
             self.tolerance_s,
         )
 
-        video_files = list(self.root.rglob("*.mp4"))
-        assert len(video_files) == self.num_episodes * len(self.meta.video_keys)
+        if encode_videos_async:
+            self._queue_episode_finalization(episode_index, episode_stats_buffer)
+        else:
+            video_files = list(self.root.rglob("*.mp4"))
+            assert len(video_files) == self.num_episodes * len(self.meta.video_keys)
 
         parquet_files = list(self.root.rglob("*.parquet"))
         assert len(parquet_files) == self.num_episodes
 
-        # delete images
-        img_dir = self.root / "images"
-        if img_dir.is_dir():
-            shutil.rmtree(self.root / "images")
+        if not encode_videos_async:
+            self._delete_episode_images(episode_index)
 
         if not episode_data:  # Reset the buffer
             self.episode_buffer = self.create_episode_buffer()
@@ -949,6 +976,51 @@ class LeRobotDataset(torch.utils.data.Dataset):
             num_threads=num_threads,
         )
 
+    def set_async_video_encoding(self, enabled: bool, max_workers: int = 1) -> None:
+        if enabled and len(self.meta.video_keys) == 0:
+            enabled = False
+
+        self._async_video_encoding = enabled
+        if enabled:
+            logging.info("Deferred episode finalization enabled.")
+
+    def wait_for_async_video_encoding(self, shutdown: bool = False) -> None:
+        if not self._video_encoding_futures and not self._pending_episode_finalizations:
+            if shutdown and self._video_encoder is not None:
+                self._video_encoder.shutdown(wait=True)
+                self._video_encoder = None
+            return
+
+        if self._pending_episode_finalizations:
+            pending_finalizations = self._pending_episode_finalizations
+            self._pending_episode_finalizations = []
+            logging.info("Finalizing %d deferred episode(s).", len(pending_finalizations))
+            for episode_index, episode_buffer in pending_finalizations:
+                episode_index, episode_stats = self._finalize_episode_async(episode_index, episode_buffer)
+                self.meta.save_episode_stats(episode_index, episode_stats)
+
+        pending = self._video_encoding_futures
+        self._video_encoding_futures = []
+        if pending:
+            logging.info("Waiting for %d asynchronous episode finalization job(s).", len(pending))
+            for future in pending:
+                episode_index, episode_stats = future.result()
+                self.meta.save_episode_stats(episode_index, episode_stats)
+
+        video_files = list(self.root.rglob("*.mp4"))
+        assert len(video_files) == self.num_episodes * len(self.meta.video_keys)
+        if len(self.meta.video_keys) > 0:
+            self.meta.update_video_info()
+            write_info(self.meta.info, self.root)
+
+        images_root = self.root / "images"
+        if images_root.is_dir() and not any(images_root.rglob("*.png")):
+            shutil.rmtree(images_root)
+
+        if shutdown and self._video_encoder is not None:
+            self._video_encoder.shutdown(wait=True)
+            self._video_encoder = None
+
     def stop_image_writer(self) -> None:
         """
         Whenever wrapping this dataset inside a parallelized DataLoader, this needs to be called first to
@@ -962,6 +1034,38 @@ class LeRobotDataset(torch.utils.data.Dataset):
         """Wait for asynchronous image writer to finish."""
         if self.image_writer is not None:
             self.image_writer.wait_until_done()
+
+    def _delete_episode_images(self, episode_index: int) -> None:
+        for key in self.meta.camera_keys:
+            img_dir = self._get_image_file_path(
+                episode_index=episode_index, image_key=key, frame_index=0
+            ).parent
+            if img_dir.is_dir():
+                shutil.rmtree(img_dir)
+
+        images_root = self.root / "images"
+        if images_root.is_dir() and not any(images_root.rglob("*.png")):
+            shutil.rmtree(images_root)
+
+    def _get_episode_video_paths(self, episode_index: int) -> dict:
+        video_paths = {}
+        for key in self.meta.video_keys:
+            video_path = self.root / self.meta.get_video_file_path(episode_index, key)
+            video_path.parent.mkdir(parents=True, exist_ok=True)
+            video_paths[key] = str(video_path)
+        return video_paths
+
+    def _queue_episode_finalization(self, episode_index: int, episode_buffer: dict) -> None:
+        logging.info("Queue deferred episode finalization for episode %d.", episode_index)
+        self._pending_episode_finalizations.append((episode_index, episode_buffer))
+
+    def _finalize_episode_async(self, episode_index: int, episode_buffer: dict) -> tuple[int, dict]:
+        self._wait_image_writer()
+        episode_stats = compute_episode_stats(episode_buffer, self.features)
+        self.encode_episode_videos(episode_index)
+        self._delete_episode_images(episode_index)
+        logging.info("Asynchronous episode finalization finished for episode %d.", episode_index)
+        return episode_index, episode_stats
 
     def encode_videos(self) -> None:
         """
@@ -1037,6 +1141,10 @@ class LeRobotDataset(torch.utils.data.Dataset):
         obj.delta_indices = None
         obj.episode_data_index = None
         obj.video_backend = video_backend if video_backend is not None else get_safe_default_codec()
+        obj._async_video_encoding = False
+        obj._video_encoder = None
+        obj._video_encoding_futures = []
+        obj._pending_episode_finalizations = []
         return obj
 
 

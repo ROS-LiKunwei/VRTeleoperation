@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import re
 import time
 from pathlib import Path
@@ -24,9 +25,17 @@ SYSMO32_LEFT_ELBOW_INDEX = SYSMO32_LEFT_JOINT_NAMES.index("left_elbow_joint")
 SYSMO32_RIGHT_ELBOW_INDEX = len(SYSMO32_LEFT_JOINT_NAMES) + SYSMO32_RIGHT_JOINT_NAMES.index(
     "right_elbow_joint"
 )
-SYSMO32_HUMAN_ELBOW_REFERENCE_RAD = 0.75
+SYSMO32_LEFT_WRIST_YAW_INDEX = SYSMO32_LEFT_JOINT_NAMES.index("left_wrist_yaw_joint")
+SYSMO32_RIGHT_WRIST_YAW_INDEX = len(SYSMO32_LEFT_JOINT_NAMES) + SYSMO32_RIGHT_JOINT_NAMES.index(
+    "right_wrist_yaw_joint"
+)
+SYSMO32_HUMAN_ELBOW_REFERENCE_RAD = 0.1
+SYSMO32_WRIST_YAW_REFERENCE_RAD = 0.0
 SYSMO32_ELBOW_SIGN_EPS_RAD = 1e-4
 SYSMO32_ELBOW_TASK_ERROR_SLACK = 0.02
+SYSMO32_WRIST_YAW_TASK_ERROR_SLACK = 0.03
+SYSMO32_WRIST_YAW_SCORE_WEIGHT = 0.05
+SYSMO32_WRIST_YAW_NULLSPACE_WEIGHT = 4.0
 SYSMO32_IK_ORIENTATION_WEIGHT = 0.2
 SYSMO32_IK_MAX_JOINT_STEP_RAD = 0.08
 
@@ -35,7 +44,16 @@ def _default_nullspace_reference_joints() -> np.ndarray:
     reference = np.zeros(SYSMO32_TOTAL_ARM_JOINTS, dtype=np.float64)
     reference[SYSMO32_LEFT_ELBOW_INDEX] = -SYSMO32_HUMAN_ELBOW_REFERENCE_RAD
     reference[SYSMO32_RIGHT_ELBOW_INDEX] = SYSMO32_HUMAN_ELBOW_REFERENCE_RAD
+    reference[SYSMO32_LEFT_WRIST_YAW_INDEX] = SYSMO32_WRIST_YAW_REFERENCE_RAD
+    reference[SYSMO32_RIGHT_WRIST_YAW_INDEX] = SYSMO32_WRIST_YAW_REFERENCE_RAD
     return reference
+
+
+def _default_nullspace_reference_weights() -> np.ndarray:
+    weights = np.ones(SYSMO32_TOTAL_ARM_JOINTS, dtype=np.float64)
+    weights[SYSMO32_LEFT_WRIST_YAW_INDEX] = SYSMO32_WRIST_YAW_NULLSPACE_WEIGHT
+    weights[SYSMO32_RIGHT_WRIST_YAW_INDEX] = SYSMO32_WRIST_YAW_NULLSPACE_WEIGHT
+    return weights
 
 
 def _with_human_elbow_reference(reference_joints_rad: Sequence[float]) -> np.ndarray:
@@ -55,6 +73,26 @@ def _elbow_local_index(hand_side: str) -> int:
     return SYSMO32_LEFT_ELBOW_INDEX if hand_side == robots.LEFT else SYSMO32_RIGHT_ELBOW_INDEX - len(
         SYSMO32_LEFT_JOINT_NAMES
     )
+
+
+def _wrist_yaw_local_index(hand_side: str) -> int:
+    return (
+        SYSMO32_LEFT_WRIST_YAW_INDEX
+        if hand_side == robots.LEFT
+        else SYSMO32_RIGHT_WRIST_YAW_INDEX - len(SYSMO32_LEFT_JOINT_NAMES)
+    )
+
+
+def _angle_distance_rad(value: float, reference: float) -> float:
+    delta = float(value) - float(reference)
+    return abs(math.atan2(math.sin(delta), math.cos(delta)))
+
+
+def _wrist_yaw_reference_error(hand_side: str, qpos: Sequence[float], reference_qpos: Sequence[float]) -> float:
+    idx = _wrist_yaw_local_index(hand_side)
+    q = np.asarray(qpos, dtype=np.float64)
+    ref = np.asarray(reference_qpos, dtype=np.float64)
+    return _angle_distance_rad(float(q[idx]), float(ref[idx]))
 
 
 def _elbow_sign_satisfied(hand_side: str, qpos: Sequence[float]) -> bool:
@@ -85,6 +123,30 @@ def _select_elbow_preferred_result(
     return best_qpos
 
 
+def _select_posture_preferred_result(
+    hand_side: str,
+    best_qpos: np.ndarray,
+    best_task_error: float,
+    best_valid_qpos: Optional[np.ndarray],
+    best_valid_task_error: float,
+    reference_qpos: np.ndarray,
+) -> np.ndarray:
+    selected = _select_elbow_preferred_result(
+        best_qpos,
+        best_task_error,
+        best_valid_qpos,
+        best_valid_task_error,
+    )
+    if (
+        best_valid_qpos is not None
+        and best_valid_task_error <= best_task_error + SYSMO32_WRIST_YAW_TASK_ERROR_SLACK
+        and _wrist_yaw_reference_error(hand_side, best_valid_qpos, reference_qpos)
+        < _wrist_yaw_reference_error(hand_side, selected, reference_qpos)
+    ):
+        return best_valid_qpos
+    return selected
+
+
 def _limit_delta_norm(delta: np.ndarray, max_norm: float) -> np.ndarray:
     norm = float(np.linalg.norm(delta))
     if max_norm > 0.0 and norm > max_norm:
@@ -100,6 +162,7 @@ def _damped_least_squares_delta(
     damping: float,
     nullspace_gain: float,
     nullspace_step_limit_rad: float,
+    nullspace_weights: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """
     使用阻尼最小二乘法（DLS）计算关节的位移量（Delta q），并支持零空间姿态控制。
@@ -148,8 +211,13 @@ def _damped_least_squares_delta(
     # 作用是过滤掉会影响末端主任务（位姿）的关节运动，只保留不改变末端位姿的冗余运动
     jacobian_pinv_times_jacobian = jacobian.T @ np.linalg.solve(regularized_task_metric, jacobian)
     projection = np.eye(joint_count) - jacobian_pinv_times_jacobian
+    posture_error = reference_qpos - current_qpos
+    if nullspace_weights is not None:
+        weights = np.asarray(nullspace_weights, dtype=np.float64)
+        if weights.shape == posture_error.shape and np.all(np.isfinite(weights)):
+            posture_error = posture_error * weights
     # 在零空间中朝着参考姿态移动：delta_q_posture = N * (gain * (q_ref - q_current))
-    posture_delta = projection @ (float(nullspace_gain) * (reference_qpos - current_qpos))
+    posture_delta = projection @ (float(nullspace_gain) * posture_error)
     # 对零空间引起的关节位移幅度进行截断限制，防止单步调整幅度过大造成震荡
     posture_delta = _limit_delta_norm(posture_delta, float(nullspace_step_limit_rad))
     # 最终的关节位移量 = 主任务位移量 + 零空间姿态调整位移量
@@ -176,6 +244,7 @@ class Sysmo32MujocoKinematics:
         self.left_site_id = -1
         self.right_site_id = -1
         self._nullspace_reference_joints = _default_nullspace_reference_joints()
+        self._nullspace_reference_weights = _default_nullspace_reference_weights()
         self._nullspace_gain = 0.03
         self._nullspace_step_limit_rad = 0.015
         self._elbow_branch_penalty_weight = 0.02
@@ -371,6 +440,7 @@ class Sysmo32MujocoKinematics:
         
         best_qpos = np.array([self.data.qpos[addr] for addr in qpos_addrs]) # 保存当前这条手臂的 6 个关节角作为初始最优解
         reference_qpos = self._nullspace_reference_joints[arm_slice].copy()
+        reference_weights = self._nullspace_reference_weights[arm_slice].copy()
         best_task_error = np.inf
         best_score = np.inf
         best_valid_qpos = None
@@ -407,7 +477,11 @@ class Sysmo32MujocoKinematics:
             )
             score = task_error
             if self._nullspace_gain > 0.0:
-                score += 1e-4 * float(np.linalg.norm(current_qpos - reference_qpos))
+                posture_error = (current_qpos - reference_qpos) * reference_weights
+                score += 1e-4 * float(np.linalg.norm(posture_error))
+                score += SYSMO32_WRIST_YAW_SCORE_WEIGHT * _wrist_yaw_reference_error(
+                    hand_side, current_qpos, reference_qpos
+                )
             elbow_violation = _elbow_sign_violation(hand_side, current_qpos)
             if elbow_violation > 0.0:
                 score += self._elbow_branch_penalty_weight * elbow_violation
@@ -445,6 +519,7 @@ class Sysmo32MujocoKinematics:
                     damping=0.1,
                     nullspace_gain=self._nullspace_gain,
                     nullspace_step_limit_rad=self._nullspace_step_limit_rad,
+                    nullspace_weights=reference_weights,
                 ) # DLS + 零空间初始姿态次任务
                 solve_ms += (time.perf_counter() - solve_start) * 1000.0
             except np.linalg.LinAlgError:
@@ -473,11 +548,13 @@ class Sysmo32MujocoKinematics:
             update_ms += (time.perf_counter() - update_start) * 1000.0
 
         result = np.asarray(joints[arm_slice], dtype=np.float64).copy()
-        result[:] = _select_elbow_preferred_result(
+        result[:] = _select_posture_preferred_result(
+            hand_side,
             best_qpos,
             best_task_error,
             best_valid_qpos,
             best_valid_task_error,
+            reference_qpos,
         )
         if not np.all(np.isfinite(result)):
             return None

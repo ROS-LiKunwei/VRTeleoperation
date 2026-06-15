@@ -172,7 +172,7 @@ class TransformHandPositionCoords(Component):
         self.publisher_manager.register_topic(self.host, self.keypoint_transform_pub_port, self.coords_topic)
         self.publisher_manager.register_topic(self.host, self.keypoint_transform_pub_port, self.frame_topic)
 
-        self.timer = FrequencyTimer(robots.VR_FREQ)  # 30Hz频率
+        self.timer = FrequencyTimer(robots.VR_FREQ)
 
         # 定义用于稳定帧计算的关键关节索引
         self.wrist_idx = 0  # 手腕（第0个关节）
@@ -522,7 +522,7 @@ class TransformHandPositionCoords(Component):
         主流循环：处理手部关键点坐标变换。
 
         主循环流程：
-        1. 以VR_FREQ(30Hz)频率运行
+        1. 以VR_FREQ频率运行
         2. 从pico4.py订阅原始关键点数据
         3. 执行坐标变换（平移+旋转）
         4. 对变换后的坐标和方向帧进行滑动平均平滑

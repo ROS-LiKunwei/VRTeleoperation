@@ -195,7 +195,7 @@ class MuJoCoSysmoSimulator(Component):
         )
 
         # 计时器
-        self.timer = FrequencyTimer(robots.VR_FREQ)  # 30Hz
+        self.timer = FrequencyTimer(robots.VR_FREQ)
         self._ik_logger.info(
             "IK参数: tolerance=%s, orientation_tolerance=%s, "
             "fallback_orientation_weight=%s, reject_position_tolerance=%s, "
@@ -979,7 +979,7 @@ class MuJoCoSysmoSimulator(Component):
         主仿真循环。
 
         主循环流程：
-        1. 以VR_FREQ(30Hz)频率运行
+        1. 以VR_FREQ频率运行
         2. 接收CartesianTarget命令
         3. 对每只手臂：
            a. 将笛卡尔目标转换为MuJoCo位姿格式

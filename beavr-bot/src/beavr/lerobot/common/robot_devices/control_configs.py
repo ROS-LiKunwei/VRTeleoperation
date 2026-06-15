@@ -66,6 +66,8 @@ class RecordControlConfig(ControlConfig):
     num_episodes: int = 50
     # Encode frames in the dataset into video
     video: bool = True
+    # Encode episode videos in the background after the first episode has written video metadata.
+    async_video_encoding: bool = True
     # Upload dataset to Hugging Face hub.
     push_to_hub: bool = True
     # Upload on private repository on the Hugging Face hub.
@@ -91,8 +93,8 @@ class RecordControlConfig(ControlConfig):
     # and finalizes to v3.0 at the end when requested.
     dataset_format: str = "v3.0"
     # When false, the recorder will not publish teleop pause/resume/home signals.
-    # Use this when an external teleop stack is already running and should keep full control.
-    manage_teleop_state: bool = True
+    # This is the safest default when an external teleop stack is already running.
+    manage_teleop_state: bool = False
 
     def __post_init__(self):
         # HACK: We parse again the cli args here to get the pretrained path if there was one.

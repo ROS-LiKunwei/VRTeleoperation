@@ -63,7 +63,7 @@ class PICO4VRHandDetector(Component):
 
     工作流程：
         1. 初始化ZMQ PULL套接字，连接到PICO4 Unity应用的PUSH端口
-        2. 在主循环中，以VR_FREQ(30Hz)频率接收原始手部数据
+        2. 在主循环中，以VR_FREQ频率接收原始手部数据
         3. 解析原始数据格式："<type_marker>:x,y,z|x,y,z|..."
            - type_marker: "relative"（相对模式）或 "absolute"（绝对模式）
            - 坐标部分：26个关节的xyz坐标，用"|"分隔
@@ -115,7 +115,7 @@ class PICO4VRHandDetector(Component):
 
         # 初始化发布器和计时器
         self.publisher_manager = ZMQPublisherManager.get_instance()
-        self.timer = FrequencyTimer(robots.VR_FREQ)  # 30Hz频率
+        self.timer = FrequencyTimer(robots.VR_FREQ)
         self.last_received = {}
         self.sockets = None  # 延迟初始化套接字
 
@@ -523,7 +523,7 @@ class PICO4VRHandDetector(Component):
         统一VR手部检测的主流循环。
 
         主循环流程：
-        1. 以VR_FREQ(30Hz)频率运行
+        1. 以VR_FREQ频率运行
         2. 对每只配置的手：
            a. 从ZMQ PULL套接字接收原始手部数据
            b. 解析原始数据为坐标值列表（包含发送时间戳）

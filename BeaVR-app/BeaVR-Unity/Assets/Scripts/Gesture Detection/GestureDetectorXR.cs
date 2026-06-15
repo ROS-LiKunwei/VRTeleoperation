@@ -141,6 +141,8 @@ public class GestureDetectorXR : MonoBehaviour
 	[Header("Android性能保持")]
 	public bool EnableAndroidPerformanceMode = true;
 	public bool RequestIgnoreBatteryOptimizations = true;
+	[Tooltip("遥操作手部数据目标发送帧率。PICO手部追踪高频模式声明为60Hz时，这里也应保持60。")]
+	[Range(30, 90)] public int TargetApplicationFrameRate = 60;
 	private bool _batteryOptimizationRequestSent = false;
 
 	// 模式
@@ -193,8 +195,9 @@ public class GestureDetectorXR : MonoBehaviour
     /// <summary>
     /// 初始化手势探测器
     /// </summary>
-    void Start()
-    {
+	void Start()
+	{
+		ApplyTargetFrameRate();
 		EnableForegroundPerformanceMode();
 
 		// 网络配置
@@ -1284,6 +1287,13 @@ public class GestureDetectorXR : MonoBehaviour
 		}
 	}
 
+	private void ApplyTargetFrameRate()
+	{
+		QualitySettings.vSyncCount = 0;
+		Application.targetFrameRate = TargetApplicationFrameRate;
+		Debug.Log("PICO应用目标帧率已设置: " + TargetApplicationFrameRate + "Hz");
+	}
+
 	void OnApplicationPause(bool pauseStatus)
 	{
 		if (pauseStatus)
@@ -1292,6 +1302,7 @@ public class GestureDetectorXR : MonoBehaviour
 		}
 		else
 		{
+			ApplyTargetFrameRate();
 			EnableForegroundPerformanceMode();
 		}
 	}
