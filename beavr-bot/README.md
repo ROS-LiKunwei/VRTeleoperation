@@ -107,6 +107,66 @@ Full documentation lives in the [`docs`](docs) directory. Start with
 [`docs/README.md`](docs/README.md) for an overview of the available guides,
 including detailed explanations of the teleoperation and LeRobot stacks.
 
+## SYSMO-32 Teleoperation Architecture
+
+当前 SYSMO-32 实机遥操作链路是一个双臂统一控制架构。PICO4 Unity App 先通过 ZMQ 把左右手原始追踪数据送入 PICO4 detector；随后 `keypoint_transform.py` 将手部关键点和方向帧转换到内部右手系 VR frame，并分别发布右手、左手 transformed hand frame。
+
+左右 `Sysmo32Operator` 继承 `XArmOperator` 的重定向逻辑，只替换 SYSMO-32 专用的 `H_R_V_SYSMO32` 坐标变换矩阵。Operator 在 reset 时记录机器人当前末端位姿和当前手部基准位姿；正常运行时计算手相对初始帧的运动，将其映射到 robot base frame，生成 `CartesianTarget(frame_id="base")`，并通过 ZMQ `endeff_coords` 发布给下游控制层。
+
+SYSMO-32 真机控制层只启动一个 `Sysmo32RealControl`，不是左右臂各一个控制器。这个组件同时订阅左右 `CartesianTarget`、左右 reset、pause/resume、左右 transformed hand coords，并从 `/joint_states` 获取当前 12 关节反馈。每个控制周期中，它对左右最新笛卡尔目标分别做 IK，然后经过上层 arm smoother、命令限幅和 18 维命令组包。
+
+当前默认 arm smoother 是 `jerk_limited_servo`，用于连续追踪流式 VR 目标；也保留 `min_snap` 和 `none` 模式。命令生成顺序为：
+
+```text
+CartesianTarget
+  -> Sysmo32MujocoKinematics.solve_ik
+  -> Sysmo32JerkLimitedServoSmoother 或 Sysmo32ArmTrajectorySmoother
+  -> Sysmo32CommandLimiter
+  -> Sysmo32CommandBuilder
+  -> Sysmo32ArmCommand
+```
+
+真实 arm command 只有一个 ROS2 topic：
+
+```text
+/sysmo_left_arm_controller/commands
+std_msgs/msg/Float64MultiArray
+```
+
+18 维 payload 格式固定为：
+
+```text
+data[0:6]    = left_arm_6
+data[6:12]   = right_arm_6
+data[12]     = speed_mode
+data[13:17]  = reserved
+data[17]     = neck_joint
+```
+
+不要新增 `/sysmo_right_arm_controller/commands`，也不要改变 `/sysmo_left_arm_controller/commands` 的消息类型。手部动作是独立的 `Sysmo32HandAction` 路径，不合并进 18 维 arm command。
+
+`control_backend` 支持三种模式：
+
+- `mujoco`: 只跑 MuJoCo mirror，主要用于 dry-run 和调试。
+- `real`: 需要新鲜 `/joint_states`，通过 ROS2 给真机发布 18 维 arm command。
+- `real_with_mujoco`: 真机命令路径与 `real` 相同，同时启动 MuJoCo mirror 观察同一条命令。
+
+整体数据流：
+
+```text
+PICO4 Unity
+  -> PICO4 detector
+  -> keypoint_transform left/right
+  -> Sysmo32Operator left/right
+  -> CartesianTarget via ZMQ endeff_coords
+  -> one bimanual Sysmo32RealControl
+  -> /joint_states feedback
+  -> IK + smoothing + safety limiting
+  -> 18D Sysmo32ArmCommand
+  -> /sysmo_left_arm_controller/commands
+  -> optional MuJoCo mirror
+```
+
 ## Additional Features
 
 ### Apple Vision Pro Support
