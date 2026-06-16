@@ -830,10 +830,11 @@ class Sysmo32AdapterConfig(BeavrBotConfig):
     cameras: dict[str, CameraConfig] = field(
         default_factory=lambda: {
             "front": OpenCVCameraConfig(
-                camera_index=0,
+                camera_index=6,
                 fps=30,
                 width=640,
                 height=480,
+                rotation=180.0,
             ),
         }
     )

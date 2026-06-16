@@ -180,13 +180,24 @@ class Sysmo32RealControlCfg:
             ik_pos_tol_m=1e-3,
             ik_ori_tol_rad=2e-2,
             ik_profile_log_period_s=1.0,
-            # minimum snap configuration
+            # Arm trajectory smoothing. Use "min_snap" to return to point-to-point
+            # seventh-order minimum-snap behavior.
+            arm_trajectory_smoother="jerk_limited_servo",
             enable_arm_min_snap=True,
+            # minimum snap configuration
             arm_min_snap_segment_time=0.18,
             arm_min_snap_min_duration=0.06,
             arm_min_snap_replan_threshold_rad=0.0005,
             arm_min_snap_max_velocity_rad_s=3.0,
             arm_min_snap_max_acceleration_rad_s2=10.0,
+            # jerk-limited online servo configuration
+            arm_servo_max_velocity_rad_s=3.0,
+            arm_servo_max_acceleration_rad_s2=10.0,
+            arm_servo_max_jerk_rad_s3=120.0,
+            arm_servo_omega=35.0,
+            arm_servo_damping_ratio=1.0,
+            arm_servo_target_deadband_rad=0.0005,
+            arm_servo_max_dt_s=0.05,
             # IK nullspace
             ik_nullspace_reference_joints_rad=(
                 0.0,

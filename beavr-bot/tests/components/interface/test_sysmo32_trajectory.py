@@ -3,6 +3,8 @@ import numpy as np
 from beavr.teleop.components.interface.robots.sysmo32_trajectory import (
     Sysmo32ArmTrajectoryConfig,
     Sysmo32ArmTrajectorySmoother,
+    Sysmo32JerkLimitedServoConfig,
+    Sysmo32JerkLimitedServoSmoother,
 )
 
 
@@ -113,3 +115,67 @@ def test_min_snap_reset_uses_current_joint_state():
     sample = smoother.sample(current, current, now_s=2.0)
 
     np.testing.assert_allclose(sample, current)
+
+
+def test_jerk_limited_servo_starts_from_current_and_tracks_target():
+    smoother = Sysmo32JerkLimitedServoSmoother(
+        Sysmo32JerkLimitedServoConfig(
+            max_joint_velocity_rad_s=tuple([2.0] * 6),
+            max_joint_acceleration_rad_s2=tuple([4.0] * 6),
+            max_joint_jerk_rad_s3=tuple([20.0] * 6),
+            omega=20.0,
+            damping_ratio=1.0,
+        )
+    )
+    current = np.zeros(6)
+    target = np.ones(6) * 0.5
+
+    first = smoother.sample(target, current, now_s=1.0)
+    later = smoother.sample(target, current, now_s=1.1)
+
+    np.testing.assert_allclose(first, current)
+    assert np.all(later > first)
+    assert np.all(later < target)
+
+
+def test_jerk_limited_servo_respects_velocity_acceleration_and_jerk_limits():
+    max_velocity = 0.5
+    max_acceleration = 1.0
+    max_jerk = 5.0
+    dt = 0.02
+    smoother = Sysmo32JerkLimitedServoSmoother(
+        Sysmo32JerkLimitedServoConfig(
+            max_joint_velocity_rad_s=tuple([max_velocity] * 6),
+            max_joint_acceleration_rad_s2=tuple([max_acceleration] * 6),
+            max_joint_jerk_rad_s3=tuple([max_jerk] * 6),
+            omega=50.0,
+            damping_ratio=1.0,
+        )
+    )
+    target = np.ones(6) * 2.0
+    current = np.zeros(6)
+    velocities = []
+    accelerations = []
+
+    smoother.sample(target, current, now_s=1.0)
+    for step in range(1, 40):
+        smoother.sample(target, current, now_s=1.0 + step * dt)
+        velocities.append(smoother.velocity)
+        accelerations.append(smoother.acceleration)
+
+    velocities = np.asarray(velocities)
+    accelerations = np.asarray(accelerations)
+    jerks = np.diff(accelerations, axis=0) / dt
+
+    assert np.max(np.abs(velocities)) <= max_velocity + 1e-9
+    assert np.max(np.abs(accelerations)) <= max_acceleration + 1e-9
+    assert np.max(np.abs(jerks)) <= max_jerk + 1e-9
+
+
+def test_jerk_limited_servo_disabled_passthrough():
+    smoother = Sysmo32JerkLimitedServoSmoother(Sysmo32JerkLimitedServoConfig(enabled=False))
+    target = np.ones(6) * 0.4
+
+    sample = smoother.sample(target, np.zeros(6), now_s=1.0)
+
+    np.testing.assert_allclose(sample, target)

@@ -1,4 +1,4 @@
-"""Seventh-order minimum-snap joint trajectory helpers for SYSMO-32 arms."""
+"""Joint trajectory helpers for SYSMO-32 arms."""
 
 from __future__ import annotations
 
@@ -36,6 +36,150 @@ class Sysmo32ArmTrajectoryConfig:
         object.__setattr__(self, "segment_time_s", max(0.0, float(self.segment_time_s)))
         object.__setattr__(self, "min_duration_s", max(1e-4, float(self.min_duration_s)))
         object.__setattr__(self, "replan_threshold_rad", max(0.0, float(self.replan_threshold_rad)))
+
+
+@dataclass(frozen=True)
+class Sysmo32JerkLimitedServoConfig:
+    enabled: bool = True
+    max_joint_velocity_rad_s: Tuple[float, ...] = field(default_factory=lambda: tuple([3.0] * 6))
+    max_joint_acceleration_rad_s2: Tuple[float, ...] = field(default_factory=lambda: tuple([10.0] * 6))
+    max_joint_jerk_rad_s3: Tuple[float, ...] = field(default_factory=lambda: tuple([120.0] * 6))
+    omega: float = 35.0
+    damping_ratio: float = 1.0
+    target_deadband_rad: float = 0.0005
+    max_dt_s: float = 0.05
+    joint_lower_limits_rad: Tuple[float, ...] = field(default_factory=lambda: tuple([-3.14] * 6))
+    joint_upper_limits_rad: Tuple[float, ...] = field(default_factory=lambda: tuple([3.14] * 6))
+
+    def __post_init__(self):
+        for name, values in (
+            ("max_joint_velocity_rad_s", self.max_joint_velocity_rad_s),
+            ("max_joint_acceleration_rad_s2", self.max_joint_acceleration_rad_s2),
+            ("max_joint_jerk_rad_s3", self.max_joint_jerk_rad_s3),
+        ):
+            if len(values) != 6:
+                raise ValueError(f"{name} must contain 6 values")
+        if len(self.joint_lower_limits_rad) != 6 or len(self.joint_upper_limits_rad) != 6:
+            raise ValueError("joint limits must contain 6 values")
+        object.__setattr__(self, "omega", max(0.0, float(self.omega)))
+        object.__setattr__(self, "damping_ratio", max(0.0, float(self.damping_ratio)))
+        object.__setattr__(self, "target_deadband_rad", max(0.0, float(self.target_deadband_rad)))
+        object.__setattr__(self, "max_dt_s", max(1e-4, float(self.max_dt_s)))
+
+
+class Sysmo32JerkLimitedServoSmoother:
+    """Online joint servo with velocity, acceleration and jerk limits.
+
+    This smoother is intended for VR teleoperation where the target changes
+    every frame. It tracks the latest target directly instead of creating a
+    point-to-point trajectory for every small target update.
+    """
+
+    def __init__(
+        self,
+        config: Optional[Sysmo32JerkLimitedServoConfig] = None,
+        name: str = "arm",
+    ) -> None:
+        self.config = config or Sysmo32JerkLimitedServoConfig()
+        self.name = name
+        self._position: Optional[np.ndarray] = None
+        self._velocity = np.zeros(6, dtype=np.float64)
+        self._acceleration = np.zeros(6, dtype=np.float64)
+        self._last_time_s: Optional[float] = None
+
+    def reset(self, current_joints_rad: Optional[Sequence[float]] = None) -> None:
+        joints = None if current_joints_rad is None else self._as_joint_vector(current_joints_rad, "reset")
+        self._position = None if joints is None else self._clamp_to_joint_limits(joints)
+        self._velocity = np.zeros(6, dtype=np.float64)
+        self._acceleration = np.zeros(6, dtype=np.float64)
+        self._last_time_s = None
+
+    def sample(
+        self,
+        target_joints_rad: Sequence[float],
+        current_joints_rad: Optional[Sequence[float]] = None,
+        now_s: Optional[float] = None,
+    ) -> np.ndarray:
+        now = time.time() if now_s is None else float(now_s)
+        target = self._clamp_to_joint_limits(self._as_joint_vector(target_joints_rad, "target"))
+        if not self.config.enabled:
+            self.reset(target)
+            return target
+
+        current = (
+            self._clamp_to_joint_limits(self._as_joint_vector(current_joints_rad, "current"))
+            if current_joints_rad is not None
+            else None
+        )
+        if self._position is None:
+            self._position = current.copy() if current is not None else target.copy()
+            self._last_time_s = now
+            return self._position.copy()
+
+        if self._last_time_s is None:
+            self._last_time_s = now
+            return self._position.copy()
+
+        dt = max(1e-4, min(self.config.max_dt_s, now - self._last_time_s))
+        self._last_time_s = now
+
+        error = target - self._position
+        max_vel = np.maximum(np.asarray(self.config.max_joint_velocity_rad_s, dtype=np.float64), 1e-6)
+        max_acc = np.maximum(np.asarray(self.config.max_joint_acceleration_rad_s2, dtype=np.float64), 1e-6)
+        max_jerk = np.maximum(np.asarray(self.config.max_joint_jerk_rad_s3, dtype=np.float64), 1e-6)
+
+        desired_acceleration = (
+            self.config.omega**2 * error
+            - 2.0 * self.config.damping_ratio * self.config.omega * self._velocity
+        )
+        desired_acceleration = np.clip(desired_acceleration, -max_acc, max_acc)
+        acceleration_delta = np.clip(
+            desired_acceleration - self._acceleration,
+            -max_jerk * dt,
+            max_jerk * dt,
+        )
+        new_acceleration = np.clip(self._acceleration + acceleration_delta, -max_acc, max_acc)
+        new_velocity = np.clip(self._velocity + new_acceleration * dt, -max_vel, max_vel)
+        new_position = self._position + new_velocity * dt
+
+        overshoot = (target - self._position) * (target - new_position) < 0.0
+        if np.any(overshoot):
+            new_position[overshoot] = target[overshoot]
+            new_velocity[overshoot] = 0.0
+            new_acceleration[overshoot] = 0.0
+
+        close = (np.abs(target - new_position) <= self.config.target_deadband_rad) & (
+            np.abs(new_velocity) <= max_vel * 0.02
+        )
+        if np.any(close):
+            new_position[close] = target[close]
+            new_velocity[close] = 0.0
+            new_acceleration[close] = 0.0
+
+        self._position = self._clamp_to_joint_limits(new_position)
+        self._velocity = new_velocity
+        self._acceleration = new_acceleration
+        return self._position.copy()
+
+    @property
+    def velocity(self) -> np.ndarray:
+        return self._velocity.copy()
+
+    @property
+    def acceleration(self) -> np.ndarray:
+        return self._acceleration.copy()
+
+    def _clamp_to_joint_limits(self, joints: np.ndarray) -> np.ndarray:
+        lower = np.asarray(self.config.joint_lower_limits_rad, dtype=np.float64)
+        upper = np.asarray(self.config.joint_upper_limits_rad, dtype=np.float64)
+        return np.clip(joints, lower, upper)
+
+    @staticmethod
+    def _as_joint_vector(values: Sequence[float], label: str) -> np.ndarray:
+        array = np.asarray(values, dtype=np.float64)
+        if array.shape != (6,) or not np.all(np.isfinite(array)):
+            raise ValueError(f"{label} must contain 6 finite joint values")
+        return array
 
 
 class Sysmo32ArmTrajectorySmoother:
@@ -175,4 +319,9 @@ class Sysmo32ArmTrajectorySmoother:
         return array
 
 
-__all__ = ["Sysmo32ArmTrajectoryConfig", "Sysmo32ArmTrajectorySmoother"]
+__all__ = [
+    "Sysmo32ArmTrajectoryConfig",
+    "Sysmo32ArmTrajectorySmoother",
+    "Sysmo32JerkLimitedServoConfig",
+    "Sysmo32JerkLimitedServoSmoother",
+]

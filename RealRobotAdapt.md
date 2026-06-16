@@ -1,248 +1,24 @@
-你是一个机器人遥操作工程代码 Agent。请基于当前 BeaVR-bot 工程，为 SYSMO32 真机和仿真机械臂命令下发增加七次多项式 minimum snap 轨迹优化。
+你是一个机器人遥操作工程代码 Agent。请基于当前 BeaVR-bot 的 SYSMO-32 实机遥操作架构，实现一个 **jerk-limited online servo smoother**，用于替代或并行支持当前七次 minimum-snap 点到点轨迹优化，从而提升 VR 遥操作的动作跟手效果。
 
-# 1. 背景
+# 1. 当前架构背景
 
-当前 BeaVR-bot 的 SYSMO32 遥操作链路大致是：
-
-```text
-PICO4 / Transform
-    -> Sysmo32Operator
-    -> Sysmo32RealControl
-    -> Sysmo32MujocoKinematics IK
-    -> safety limiter / command builder
-    -> 机械臂真机控制话题
-    -> MuJoCo command mirror
-    -> LeRobot state/action cache
-```
-
-当前真机机械臂接口只有一个 ROS2 控制话题：
+当前 SYSMO-32 实机遥操作链路为：
 
 ```text
-/sysmo_left_arm_controller/commands
+PICO 4 App
+    -> ZMQ 网络层
+    -> VR detector / keypoint transform / operator
+    -> 左右手 CartesianTarget
+    -> Sysmo32RealControl 实机主控制循环
+    -> /joint_states 当前 12 关节反馈
+    -> Sysmo32MujocoKinematics.solve_ik 左右臂 IK
+    -> Sysmo32ArmTrajectorySmoother 七次 minimum-snap 关节轨迹
+    -> Sysmo32CommandLimiter joint jump / velocity / joint limit 限幅
+    -> Sysmo32CommandBuilder 18 维 arm command
+    -> /sysmo_left_arm_controller/commands
 ```
 
-注意：**没有 `/sysmo_right_arm_controller/commands`。不要创建、发布或订阅这个不存在的话题。**
-
-真机机械臂控制话题消息类型为：
-
-```text
-std_msgs/msg/Float64MultiArray
-```
-
-该话题一次性下发左臂、右臂、速度模式位、保留位和脖子关节，总长度为 18。
-
-`data` 字段定义如下：
-
-```text
-data[0:6]    = 左臂 6 个关节弧度
-data[6:12]   = 右臂 6 个关节弧度
-data[12]     = 速度模式位
-               0.0 表示底层 5 次多项式插值，速度适中
-               4.0 表示上层插值，底层速度很快；如果使用 4.0，上层必须做好轨迹平滑
-data[13:17]  = 4 个保留位，默认 0.0
-data[17]     = 脖子关节弧度
-```
-
-因此，本次七次多项式轨迹优化的目标不是分别发布左右臂两个话题，而是：
-
-```text
-左臂 IK/limit target + 右臂 IK/limit target
-    -> 左右臂分别进行七次 minimum snap 平滑
-    -> 组装 18 维 Float64MultiArray
-    -> 统一发布到 /sysmo_left_arm_controller/commands
-```
-
-# 2. 真机测试日志结论
-
-当前真机测试日志说明：
-
-```text
-日志范围：15:00:58.710 - 15:03:54.346
-有效遥操作段：约 136s，分两段：19.4s 和 116.6s
-
-PICO 原始接收频率：
-RightHand avg 39.3Hz，p50 39.7Hz，p95 57.4Hz，max 60.0Hz
-LeftHand  avg 38.8Hz，p50 38.2Hz，p95 58.0Hz，max 59.0Hz
-
-Operator 目标点输出：
-right/left 基本 60Hz，avg 59.55Hz
-
-Real target 接收：
-right/left avg 约 50.6Hz，p50 51.6Hz
-
-真机 arm command 下发：
-avg 59.2Hz，p50 59.6Hz，p95 59.9Hz，max 60.3Hz
-
-RealControl：
-source_to_publish avg 99.3ms，p50 96.8ms，p95 142.2ms
-real loop avg 6.18ms，p95 9.15ms
-publish avg 0.21ms
-build/limit avg 0.19ms
-
-IK：
-right avg 2.36ms，p95 3.8ms
-left  avg 2.90ms，p95 4.0ms
-
-异常/限幅：
-PICO_RX_GAP 5 次，其中有效段内主要有一次约 5s 断帧和一次 200ms 右手断帧
-OP_HAND_FRAME_GAP 3 次
-REAL_TARGET_GAP 2 次
-joint velocity limited 17 次
-joint jump limited 1 次
-左手姿态 clamp 1 次
-```
-
-关键结论：
-
-```text
-bot 下发已经基本达到 60Hz；
-IK、build、publish 已经不是主要瓶颈；
-PICO 原始手帧没有稳定到 60Hz，平均约 39Hz；
-端到端排队延迟仍偏高；
-RealControl source_to_publish avg≈99ms，p95≈142ms；
-因此七次多项式轨迹段时间不能按 60Hz 单帧周期设置。
-```
-
-所以本次实现时，真机默认轨迹时间不要使用 `0.08s`。
-真机默认值请使用：
-
-```yaml
-arm_min_snap_segment_time: 0.18
-arm_min_snap_min_duration: 0.06
-arm_min_snap_replan_threshold_rad: 0.0005
-```
-
-如果区分仿真和真机：
-
-```yaml
-# 仿真
-arm_min_snap_segment_time: 0.10
-arm_min_snap_min_duration: 0.04
-
-# 真机默认
-arm_min_snap_segment_time: 0.18
-arm_min_snap_min_duration: 0.06
-
-# 真机保守模式
-arm_min_snap_segment_time: 0.22
-arm_min_snap_min_duration: 0.08
-```
-
-# 3. 任务目标
-
-请在给真机和仿真的机械臂命令下发前，增加七次多项式 minimum snap 轨迹优化。
-
-核心目标：
-
-1. 每次 IK 得到新的关节目标后，不要直接跳变发布目标关节角。
-2. 使用当前实际关节反馈作为轨迹起点。
-3. 使用 IK + safety limiter 后的安全目标关节角作为轨迹终点。
-4. 左臂和右臂分别使用独立的七次多项式 smoother。
-5. 轨迹时间根据关节最大速度、最大加速度自动拉长。
-6. 真机 ROS2 publish 和 MuJoCo command mirror 必须使用同一份平滑后的 arm command。
-7. LeRobot action cache 优先记录最终实际下发的平滑命令。
-8. 不要破坏现有 pause/resume、安全限幅、IK、日志统计、录制逻辑。
-9. 不要修改上游 VR、Transform、Operator 的数据协议。
-10. 不要修改 `/sysmo_left_arm_controller/commands` 的消息类型。
-11. 不要为了平滑降低主控制循环频率。
-12. 不得创建或使用 `/sysmo_right_arm_controller/commands`。
-
-# 4. 参考实现
-
-请参考我提供的 `sysmo_hand` 包中七次多项式轨迹优化实现，尤其是以下思想：
-
-```text
-startMinSnapTrajectory()
-computeConstrainedDuration()
-sampleMinSnapTrajectory()
-minSnapPositionBlend()
-clampToJointLimits()
-```
-
-七次 minimum snap 位置插值基函数为：
-
-```python
-s(tau) = 35*tau**4 - 84*tau**5 + 70*tau**6 - 20*tau**7
-```
-
-满足：
-
-```text
-s(0)=0
-s(1)=1
-两端速度为 0
-两端加速度为 0
-两端 jerk 为 0
-```
-
-一阶导数：
-
-```python
-s_dot(tau) = 140*tau**3 - 420*tau**4 + 420*tau**5 - 140*tau**6
-```
-
-二阶导数：
-
-```python
-s_ddot(tau) = 420*tau**2 - 1680*tau**3 + 2100*tau**4 - 840*tau**5
-```
-
-# 5. 实现位置要求
-
-优先在 RealControl 下发前实现，不要在 Operator 层做。
-
-建议新增文件：
-
-```text
-src/beavr/teleop/components/interface/robots/sysmo32_trajectory.py
-```
-
-新增类：
-
-```python
-class Sysmo32ArmTrajectorySmoother:
-    ...
-```
-
-然后在：
-
-```text
-src/beavr/teleop/components/interface/robots/sysmo32_real_control.py
-```
-
-中左右臂各创建一个 smoother：
-
-```python
-self.left_arm_smoother = Sysmo32ArmTrajectorySmoother(...)
-self.right_arm_smoother = Sysmo32ArmTrajectorySmoother(...)
-```
-
-如果当前工程已有更合适的 command builder / command limiter 类，也可以集成到现有结构里，但必须保证轨迹优化发生在：
-
-```text
-IK + safety limit 之后
-18 维 Float64MultiArray 组装之前
-ROS2 arm command publish 之前
-MuJoCo command mirror 之前
-LeRobot action cache 更新之前
-```
-
-正确顺序应该是：
-
-```text
-CartesianTarget
-    -> IK
-    -> joint/cartesian safety limiter
-    -> left/right seventh-order minimum snap smoother
-    -> build 18-dim Float64MultiArray
-    -> publish /sysmo_left_arm_controller/commands
-    -> publish MuJoCo command mirror
-    -> update LeRobot action cache
-```
-
-# 6. 真机命令组装要求
-
-最终真机命令只能发布到：
+当前实机 arm command 只有一个话题：
 
 ```text
 /sysmo_left_arm_controller/commands
@@ -254,675 +30,740 @@ CartesianTarget
 std_msgs/msg/Float64MultiArray
 ```
 
-发布内容必须是 18 维：
-
-```python
-cmd.data = [
-    # data[0:6] 左臂 6 个关节弧度
-    left_smooth_target[0],
-    left_smooth_target[1],
-    left_smooth_target[2],
-    left_smooth_target[3],
-    left_smooth_target[4],
-    left_smooth_target[5],
-
-    # data[6:12] 右臂 6 个关节弧度
-    right_smooth_target[0],
-    right_smooth_target[1],
-    right_smooth_target[2],
-    right_smooth_target[3],
-    right_smooth_target[4],
-    right_smooth_target[5],
-
-    # data[12] 速度模式位
-    arm_command_speed_mode,
-
-    # data[13:17] 保留位，默认 0.0
-    0.0,
-    0.0,
-    0.0,
-    0.0,
-
-    # data[17] 脖子关节弧度
-    neck_joint_target,
-]
-```
-
-其中：
+18 维 payload 格式为：
 
 ```text
-arm_command_speed_mode = 0.0 或 4.0
+data[0:6]    = left_arm_6
+data[6:12]   = right_arm_6
+data[12]     = speed_mode
+data[13:17]  = reserved / default 0.0
+data[17]     = neck_joint
 ```
 
-含义：
+注意：
 
 ```text
-0.0 表示底层 5 次多项式插值，速度适中
-4.0 表示上层插值，底层速度很快；如果使用 4.0，上层必须做好轨迹平滑
+不要创建 /sysmo_right_arm_controller/commands
+不要改变 /sysmo_left_arm_controller/commands 的消息类型
+不要改变上游 VR / Transform / Operator 的数据协议
 ```
 
-本次做的是上层七次多项式插值，理论上可以使用 `4.0`。但是必须提供配置项控制，不要写死。
+当前实机配置里 `speed_mode=4.0`，表示底层按较快速度执行，上层必须负责轨迹平滑和安全限幅。
 
-建议新增配置：
+# 2. 为什么要改成 jerk-limited online servo
 
-```yaml
-arm_command_speed_mode: 4.0
-```
-
-真机首测如果担心风险，可以临时设为：
-
-```yaml
-arm_command_speed_mode: 0.0
-```
-
-但需要在说明中明确：
+当前七次 minimum-snap 是点到点轨迹：
 
 ```text
-如果 arm_command_speed_mode=0.0，则会形成“上层七次插值 + 底层五次插值”的双重插值，运动会更柔和但响应更慢。
-如果 arm_command_speed_mode=4.0，则主要依赖上层七次插值，响应更快，但必须确认上层轨迹足够平滑。
+start -> goal -> duration -> sample trajectory
 ```
 
-# 7. 配置项要求
+它适合固定目标点运动，但 VR 遥操作是连续流式目标：
 
-请为 SYSMO32 增加以下配置项。优先放在已有的 sysmo32 config dataclass / YAML 中。
+```text
+target_0, target_1, target_2, target_3, ...
+```
 
-真机默认值：
+如果每 16ms~20ms 都有新目标，而 smoother 不断对新目标做点到点更新，会出现：
+
+```text
+频繁滚动更新
+轨迹相位滞后
+小幅连续目标跟随变肉
+快速目标下 remaining / duration 被不断刷新
+```
+
+当前日志结论说明：
+
+```text
+VR target 接收约 50Hz
+arm command 发布约 60Hz
+IK 左臂约 3.1ms，右臂约 2.4ms
+publish 约 0.2ms
+loop 约 7.3ms
+source_to_publish_ms 平均约 99ms
+REAL_ARM_COMMAND_DELTA 平均约 0.15rad，p95 约 0.22rad
+```
+
+结论：
+
+```text
+当前不是没有发布 command；
+IK 和 ROS2 publish 不是主要瓶颈；
+机械臂能跟随，但快速目标下存在明显相位滞后；
+主要瓶颈是流式目标轨迹滞后、上游排队延迟、后级限幅/底层跟踪误差叠加。
+```
+
+因此请实现一个在线 servo smoother：
+
+```text
+每个控制周期读取最新 IK/limit 后的 target_joints
+根据当前 command / velocity / acceleration 状态
+在线生成下一帧 command
+限制 velocity / acceleration / jerk
+永远追最新目标，不再规划完整点到点 duration
+```
+
+# 3. 新增 smoother 类型
+
+请新增配置项，允许选择 smoother 类型：
 
 ```yaml
-arm_min_snap_enabled: true
-
-# 根据真机日志设置：
-# PICO 原始帧约 39Hz，RealControl source_to_publish avg≈99ms，p95≈142ms
-# 所以默认不要低于 0.14s，首版使用 0.18s
-arm_min_snap_segment_time: 0.18
-arm_min_snap_min_duration: 0.06
-arm_min_snap_replan_threshold_rad: 0.0005
-
-# 真机速度模式位
-# 0.0 = 底层 5 次插值
-# 4.0 = 上层插值，底层速度快
-arm_command_speed_mode: 4.0
-
-# 初始保守速度/加速度限制，后续根据 joint velocity limited 次数调参
-arm_joint_velocity_max: [0.8, 0.8, 0.8, 0.8, 1.0, 1.0]
-arm_joint_acceleration_max: [2.5, 2.5, 2.5, 2.5, 3.0, 3.0]
+arm_trajectory_smoother: "jerk_limited_servo"
 ```
 
-如果已有硬件速度/加速度/关节位置限制，请优先复用已有配置，不要重复定义冲突参数。
+可选值建议：
 
-如果支持仿真和真机分别配置，建议：
+```text
+"min_snap"              保留现有七次 minimum-snap 行为
+"jerk_limited_servo"    新增 jerk-limited online servo
+"none"                  不做上层 smoothing，仅保留原有限幅
+```
+
+默认建议：
 
 ```yaml
-# simulation
-arm_min_snap_enabled: true
-arm_min_snap_segment_time: 0.10
-arm_min_snap_min_duration: 0.04
-arm_min_snap_replan_threshold_rad: 0.0003
-arm_command_speed_mode: 4.0
-
-# real robot
-arm_min_snap_enabled: true
-arm_min_snap_segment_time: 0.18
-arm_min_snap_min_duration: 0.06
-arm_min_snap_replan_threshold_rad: 0.0005
-arm_command_speed_mode: 4.0
-
-# real robot conservative
-arm_min_snap_enabled: true
-arm_min_snap_segment_time: 0.22
-arm_min_snap_min_duration: 0.08
-arm_min_snap_replan_threshold_rad: 0.0005
-arm_command_speed_mode: 0.0
+arm_trajectory_smoother: "jerk_limited_servo"
 ```
 
-# 8. 轨迹平滑类设计要求
+但如果担心兼容性，可以先默认 `"min_snap"`，同时支持通过配置切到 `"jerk_limited_servo"`。
 
-请实现一个独立、可测试的 Python 类，例如：
+# 4. 推荐新增文件和类
 
-```python
-class Sysmo32ArmTrajectorySmoother:
-    def __init__(
-        self,
-        enabled: bool,
-        segment_time: float,
-        min_duration: float,
-        replan_threshold_rad: float,
-        velocity_limits: Sequence[float],
-        acceleration_limits: Sequence[float],
-        joint_lower_limits: Optional[Sequence[float]] = None,
-        joint_upper_limits: Optional[Sequence[float]] = None,
-        logger: Optional[logging.Logger] = None,
-        name: str = "arm",
-    ):
-        ...
+当前实现位置：
+
+```text
+src/beavr/teleop/components/interface/robots/sysmo32_trajectory.py
 ```
 
-至少支持以下方法：
+新增类：
 
 ```python
-def reset(self, hold_joints: Optional[np.ndarray] = None) -> None:
-    ...
-
-def update_and_sample(
-    self,
-    target_joints: np.ndarray,
-    current_feedback_joints: Optional[np.ndarray],
-    now: float,
-    force_replan: bool = False,
-) -> np.ndarray:
-    ...
-
-def sample(self, now: float) -> np.ndarray:
-    ...
-
-def has_active_trajectory(self, now: float) -> bool:
+class Sysmo32JerkLimitedServoSmoother:
     ...
 ```
 
-内部状态建议包含：
+左右臂各一个实例：
 
 ```python
-self._start_joints
-self._goal_joints
-self._last_command_joints
-self._start_time
-self._duration
-self._active
-```
-
-# 9. 七次多项式实现要求
-
-实现：
-
-```python
-def _blend(self, tau: float) -> float:
-    tau = float(np.clip(tau, 0.0, 1.0))
-    return (
-        35.0 * tau**4
-        - 84.0 * tau**5
-        + 70.0 * tau**6
-        - 20.0 * tau**7
-    )
-```
-
-实现一阶、二阶导数：
-
-```python
-def _blend_dot(self, tau: float) -> float:
-    tau = float(np.clip(tau, 0.0, 1.0))
-    return (
-        140.0 * tau**3
-        - 420.0 * tau**4
-        + 420.0 * tau**5
-        - 140.0 * tau**6
-    )
-
-def _blend_ddot(self, tau: float) -> float:
-    tau = float(np.clip(tau, 0.0, 1.0))
-    return (
-        420.0 * tau**2
-        - 1680.0 * tau**3
-        + 2100.0 * tau**4
-        - 840.0 * tau**5
-    )
-```
-
-最大导数可以在初始化时密集采样计算：
-
-```python
-taus = np.linspace(0.0, 1.0, 1001)
-self._max_blend_dot = max(abs(self._blend_dot(t)) for t in taus)
-self._max_blend_ddot = max(abs(self._blend_ddot(t)) for t in taus)
-```
-
-# 10. 轨迹时间约束要求
-
-根据七次基函数：
-
-```text
-q(t) = q0 + dq * s(tau)
-tau = t / T
-```
-
-速度和加速度为：
-
-```text
-q_dot = dq * s_dot(tau) / T
-q_ddot = dq * s_ddot(tau) / T^2
-```
-
-所以要满足：
-
-```text
-T >= abs(dq) * max_s_dot / vmax
-T >= sqrt(abs(dq) * max_s_ddot / amax)
-```
-
-实现：
-
-```python
-def _compute_constrained_duration(
-    self,
-    start_joints: np.ndarray,
-    goal_joints: np.ndarray,
-) -> float:
-    dq = np.abs(goal_joints - start_joints)
-
-    duration = max(self.segment_time, self.min_duration)
-
-    for i in range(num_joints):
-        if self.velocity_limits[i] > 1e-6:
-            duration = max(
-                duration,
-                dq[i] * self._max_blend_dot / self.velocity_limits[i],
-            )
-
-        if self.acceleration_limits[i] > 1e-6:
-            duration = max(
-                duration,
-                math.sqrt(dq[i] * self._max_blend_ddot / self.acceleration_limits[i]),
-            )
-
-    return duration
-```
-
-如果 duration 被速度/加速度约束拉长，需要低频 warning，不要每帧刷屏。
-
-# 11. 重规划逻辑要求
-
-每次收到新的 `target_joints` 时：
-
-1. 如果 smoother disabled，直接返回 `target_joints`。
-2. 如果 `target_joints` 非法，直接保持上一帧命令或反馈值，不要产生 NaN。
-3. 如果没有有效 `/joint_states` 反馈：
-
-   * 首帧不要默认用全 0 作为起点。
-   * 可退化为直接返回 target，或使用上一帧 command 作为起点。
-   * 必须打 warning。
-4. 如果当前没有 active trajectory：
-
-   * 起点优先用 `current_feedback_joints`。
-   * 没有反馈时用 `last_command_joints`。
-   * 终点用 `target_joints`。
-   * 开始新轨迹。
-5. 如果当前有 active trajectory，但新目标和当前 goal 差异小于 `replan_threshold_rad`：
-
-   * 不重规划。
-   * 继续 sample 当前轨迹。
-6. 如果当前有 active trajectory，新目标和当前 goal 差异较大：
-
-   * 采用滚动重规划。
-   * 起点优先用当前轨迹 sample 值或最新反馈值。
-   * 终点为新目标。
-   * 重新计算 duration。
-7. 轨迹完成后保持 goal，不要回弹。
-
-目标变化判断建议：
-
-```python
-delta_norm = np.linalg.norm(target_joints - self._goal_joints, ord=np.inf)
-if delta_norm < self.replan_threshold_rad:
-    return self.sample(now)
-```
-
-注意：`arm_min_snap_replan_threshold_rad` 真机默认用 `0.0005`，避免 PICO 抖动导致每帧重规划。
-
-# 12. pause/resume 行为要求
-
-pause 状态下不要继续追未完成轨迹。
-
-当检测到 pause：
-
-```text
-冻结当前下发值，或者保持当前反馈值；
-reset smoother；
-不要继续推进上一段轨迹。
-```
-
-resume 后：
-
-```text
-从当前 /joint_states 反馈重新规划；
-不要从 pause 前的旧目标继续追。
-```
-
-如果现有代码有 pause/resume 命令端口或状态变量，请复用现有状态，不要新增并行状态机。
-
-# 13. 左右臂独立要求
-
-左右臂必须独立规划：
-
-```python
-self.left_arm_smoother
-self.right_arm_smoother
+self._left_arm_smoother = Sysmo32JerkLimitedServoSmoother(name="left", ...)
+self._right_arm_smoother = Sysmo32JerkLimitedServoSmoother(name="right", ...)
 ```
 
 不要左右臂共用一个 smoother 状态。
 
-如果只有左臂有新目标：
+# 5. 在线 servo 状态变量
+
+每个 servo 内部维护：
+
+```python
+self._q_cmd       # 当前实际下发 command，shape=(6,)
+self._q_vel       # 当前命令速度，shape=(6,)
+self._q_acc       # 当前命令加速度，shape=(6,)
+self._last_time   # 上一次 update 时间
+self._initialized # 是否已初始化
+```
+
+初始化优先级：
 
 ```text
-左臂按新目标重规划；
-右臂保持原逻辑，可以继续采样未完成轨迹，完成后保持最后目标。
+优先使用 /joint_states feedback
+其次使用 target_joints
+最后使用 last command
+绝对不要首帧默认从全 0 跳过去
 ```
 
-如果只有右臂有新目标，同理。
+# 6. jerk-limited online servo 核心算法
 
-# 14. RealControl 接入伪代码
-
-请找到当前实际发布 arm command 的代码，逻辑可能类似：
+每一帧输入：
 
 ```python
-left_limited_target = ...
-right_limited_target = ...
-
-cmd = Float64MultiArray()
-cmd.data = [
-    *left_limited_target,
-    *right_limited_target,
-    speed_mode,
-    0.0, 0.0, 0.0, 0.0,
-    neck_joint_target,
-]
-arm_pub.publish(cmd)
-
-publish_mujoco_command_mirror(...)
-update_lerobot_action_cache(...)
+target_joints          # IK + safety pre-limit 后的目标关节，shape=(6,)
+feedback_joints        # 当前 /joint_states 对应手臂反馈，shape=(6,)
+now                    # time.monotonic()
 ```
 
-请改为：
+每一帧输出：
 
 ```python
-now = time.monotonic()
+q_cmd                  # 本周期要下发的平滑关节 command，shape=(6,)
+```
 
-left_smooth_target = self.left_arm_smoother.update_and_sample(
-    target_joints=left_limited_target,
-    current_feedback_joints=current_left_feedback_joints,
-    now=now,
-)
+算法逻辑：
 
-right_smooth_target = self.right_arm_smoother.update_and_sample(
-    target_joints=right_limited_target,
-    current_feedback_joints=current_right_feedback_joints,
-    now=now,
-)
+```python
+error = target_joints - q_cmd
 
-cmd = Float64MultiArray()
-cmd.data = [
-    float(left_smooth_target[0]),
-    float(left_smooth_target[1]),
-    float(left_smooth_target[2]),
-    float(left_smooth_target[3]),
-    float(left_smooth_target[4]),
-    float(left_smooth_target[5]),
+desired_acc = omega**2 * error - 2.0 * damping_ratio * omega * q_vel
 
-    float(right_smooth_target[0]),
-    float(right_smooth_target[1]),
-    float(right_smooth_target[2]),
-    float(right_smooth_target[3]),
-    float(right_smooth_target[4]),
-    float(right_smooth_target[5]),
+desired_acc = clip(desired_acc, -amax, amax)
 
-    float(self.arm_command_speed_mode),
+delta_acc = desired_acc - q_acc
+delta_acc = clip(delta_acc, -jmax * dt, jmax * dt)
 
-    0.0,
-    0.0,
-    0.0,
-    0.0,
+q_acc = q_acc + delta_acc
+q_acc = clip(q_acc, -amax, amax)
 
-    float(neck_joint_target),
-]
+q_vel = q_vel + q_acc * dt
+q_vel = clip(q_vel, -vmax, vmax)
 
-self.arm_command_pub.publish(cmd)
+q_cmd = q_cmd + q_vel * dt
+q_cmd = clamp_to_joint_limits(q_cmd)
+```
 
-publish_mujoco_command_mirror(
-    left_arm_joints=left_smooth_target,
-    right_arm_joints=right_smooth_target,
+默认使用临界阻尼：
+
+```yaml
+arm_servo_damping_ratio: 1.0
+```
+
+`omega` 控制响应速度：
+
+```text
+omega 越大，跟手越快，但更容易抖或触发限幅
+omega 越小，更稳但更慢
+```
+
+# 7. 推荐配置项
+
+请在 SYSMO-32 config / YAML 中新增：
+
+```yaml
+arm_trajectory_smoother: "jerk_limited_servo"
+
+arm_servo_omega: 35.0
+arm_servo_damping_ratio: 1.0
+
+arm_servo_max_velocity_rad_s: 3.0
+arm_servo_max_acceleration_rad_s2: 10.0
+arm_servo_max_jerk_rad_s3: 120.0
+
+arm_servo_target_deadband_rad: 0.0005
+arm_servo_max_dt_s: 0.05
+```
+
+保守真机首测建议：
+
+```yaml
+arm_trajectory_smoother: "jerk_limited_servo"
+
+arm_servo_omega: 25.0
+arm_servo_damping_ratio: 1.0
+
+arm_servo_max_velocity_rad_s: 2.0
+arm_servo_max_acceleration_rad_s2: 10.0
+arm_servo_max_jerk_rad_s3: 100.0
+
+arm_command_speed_mode: 0.0
+```
+
+稳定后再逐步提高：
+
+```yaml
+arm_servo_omega: 35.0
+arm_servo_max_velocity_rad_s: 3.0
+arm_servo_max_acceleration_rad_s2: 20.0
+arm_servo_max_jerk_rad_s3: 200.0
+arm_command_speed_mode: 4.0
+```
+
+更激进但需要谨慎：
+
+```yaml
+arm_servo_omega: 45.0
+arm_servo_max_velocity_rad_s: 3.0
+arm_servo_max_acceleration_rad_s2: 30.0
+arm_servo_max_jerk_rad_s3: 300.0
+arm_command_speed_mode: 4.0
+```
+
+不要默认使用激进配置。
+
+# 8. dt 处理要求
+
+控制循环理论接近 60Hz：
+
+```text
+dt ≈ 0.0167s
+```
+
+但实机可能有调度抖动。必须处理 dt 异常：
+
+```python
+dt = now - self._last_time
+dt = np.clip(dt, min_dt, max_dt)
+```
+
+如果 `dt > max_dt`，说明控制循环断帧或 pause/resume 后恢复。此时不要直接积分很大一步，应该：
+
+```text
+clamp dt 到 max_dt
+必要时 reset velocity / acceleration
+低频 warning
+```
+
+推荐：
+
+```yaml
+arm_servo_max_dt_s: 0.05
+```
+
+# 9. feedback resync 要求
+
+如果命令状态和真实 `/joint_states` 差距过大，说明底层跟不上、暂停恢复、或者发生了控制断层。
+
+请实现 resync：
+
+```python
+if feedback_joints is valid:
+    err_feedback = max(abs(feedback_joints - q_cmd))
+    if err_feedback > resync_threshold_rad:
+        q_cmd = feedback_joints.copy()
+        q_vel[:] = 0.0
+        q_acc[:] = 0.0
+```
+
+后续可选配置：
+
+```yaml
+arm_servo_resync_threshold_rad: 0.15
+```
+
+当前代码未默认启用 feedback resync。原因是最近日志里 `REAL_ARM_COMMAND_DELTA`
+本身会达到 0.15rad 左右，如果每帧按 feedback 重同步，可能把 command 状态拖住。
+
+注意：
+
+```text
+resync 不能每帧频繁触发，否则 command 会被 feedback 拖住，跟手性变差。
+需要低频日志记录 resync 次数。
+```
+
+# 10. target jump 处理要求
+
+如果 IK 目标突然大跳，比如断帧、重置、VR tracking 丢失恢复：
+
+```python
+target_jump = max(abs(target_joints - previous_target_joints))
+```
+
+如果超过：
+
+```yaml
+arm_servo_target_jump_threshold_rad: 0.6
+```
+
+当前代码仍由 `Sysmo32CommandLimiter.max_joint_jump_rad` 负责最终跳变保护。
+
+不要用激进速度追过去。应选择以下策略之一：
+
+```text
+策略 A：保持当前 command，并等待下一帧稳定 target
+策略 B：reset servo，以当前 feedback 为 q_cmd，速度/加速度清零
+策略 C：临时降低 omega / vmax / amax / jmax 一段时间
+```
+
+首版建议策略 B：
+
+```python
+reset(feedback_joints or q_cmd)
+```
+
+并低频 warning。
+
+# 11. pause/resume 行为
+
+pause 时：
+
+```text
+reset online servo
+q_cmd 对齐当前 /joint_states 或当前 hold command
+q_vel = 0
+q_acc = 0
+继续发布 hold command，不追旧 target
+```
+
+resume 时：
+
+```text
+从当前 /joint_states 重新初始化
+不要继续追 pause 前旧 target
+清空 pending target 或忽略 pause 前 target
+```
+
+这点必须和现有 `safety_hold_arm_on_pause=True`、`pause_hold_heartbeat_hz=20.0` 兼容。
+
+# 12. target missing 行为
+
+如果某一侧手臂本周期没有新 target：
+
+```text
+不要外推旧目标
+不要继续用旧速度漂移
+应保持当前 command 或继续缓慢收敛到 last target
+```
+
+建议首版：
+
+```python
+if missing_target:
+    q_vel *= damping_decay
+    q_acc[:] = 0.0
+    q_cmd = q_cmd
+```
+
+或者：
+
+```text
+继续以 last target 更新，但必须有 target timeout，例如 0.1s。
+超过 timeout 后 hold 当前 command。
+```
+
+后续可选配置：
+
+```yaml
+arm_servo_target_timeout_s: 0.10
+```
+
+当前代码仍复用 `CartesianTarget` stale 检查和 pause/reset 时的 smoother reset。
+
+超过 timeout：
+
+```text
+hold current command
+q_vel -> 0
+q_acc -> 0
+```
+
+# 13. joint limit 与后级 limiter 顺序
+
+当前架构中原有后级 limiter 是：
+
+```text
+Sysmo32CommandLimiter
+    max_joint_velocity_rad_s = 3.0
+    max_joint_jump_rad = 0.5
+```
+
+请保持后级 limiter，不要删除。
+
+新顺序建议为：
+
+```text
+IK target
+    -> optional pre-clamp joint limit
+    -> online jerk-limited servo
+    -> Sysmo32CommandLimiter 后级 safety limit
+    -> Sysmo32CommandBuilder 18 维 command
+    -> /sysmo_left_arm_controller/commands
+```
+
+servo 内部也可以做 joint limit clamp，但它是防御性保护。最终安全仍由 `Sysmo32CommandLimiter` 兜底。
+
+# 14. RealControl 接入要求
+
+当前 `Sysmo32RealControl` 中应该已有类似逻辑：
+
+```text
+left IK joints
+right IK joints
+-> smoother
+-> limiter
+-> command builder
+-> publish
+```
+
+请改造成可配置：
+
+```python
+if self.arm_trajectory_smoother == "min_snap":
+    left_smooth = self.left_arm_min_snap.update_and_sample(...)
+    right_smooth = self.right_arm_min_snap.update_and_sample(...)
+
+elif self.arm_trajectory_smoother == "jerk_limited_servo":
+    left_smooth = self.left_arm_servo.update(
+        target_joints=left_limited_or_ik_target,
+        feedback_joints=current_left_feedback,
+        now=now,
+        target_timestamp=left_target_timestamp,
+        target_valid=left_target_valid,
+        paused=not self._teleop_active,
+    )
+    right_smooth = self.right_arm_servo.update(...)
+
+elif self.arm_trajectory_smoother == "none":
+    left_smooth = left_limited_or_ik_target
+    right_smooth = right_limited_or_ik_target
+```
+
+然后统一进入：
+
+```python
+limited_command = self.command_limiter.limit(
+    left_smooth,
+    right_smooth,
+    current_joint_states,
     ...
 )
 
-update_lerobot_action_cache(
-    left_arm_command=left_smooth_target,
-    right_arm_command=right_smooth_target,
+cmd = self.command_builder.build(
+    left_arm=limited_command.left,
+    right_arm=limited_command.right,
+    speed_mode=self.arm_command_speed_mode,
     ...
 )
+
+self.arm_pub.publish(cmd)
 ```
 
-如果当前工程中 arm command 是 12 维双臂数组或 18-field command，请保持原格式，只替换其中 arm joints 部分为平滑后的 joints。
-
-# 15. joint limit 处理要求
-
-轨迹 smoother 内部可以再次 clamp 到 joint limits，但不要替代原有 safety limiter。
-
-顺序应为：
+最终发布仍然只能是：
 
 ```text
-原有 safety limiter：负责安全边界
-smoother 内部 clamp：防御性保护，避免数值误差越界
+/sysmo_left_arm_controller/commands
 ```
 
-如果目标已经被原有限幅器处理，smoother 不应该改变目标语义。
+不要新增 `/sysmo_right_arm_controller/commands`。
 
-# 16. 日志要求
+# 15. command cache / LeRobot action cache
 
-启动时打印一次配置：
+LeRobot action cache 应记录最终实际下发的平滑 command，而不是 IK raw target。
+
+也就是：
 
 ```text
-Arm minimum snap config: enabled=..., segment_time=..., min_duration=..., replan_threshold=..., speed_mode=..., vmax=..., amax=...
+action = after online servo + after final command limiter 的 left/right arm command
 ```
 
-轨迹 duration 被拉长时，低频 warning：
+如果当前 action cache 语义已经记录最终 arm command，请保持该语义。
+
+建议额外 debug 字段记录：
 
 ```text
-left arm minimum snap duration stretched: requested=0.180s, constrained=0.240s, max_delta=...
+raw_ik_target
+online_servo_output
+final_limited_command
+joint_states_feedback
 ```
 
-建议增加低频统计字段：
+但主 action 应该是最终实际下发 command。
+
+# 16. 日志和诊断要求
+
+新增启动配置日志：
 
 ```text
-left_arm_min_snap_ms
-right_arm_min_snap_ms
-left_trajectory_duration
-right_trajectory_duration
-left_target_delta_norm
-right_target_delta_norm
-left_replan_count
-right_replan_count
-arm_command_speed_mode
+SYSMO-32 online jerk-limited servo config:
+enabled/type=...
+omega=...
+damping_ratio=...
+vmax=...
+amax=...
+jmax=...
+resync_threshold=...
+target_timeout=...
+speed_mode=...
 ```
 
-不要在 60Hz 控制循环里每帧打印完整关节数组。完整数组只允许 debug 开关开启时打印。
+新增低频诊断：
+
+```text
+[Diag][ONLINE_SERVO]
+side=left/right
+target_error_max_rad=...
+cmd_vel_max_rad_s=...
+cmd_acc_max_rad_s2=...
+cmd_jerk_max_rad_s3=...
+feedback_error_max_rad=...
+resync_count=...
+target_timeout_count=...
+target_jump_count=...
+dt_ms=...
+```
+
+新增与原有诊断联动观察：
+
+```text
+[Diag][REAL_ARM_COMMAND_DELTA]
+[Diag][TIMING_REAL]
+[Diag][REAL_ARM_COMMAND_RATE]
+limit=joint velocity limited / joint jump limited
+```
+
+目标：
+
+```text
+REAL_ARM_COMMAND_DELTA 不应持续增大
+joint velocity limited 次数不应显著增加
+joint jump limited 应减少或不出现
+source_to_publish_ms 不一定因 smoother 直接下降，但动作相位滞后应降低
+```
 
 # 17. 测试要求
 
-请增加最小单元测试或离线脚本，验证以下场景：
-
-1. `tau=0` 时输出起点。
-2. `tau=1` 时输出终点。
-3. 中间点连续、平滑、无跳变。
-4. 起点和终点相同，不产生 NaN。
-5. 速度限制很小时，duration 自动变长。
-6. 加速度限制很小时，duration 自动变长。
-7. 连续新目标到来时，轨迹从当前采样点或当前反馈点滚动重规划，不跳变。
-8. `arm_min_snap_enabled=false` 时，行为与原始逻辑一致，直接返回限幅后的 IK 目标。
-9. pause 时 smoother reset，resume 后从当前反馈重新规划。
-10. MuJoCo command mirror 和 ROS2 publish 使用的是同一份平滑后关节命令。
-11. LeRobot action cache 记录最终实际下发的平滑 command。
-12. 最终真机发布的 `Float64MultiArray.data` 长度必须为 18。
-13. `data[0:6]` 必须是平滑后的左臂关节。
-14. `data[6:12]` 必须是平滑后的右臂关节。
-15. `data[12]` 必须来自配置 `arm_command_speed_mode`。
-16. `data[13:17]` 必须保持 0.0。
-17. 不得出现 `/sysmo_right_arm_controller/commands` 相关发布器。
-
-可以新增类似脚本：
+请增加单元测试或离线脚本：
 
 ```text
-scripts/offline_test_sysmo32_min_snap.py
+tests/interface/test_sysmo32_trajectory.py
 ```
 
-或 pytest：
+或：
 
 ```text
-tests/interface/test_sysmo32_min_snap.py
+scripts/offline_test_sysmo32_trajectory.py
 ```
 
-# 18. 仿真验证要求
+至少验证：
 
-请提供仿真测试方法：
+1. 首帧从 feedback 初始化，不从 0 跳变。
+2. target 固定时，q_cmd 单调接近 target。
+3. velocity 不超过 vmax。
+4. acceleration 不超过 amax。
+5. jerk 不超过 jmax。
+6. dt 异常大时不会积分出大跳变。
+7. feedback 和 q_cmd 偏差超过 resync_threshold 时会 reset 到 feedback。
+8. target jump 超阈值时会 reset 或 hold。
+9. pause 时 reset，resume 从当前 feedback 重新初始化。
+10. target timeout 后 hold 当前 command，不继续漂移。
+11. 左右臂状态独立。
+12. 输出 shape 必须是 6。
+13. 最终 command builder 输出 18 维。
+14. 不创建 `/sysmo_right_arm_controller/commands`。
 
-1. 启动 sysmo32 MuJoCo 仿真。
-2. 启动 teleop 或构造离线 target 输入。
-3. 观察 `/sysmo_left_arm_controller/commands` 是否为 18 维连续命令。
-4. 确认没有 `/sysmo_right_arm_controller/commands`。
-5. 观察 MuJoCo mirror 是否使用平滑后的 left/right arm command。
-6. 对比开启/关闭 `arm_min_snap_enabled` 的关节曲线差异。
+# 18. 仿真验证流程
 
-建议增加简单绘图脚本，记录并绘制：
+请提供仿真验证方法：
+
+1. 使用 `backend=mujoco` 或 `real_with_mujoco`。
+2. 设置：
+
+```yaml
+arm_trajectory_smoother: "jerk_limited_servo"
+arm_servo_omega: 25.0
+arm_servo_max_velocity_rad_s: 2.0
+arm_servo_max_acceleration_rad_s2: 10.0
+arm_servo_max_jerk_rad_s3: 100.0
+```
+
+3. 记录：
 
 ```text
-raw IK target joints
-limited target joints
-smoothed command joints
+raw IK target
+online servo output
+final limited command
 joint_states feedback
 ```
 
-# 19. 真机保守测试要求
-
-真机首测不要激进。请给出如下测试流程：
-
-首先设置保守配置：
-
-```yaml
-arm_min_snap_enabled: true
-arm_min_snap_segment_time: 0.22
-arm_min_snap_min_duration: 0.08
-arm_min_snap_replan_threshold_rad: 0.0005
-arm_command_speed_mode: 0.0
-```
-
-低速、小幅度遥操作，检查：
+4. 绘制每个关节曲线，确认：
 
 ```text
-/sysmo_left_arm_controller/commands 是否稳定发布 18 维 Float64MultiArray
-data[0:6] 是否为左臂平滑命令
-data[6:12] 是否为右臂平滑命令
-data[12] 是否等于 arm_command_speed_mode
-是否还有明显跳变
-joint velocity limited 次数是否下降
-joint jump limited 是否消失
+online servo output 比 raw IK target 平滑
+online servo output 比 min-snap 响应更快
+velocity / acceleration / jerk 没超限
 ```
 
-如果保守模式稳定，再尝试：
+# 19. 真机保守测试流程
+
+真机首测使用保守配置：
 
 ```yaml
-arm_min_snap_segment_time: 0.18
-arm_min_snap_min_duration: 0.06
+arm_trajectory_smoother: "jerk_limited_servo"
+arm_servo_omega: 25.0
+arm_servo_damping_ratio: 1.0
+arm_servo_max_velocity_rad_s: 2.0
+arm_servo_max_acceleration_rad_s2: 10.0
+arm_servo_max_jerk_rad_s3: 100.0
 arm_command_speed_mode: 0.0
 ```
 
-如果仍然稳定但响应偏慢，再尝试：
+真机验证步骤：
+
+```text
+1. 小幅慢速移动 VR 手
+2. 确认 arm command 发布约 60Hz
+3. 确认没有 /sysmo_right_arm_controller/commands
+4. 确认 pause/resume 正常
+5. 检查 joint velocity limited / joint jump limited
+6. 检查 REAL_ARM_COMMAND_DELTA
+7. 检查是否有明显抖动或冲击
+```
+
+如果稳定但慢，再调：
+
+```yaml
+arm_servo_omega: 35.0
+arm_servo_max_velocity_rad_s: 3.0
+arm_servo_max_acceleration_rad_s2: 20.0
+arm_servo_max_jerk_rad_s3: 200.0
+arm_command_speed_mode: 0.0
+```
+
+如果仍稳定，再测试：
 
 ```yaml
 arm_command_speed_mode: 4.0
 ```
 
-使用 `4.0` 前必须确认：
-
-```text
-上层七次多项式轨迹已经生效；
-轨迹输出没有跳变；
-pause/resume 不追旧轨迹；
-断帧后不会产生大跳变；
-joint velocity limited 次数可接受。
-```
-
-如果运动过慢但限幅很少，可以尝试：
+如果 `speed_mode=4.0` 后抖动或限幅变多，回退到：
 
 ```yaml
-arm_min_snap_segment_time: 0.15
-arm_min_snap_min_duration: 0.05
+arm_command_speed_mode: 0.0
 ```
 
-如果 `joint velocity limited` 仍然很多，不要继续减小时间，应该增大到：
+或者降低：
 
 ```yaml
-arm_min_snap_segment_time: 0.22
+arm_servo_omega
+arm_servo_max_acceleration_rad_s2
+arm_servo_max_jerk_rad_s3
 ```
 
-甚至：
+# 20. 与 min-snap 的兼容和回退
+
+必须保留原有 min-snap 实现，不要直接删掉。
+
+配置回退：
 
 ```yaml
-arm_min_snap_segment_time: 0.25
+arm_trajectory_smoother: "min_snap"
 ```
 
-# 20. 调参判断标准
-
-请在实现说明里写清楚：
-
-```text
-如果 joint velocity limited 次数仍然很多：
-    segment_time 从 0.18 -> 0.22 或 0.25
-
-如果 joint jump limited 仍然出现：
-    segment_time 增大，或者检查 target 是否有断帧后突跳
-
-如果末端运动太肉、明显跟手慢，但限幅很少：
-    segment_time 从 0.18 -> 0.15 或 0.14
-
-如果 real source_to_publish p95 仍然 > 140ms：
-    不建议 segment_time 低于 0.16
-
-如果 PICO 原始手帧仍然只有 39Hz：
-    不建议 segment_time 低于 0.14
-
-如果 PICO 稳定到 60Hz，且 source_to_publish p95 降到 80ms 以下：
-    可以尝试 0.10~0.12
-
-如果 arm_command_speed_mode=0.0：
-    运动更柔和但响应更慢，因为底层也在做 5 次插值
-
-如果 arm_command_speed_mode=4.0：
-    响应更快，但必须确保上层七次轨迹足够平滑
-```
-
-# 21. 回退要求
-
-必须支持一键关闭：
+完全关闭：
 
 ```yaml
-arm_min_snap_enabled: false
+arm_trajectory_smoother: "none"
 ```
 
-关闭后行为必须与原先一致：
+如果线上测试发现 online servo 有问题，可以立即切回 min-snap 或 none。
 
-```text
-IK target
-    -> safety limiter
-    -> 组装 18 维 Float64MultiArray
-    -> 发布 /sysmo_left_arm_controller/commands
-    -> MuJoCo command mirror
-    -> LeRobot action cache
-```
+# 21. 实现注意事项
 
-不能因为新增 smoother 影响原始下发逻辑。
+1. 不要在 smoother 内部做 ROS2 publish。
+2. 不要在 smoother 内部订阅 ZMQ。
+3. smoother 只处理关节数组，不处理 CartesianTarget。
+4. IK 仍由 `Sysmo32MujocoKinematics.solve_ik()` 完成。
+5. `/joint_states` 仍由 `Sysmo32RealControl` 读取后传给 smoother。
+6. command builder 仍负责 18 维格式。
+7. command limiter 仍作为最终安全兜底。
+8. pause/resume 状态由 `Sysmo32RealControl` 传入 smoother。
+9. 不要为左右臂各自发布 ROS command；最终必须统一发布一个 18 维 command。
+10. 不要改变手部 `/left_topic_to_hand`、`/right_topic_to_hand` 的逻辑。
 
-# 22. 最终交付内容
+# 22. 交付内容
 
 完成后请输出：
 
 1. 修改文件列表。
-2. 新增类和函数说明。
+2. 新增 `Sysmo32JerkLimitedServoSmoother` 类说明。
 3. 新增配置项说明。
-4. 数据流变化说明。
-5. 真机 18 维命令格式说明。
-6. 七次多项式轨迹公式说明。
-7. 轨迹时间约束公式说明。
-8. 仿真测试方法。
-9. 真机保守测试方法。
-10. 如何关闭功能回退。
-11. 本次实现是否影响上游 VR、Transform、Operator 协议。
-12. 明确说明没有使用 `/sysmo_right_arm_controller/commands`。
+4. RealControl 接入位置说明。
+5. 与原 min-snap 的切换方式。
+6. 18 维 command 发布格式是否保持不变。
+7. pause/resume 行为说明。
+8. target timeout / target jump / feedback resync 行为说明。
+9. 仿真测试方法。
+10. 真机保守测试方法。
+11. 如何回退到 min-snap。
+12. 是否新增或误用了 `/sysmo_right_arm_controller/commands`，答案必须是没有。
 
 # 23. 验收标准
 
@@ -930,36 +771,30 @@ IK target
 
 ```text
 IK/limit 后的左臂目标 + IK/limit 后的右臂目标
-    -> 左右臂各自七次 minimum snap 轨迹优化
-    -> left_smooth_target + right_smooth_target
-    -> 组装 18 维 Float64MultiArray
-    -> 发布到 /sysmo_left_arm_controller/commands
-    -> MuJoCo command mirror
+    -> left/right jerk-limited online servo
+    -> final command limiter
+    -> 18 维 Float64MultiArray
+    -> /sysmo_left_arm_controller/commands
+    -> MuJoCo mirror
     -> LeRobot action cache
 ```
 
 验收时必须确认：
 
 ```text
-真机 ROS2 arm command 使用平滑后 joints
-只发布 /sysmo_left_arm_controller/commands
-不创建 /sysmo_right_arm_controller/commands
-Float64MultiArray.data 长度为 18
-data[0:6] 是左臂平滑 joints
-data[6:12] 是右臂平滑 joints
+左右臂 servo 状态独立
+输出 velocity / acceleration / jerk 不超配置限制
+pause 时不追旧目标
+resume 后从当前 joint_states 初始化
+target timeout 后不继续漂移
+target jump 后不产生大跳变
+feedback error 过大时可 resync
+arm command 发布频率仍接近 60Hz
+Float64MultiArray.data 长度仍为 18
+data[0:6] 是左臂最终 command
+data[6:12] 是右臂最终 command
 data[12] 是 arm_command_speed_mode
 data[13:17] 是 0.0
-data[17] 是 neck_joint_target
-MuJoCo mirror 使用平滑后 joints
-LeRobot action cache 使用平滑后 joints
-pause 时不会继续追旧轨迹
-resume 后从当前反馈重新规划
-arm_min_snap_enabled=false 可以完全回退
+data[17] 是 neck_joint
+没有创建 /sysmo_right_arm_controller/commands
 ```
-
-不要修改 `/sysmo_left_arm_controller/commands` 消息类型。
-不要新增 `/sysmo_right_arm_controller/commands`。
-不要改变上游 VR、Transform、Operator 的数据协议。
-不要降低 RealControl 主循环频率。
-不要只做仿真，不接真机发布路径。
-不要只做真机，不接 MuJoCo mirror。

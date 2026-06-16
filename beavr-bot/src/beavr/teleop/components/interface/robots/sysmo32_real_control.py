@@ -40,6 +40,8 @@ from beavr.teleop.components.interface.robots.sysmo32_kinematics import Sysmo32M
 from beavr.teleop.components.interface.robots.sysmo32_trajectory import (
     Sysmo32ArmTrajectoryConfig,
     Sysmo32ArmTrajectorySmoother,
+    Sysmo32JerkLimitedServoConfig,
+    Sysmo32JerkLimitedServoSmoother,
 )
 from beavr.teleop.components.operator.operator_types import CartesianTarget
 from beavr.teleop.configs.constants import ports, robots
@@ -98,12 +100,20 @@ class Sysmo32RealControlConfig:
     ik_pos_tol_m: float = 1e-3
     ik_ori_tol_rad: float = 2e-2
     ik_profile_log_period_s: float = 1.0
+    arm_trajectory_smoother: str = "min_snap"
     enable_arm_min_snap: bool = True
     arm_min_snap_segment_time: float = 0.18
     arm_min_snap_min_duration: float = 0.06
     arm_min_snap_replan_threshold_rad: float = 0.0005
     arm_min_snap_max_velocity_rad_s: float = 0.5
     arm_min_snap_max_acceleration_rad_s2: float = 0.5
+    arm_servo_max_velocity_rad_s: float = 3.0
+    arm_servo_max_acceleration_rad_s2: float = 10.0
+    arm_servo_max_jerk_rad_s3: float = 120.0
+    arm_servo_omega: float = 35.0
+    arm_servo_damping_ratio: float = 1.0
+    arm_servo_target_deadband_rad: float = 0.0005
+    arm_servo_max_dt_s: float = 0.05
 
     def __post_init__(self):
         self.ik_nullspace_gain = max(0.0, float(self.ik_nullspace_gain))
@@ -114,6 +124,15 @@ class Sysmo32RealControlConfig:
         self.ik_pos_tol_m = max(0.0, float(self.ik_pos_tol_m))
         self.ik_ori_tol_rad = max(0.0, float(self.ik_ori_tol_rad))
         self.ik_profile_log_period_s = max(0.0, float(self.ik_profile_log_period_s))
+        self.arm_trajectory_smoother = str(self.arm_trajectory_smoother or "none").strip().lower()
+        if self.arm_trajectory_smoother in ("minimum_snap", "minimum-snap"):
+            self.arm_trajectory_smoother = "min_snap"
+        if self.arm_trajectory_smoother in ("jerk", "servo", "online_servo"):
+            self.arm_trajectory_smoother = "jerk_limited_servo"
+        if self.arm_trajectory_smoother not in ("none", "min_snap", "jerk_limited_servo"):
+            raise ValueError(
+                "arm_trajectory_smoother must be one of: none, min_snap, jerk_limited_servo"
+            )
         self.arm_min_snap_segment_time = max(0.0, float(self.arm_min_snap_segment_time))
         self.arm_min_snap_min_duration = max(1e-4, float(self.arm_min_snap_min_duration))
         self.arm_min_snap_replan_threshold_rad = max(
@@ -123,6 +142,15 @@ class Sysmo32RealControlConfig:
         self.arm_min_snap_max_acceleration_rad_s2 = max(
             1e-6, float(self.arm_min_snap_max_acceleration_rad_s2)
         )
+        self.arm_servo_max_velocity_rad_s = max(1e-6, float(self.arm_servo_max_velocity_rad_s))
+        self.arm_servo_max_acceleration_rad_s2 = max(
+            1e-6, float(self.arm_servo_max_acceleration_rad_s2)
+        )
+        self.arm_servo_max_jerk_rad_s3 = max(1e-6, float(self.arm_servo_max_jerk_rad_s3))
+        self.arm_servo_omega = max(0.0, float(self.arm_servo_omega))
+        self.arm_servo_damping_ratio = max(0.0, float(self.arm_servo_damping_ratio))
+        self.arm_servo_target_deadband_rad = max(0.0, float(self.arm_servo_target_deadband_rad))
+        self.arm_servo_max_dt_s = max(1e-4, float(self.arm_servo_max_dt_s))
         if self.ik_nullspace_reference_joints_rad is not None:
             reference = np.asarray(self.ik_nullspace_reference_joints_rad, dtype=np.float64)
             if reference.shape != (12,) or not np.all(np.isfinite(reference)):
@@ -334,14 +362,8 @@ class Sysmo32RealControl(Component):
         self._builder = Sysmo32CommandBuilder(self.config.arm)
         self._limiter = Sysmo32CommandLimiter(self.config.arm)
         self._mujoco_limiter = Sysmo32CommandLimiter(self._make_mujoco_arm_safety_config())
-        self._left_arm_smoother = Sysmo32ArmTrajectorySmoother(
-            self._make_arm_trajectory_config(robots.LEFT),
-            name="left",
-        )
-        self._right_arm_smoother = Sysmo32ArmTrajectorySmoother(
-            self._make_arm_trajectory_config(robots.RIGHT),
-            name="right",
-        )
+        self._left_arm_smoother = self._make_arm_smoother(robots.LEFT)
+        self._right_arm_smoother = self._make_arm_smoother(robots.RIGHT)
         self._hand_mapper = Sysmo32HandGestureMapper(
             default_action=self.config.hand.default_action,
             grasp_action=self.config.hand.grasp_action,
@@ -422,8 +444,32 @@ class Sysmo32RealControl(Component):
         )
         return replace(self.config.arm, max_joint_velocity_rad_s=mirror_velocity)
 
-    def _make_arm_trajectory_config(self, hand_side: str) -> Sysmo32ArmTrajectoryConfig:
+    def _arm_joint_limit_slice(self, hand_side: str) -> tuple[tuple[float, ...], tuple[float, ...]]:
         offset = 0 if hand_side == robots.LEFT else 6
+        return (
+            tuple(float(v) for v in self.config.arm.joint_lower_limits_rad[offset : offset + 6]),
+            tuple(float(v) for v in self.config.arm.joint_upper_limits_rad[offset : offset + 6]),
+        )
+
+    def _make_arm_smoother(self, hand_side: str):
+        mode = self.config.arm_trajectory_smoother
+        if not self.config.enable_arm_min_snap or mode == "none":
+            return Sysmo32JerkLimitedServoSmoother(
+                Sysmo32JerkLimitedServoConfig(enabled=False),
+                name=hand_side,
+            )
+        if mode == "jerk_limited_servo":
+            return Sysmo32JerkLimitedServoSmoother(
+                self._make_arm_servo_config(hand_side),
+                name=hand_side,
+            )
+        return Sysmo32ArmTrajectorySmoother(
+            self._make_arm_trajectory_config(hand_side),
+            name=hand_side,
+        )
+
+    def _make_arm_trajectory_config(self, hand_side: str) -> Sysmo32ArmTrajectoryConfig:
+        lower, upper = self._arm_joint_limit_slice(hand_side)
         return Sysmo32ArmTrajectoryConfig(
             enabled=self.config.enable_arm_min_snap,
             segment_time_s=self.config.arm_min_snap_segment_time,
@@ -435,12 +481,25 @@ class Sysmo32RealControl(Component):
             max_joint_acceleration_rad_s2=tuple(
                 [float(self.config.arm_min_snap_max_acceleration_rad_s2)] * 6
             ),
-            joint_lower_limits_rad=tuple(
-                float(v) for v in self.config.arm.joint_lower_limits_rad[offset : offset + 6]
+            joint_lower_limits_rad=lower,
+            joint_upper_limits_rad=upper,
+        )
+
+    def _make_arm_servo_config(self, hand_side: str) -> Sysmo32JerkLimitedServoConfig:
+        lower, upper = self._arm_joint_limit_slice(hand_side)
+        return Sysmo32JerkLimitedServoConfig(
+            enabled=True,
+            max_joint_velocity_rad_s=tuple([float(self.config.arm_servo_max_velocity_rad_s)] * 6),
+            max_joint_acceleration_rad_s2=tuple(
+                [float(self.config.arm_servo_max_acceleration_rad_s2)] * 6
             ),
-            joint_upper_limits_rad=tuple(
-                float(v) for v in self.config.arm.joint_upper_limits_rad[offset : offset + 6]
-            ),
+            max_joint_jerk_rad_s3=tuple([float(self.config.arm_servo_max_jerk_rad_s3)] * 6),
+            omega=self.config.arm_servo_omega,
+            damping_ratio=self.config.arm_servo_damping_ratio,
+            target_deadband_rad=self.config.arm_servo_target_deadband_rad,
+            max_dt_s=self.config.arm_servo_max_dt_s,
+            joint_lower_limits_rad=lower,
+            joint_upper_limits_rad=upper,
         )
 
     def _reset_arm_smoothers(self, current_joints_rad: Optional[Sequence[float]] = None) -> None:

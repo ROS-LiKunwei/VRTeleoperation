@@ -107,6 +107,14 @@ def is_headless():
 
 
 def _apply_recording_key_event(key_name: str, events: dict) -> bool:
+    now_s = time.monotonic()
+    last_key = events.get("_last_key_name")
+    last_time_s = float(events.get("_last_key_time_s", 0.0) or 0.0)
+    if key_name == last_key and now_s - last_time_s < 0.35:
+        return True
+    events["_last_key_name"] = key_name
+    events["_last_key_time_s"] = now_s
+
     if key_name == "right":
         if not events.get("exit_early", False):
             print("Right arrow key pressed. Exiting loop...")
@@ -189,6 +197,12 @@ class _TerminalKeyboardListener:
         if self._thread is not None:
             self._thread.join(timeout=0.2)
 
+    def drain(self) -> None:
+        if self._fd is None or self._termios is None:
+            return
+        with suppress(Exception):
+            self._termios.tcflush(self._fd, self._termios.TCIFLUSH)
+
     def _read_sequence(self) -> bytes:
         if self._fd is None or self._os is None or self._select is None:
             return b""
@@ -217,6 +231,7 @@ class _TerminalKeyboardListener:
             key_name = _terminal_sequence_to_recording_key(sequence)
             if key_name is not None:
                 _apply_recording_key_event(key_name, self.events)
+                self.drain()
 
 
 class _RecordingKeyboardListener:
@@ -227,6 +242,13 @@ class _RecordingKeyboardListener:
         for listener in self._listeners:
             with suppress(Exception):
                 listener.stop()
+
+    def drain(self) -> None:
+        for listener in self._listeners:
+            drain = getattr(listener, "drain", None)
+            if drain is not None:
+                with suppress(Exception):
+                    drain()
 
 
 def predict_action(
@@ -328,7 +350,16 @@ def init_keyboard_listener():
         logging.warning("No keyboard listener is available; recording flow can still be stopped with Ctrl+C.")
 
     listener = _RecordingKeyboardListener(listeners) if listeners else None
+    events["_keyboard_listener"] = listener
     return listener, events
+
+
+def _drain_recording_keyboard_events(events: dict) -> None:
+    listener = events.get("_keyboard_listener") if events is not None else None
+    drain = getattr(listener, "drain", None)
+    if drain is not None:
+        with suppress(Exception):
+            drain()
 
 
 def warmup_record(
@@ -594,6 +625,7 @@ def reset_environment(robot, events, reset_time_s, fps):
     # A right-arrow event used to finish the recording phase must not also
     # skip the reset phase. Once reset starts, a new right-arrow press can
     # still set exit_early again and move to the next episode immediately.
+    _drain_recording_keyboard_events(events)
     events["exit_early"] = False
 
     # During environment reset we only need to keep teleoperation paused and
@@ -614,6 +646,11 @@ def reset_environment(robot, events, reset_time_s, fps):
             events["exit_early"] = False
             break
         time.sleep(max(0.001, target_dt))
+
+    _drain_recording_keyboard_events(events)
+    if not events.get("stop_recording", False):
+        events["exit_early"] = False
+        events["rerecord_episode"] = False
 
 
 def stop_recording(robot, listener, display_data):

@@ -92,6 +92,15 @@ def test_sysmo32_speed_mode_4_is_allowed():
     assert command.speed_mode == 4.0
 
 
+def test_sysmo32_real_control_config_normalizes_arm_smoother_mode():
+    config = Sysmo32RealControlConfig(arm_trajectory_smoother="servo")
+
+    assert config.arm_trajectory_smoother == "jerk_limited_servo"
+
+    with pytest.raises(ValueError, match="arm_trajectory_smoother"):
+        Sysmo32RealControlConfig(arm_trajectory_smoother="bad_mode")
+
+
 def test_sysmo32_ik_nullspace_delta_moves_only_unconstrained_joint_toward_reference():
     jacobian = np.array(
         [
