@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Optional
+from typing import Optional, Sequence
 
 import numpy as np
 
@@ -54,10 +54,21 @@ class Sysmo32MujocoCommandMirror(Component):
         joint_state_topic: str = "/joint_states",
         joint_state_publish_hz: float = 50.0,
         arm_command_interpolation_steps: int = 5,
+        interpolation_profile: str = "quintic",
+        expected_command_length: int = SYSMO32_COMMAND_LENGTH,
+        joint_state_joint_names: Sequence[str] | None = None,
+        kinematics_type: str = "sysmo32",
     ):
         self.notify_component_start("sysmo32_mujoco_command_mirror")
         if arm_command_source not in ("zmq", "ros2", "both"):
             raise ValueError("arm_command_source must be one of: zmq, ros2, both")
+        if kinematics_type not in ("sysmo32", "fa"):
+            raise ValueError("kinematics_type must be one of: sysmo32, fa")
+        interpolation_profile = str(interpolation_profile or "quintic").strip().lower()
+        if interpolation_profile in ("septic", "seventh_order", "minimum_snap"):
+            interpolation_profile = "min_snap"
+        if interpolation_profile not in ("quintic", "min_snap"):
+            raise ValueError("interpolation_profile must be one of: quintic, min_snap")
         self.host = host
         self.control_dt = control_dt
         self.render = render
@@ -68,6 +79,18 @@ class Sysmo32MujocoCommandMirror(Component):
         self.joint_state_topic = joint_state_topic
         self.joint_state_publish_hz = max(0.1, float(joint_state_publish_hz))
         self.arm_command_interpolation_steps = max(1, int(arm_command_interpolation_steps))
+        self.interpolation_profile = interpolation_profile
+        self.expected_command_length = int(expected_command_length)
+        self.joint_state_joint_names = tuple(joint_state_joint_names or (SYSMO32_LEFT_JOINT_NAMES + SYSMO32_RIGHT_JOINT_NAMES))
+        self.kinematics_type = kinematics_type
+        self.robot_label = "FA" if kinematics_type == "fa" else "SYSMO-32"
+        self._arm_command_topic = SYSMO32_ARM_COMMAND_TOPIC
+        self._arm_command_type = Sysmo32ArmCommand
+        if self.kinematics_type == "fa":
+            from beavr.teleop.components.interface.robots.fa_command_builder import FaUpperPositionCommand
+
+            self._arm_command_topic = "fa_upper_position_command"
+            self._arm_command_type = FaUpperPositionCommand
         self._last_no_hand_action_log_time = 0.0
         self._last_arm_pose_log_time = 0.0
         self._last_joint_state_publish_time = 0.0
@@ -87,8 +110,8 @@ class Sysmo32MujocoCommandMirror(Component):
         self._arm_command_subscriber = ZMQSubscriber(
             host,
             arm_command_port,
-            SYSMO32_ARM_COMMAND_TOPIC,
-            message_type=Sysmo32ArmCommand,
+            self._arm_command_topic,
+            message_type=self._arm_command_type,
         )
         # 订阅真实左手动作字段
         self._left_hand_action_subscriber = ZMQSubscriber(
@@ -112,17 +135,27 @@ class Sysmo32MujocoCommandMirror(Component):
         if self.arm_command_source in ("ros2", "both") or self.publish_joint_states:
             self._init_ros2_interfaces()
 
-        self._kinematics: Optional[Sysmo32MujocoKinematics] = None
+        self._kinematics: Optional[object] = None
         if load_model:
-            # 加载真实机械臂模型
-            self._kinematics = Sysmo32MujocoKinematics(urdf_path)
+            self._kinematics = self._make_kinematics(urdf_path)
             if not self._kinematics.available:
                 logger.warning(
-                    "SYSMO-32 MuJoCo command mirror cannot load model; "
-                    "falling back to command validation/logging only"
+                    "%s MuJoCo command mirror cannot load model; "
+                    "falling back to command validation/logging only",
+                    self.robot_label,
                 )
             else:
                 self._configure_arm_hold_state()
+
+    def _make_kinematics(self, urdf_path: str):
+        if self.kinematics_type == "fa":
+            from beavr.teleop.components.interface.robots.fa_mujoco_kinematics import (
+                FaKinematicsConfig,
+                FaMujocoKinematics,
+            )
+
+            return FaMujocoKinematics(FaKinematicsConfig(model_path=urdf_path, require_endeff=False))
+        return Sysmo32MujocoKinematics(urdf_path)
 
     def _init_ros2_interfaces(self) -> None:
         try:
@@ -164,7 +197,7 @@ class Sysmo32MujocoCommandMirror(Component):
 
     def _on_ros_arm_command(self, msg) -> None:
         try:
-            command = Sysmo32ArmCommand(timestamp_s=time.time(), values=tuple(float(v) for v in msg.data))
+            command = self._arm_command_type(timestamp_s=time.time(), values=tuple(float(v) for v in msg.data))
         except Exception as exc:
             logger.warning("[MuJoCo][ROS2 ArmCommand] invalid command: %s", exc)
             return
@@ -172,7 +205,7 @@ class Sysmo32MujocoCommandMirror(Component):
 
     def stream(self):
         if self._kinematics is None or not self._kinematics.available:
-            logger.info("SYSMO-32 MuJoCo command mirror running without model; logging only")
+            logger.info("%s MuJoCo command mirror running without model; logging only", self.robot_label)
             while True:
                 self._receive_once()
                 time.sleep(self.control_dt)
@@ -180,7 +213,7 @@ class Sysmo32MujocoCommandMirror(Component):
         import mujoco
         import mujoco.viewer
 
-        logger.info("SYSMO-32 MuJoCo command mirror started")
+        logger.info("%s MuJoCo command mirror started", self.robot_label)
         if self.render:
             with mujoco.viewer.launch_passive(self._kinematics.model, self._kinematics.data) as viewer:
                 while viewer.is_running():
@@ -245,11 +278,19 @@ class Sysmo32MujocoCommandMirror(Component):
 
     def apply_arm_command(self, command: Sysmo32ArmCommand) -> None:
         values = np.asarray(command.values, dtype=np.float64)
-        if values.shape != (SYSMO32_COMMAND_LENGTH,) or not np.all(np.isfinite(values)):
+        expected_command_length = getattr(self, "expected_command_length", SYSMO32_COMMAND_LENGTH)
+        if values.shape != (expected_command_length,) or not np.all(np.isfinite(values)):
             logger.warning("[MuJoCo][ArmCommand] invalid command shape/value: %s", values)
             return
         if self._kinematics is None or not self._kinematics.available:
             logger.debug("[MuJoCo][ArmCommand] received valid command without model: %s", values)
+            return
+        if values.size < len(self._arm_joint_ids):
+            logger.warning(
+                "[MuJoCo][ArmCommand] command length %d is shorter than configured arm joints %d",
+                values.size,
+                len(self._arm_joint_ids),
+            )
             return
 
         now_s = time.time()
@@ -278,7 +319,7 @@ class Sysmo32MujocoCommandMirror(Component):
             return
         duration_s = max(self.control_dt, self.control_dt * self.arm_command_interpolation_steps)
         progress = (now_s - self._trajectory_start_time_s) / duration_s
-        blend = _quintic_blend(progress)
+        blend = _trajectory_blend(progress, getattr(self, "interpolation_profile", "quintic"))
         self._hold_joint_positions = self._trajectory_start_positions + (
             self._trajectory_target_positions - self._trajectory_start_positions
         ) * blend
@@ -305,27 +346,40 @@ class Sysmo32MujocoCommandMirror(Component):
 
         msg = self._joint_state_msg_type()
         msg.header.stamp = self._ros_node.get_clock().now().to_msg()
-        msg.name = list(SYSMO32_LEFT_JOINT_NAMES + SYSMO32_RIGHT_JOINT_NAMES)
+        msg.name = list(self.joint_state_joint_names)
         msg.position = [
             float(self._kinematics.data.qpos[qpos_addr]) for qpos_addr in self._arm_qpos_addrs
-        ]
+        ][: len(msg.name)]
         self._joint_state_pub.publish(msg)
 
     def _log_applied_arm_command(self, values: np.ndarray) -> None:
         now = time.time()
         if now - self._last_arm_pose_log_time >= 0.5:
             self._last_arm_pose_log_time = now
-            left_site = self._kinematics.data.site_xpos[self._kinematics.left_site_id].copy()
-            right_site = self._kinematics.data.site_xpos[self._kinematics.right_site_id].copy()
+            left_site_id = getattr(self._kinematics, "left_site_id", -1)
+            right_site_id = getattr(self._kinematics, "right_site_id", -1)
+            if left_site_id >= 0 and right_site_id >= 0:
+                left_site = self._kinematics.data.site_xpos[left_site_id].copy()
+                right_site = self._kinematics.data.site_xpos[right_site_id].copy()
+                logger.debug(
+                    "[MuJoCo][ArmCommand] applied left=%s right=%s left_site=%s right_site=%s",
+                    values[: len(self._kinematics.left_joint_ids)],
+                    values[len(self._kinematics.left_joint_ids) : len(self._arm_joint_ids)],
+                    left_site,
+                    right_site,
+                )
+                return
             logger.debug(
-                "[MuJoCo][ArmCommand] applied left=%s right=%s left_site=%s right_site=%s",
-                values[:6],
-                values[6:12],
-                left_site,
-                right_site,
+                "[MuJoCo][ArmCommand] applied left=%s right=%s",
+                values[: len(self._kinematics.left_joint_ids)],
+                values[len(self._kinematics.left_joint_ids) : len(self._arm_joint_ids)],
             )
             return
-        logger.debug("[MuJoCo][ArmCommand] applied left=%s right=%s", values[:6], values[6:12])
+        logger.debug(
+            "[MuJoCo][ArmCommand] applied left=%s right=%s",
+            values[: len(self._kinematics.left_joint_ids)],
+            values[len(self._kinematics.left_joint_ids) : len(self._arm_joint_ids)],
+        )
 
     def on_left_hand_action(self, action_id: int) -> None:
         self._log_hand_action(robots.LEFT, action_id)
@@ -366,3 +420,14 @@ __all__ = ["Sysmo32MujocoCommandMirror"]
 def _quintic_blend(progress: float) -> float:
     tau = float(np.clip(progress, 0.0, 1.0))
     return 10.0 * tau**3 - 15.0 * tau**4 + 6.0 * tau**5
+
+
+def _min_snap_blend(progress: float) -> float:
+    tau = float(np.clip(progress, 0.0, 1.0))
+    return 35.0 * tau**4 - 84.0 * tau**5 + 70.0 * tau**6 - 20.0 * tau**7
+
+
+def _trajectory_blend(progress: float, interpolation_profile: str = "quintic") -> float:
+    if interpolation_profile == "min_snap":
+        return _min_snap_blend(progress)
+    return _quintic_blend(progress)

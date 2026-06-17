@@ -17,6 +17,7 @@ from typing import Protocol
 from beavr.lerobot.common.robot_devices.robots.configs import (
     AlohaRobotConfig,
     BeavrBotConfig,
+    FaAdapterConfig,
     KochBimanualRobotConfig,
     KochRobotConfig,
     LeKiwiRobotConfig,
@@ -76,6 +77,8 @@ def make_robot_config(robot_type: str, **kwargs) -> RobotConfig:
         return BeavrBotConfig(**kwargs)
     elif robot_type == "sysmo32_adapter":
         return Sysmo32AdapterConfig(**kwargs)
+    elif robot_type == "fa_adapter":
+        return FaAdapterConfig(**kwargs)
     else:
         raise ValueError(f"Robot type '{robot_type}' is not available.")
 

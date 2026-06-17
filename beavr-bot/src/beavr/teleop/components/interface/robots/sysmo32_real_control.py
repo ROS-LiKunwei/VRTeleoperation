@@ -22,8 +22,10 @@ from beavr.teleop.common.network.utils import cleanup_zmq_resources
 from beavr.teleop.components import Component
 from beavr.teleop.components.detector.detector_types import InputFrame, SessionCommand
 from beavr.teleop.components.interface.interface_types import CartesianState
+from beavr.teleop.components.interface.robots.arm_command_publisher import (
+    Sysmo32CompatibleCommandPublisher,
+)
 from beavr.teleop.components.interface.robots.sysmo32_command import (
-    SYSMO32_COMMAND_LENGTH,
     SYSMO32_HAND_ACTION_GRASP,
     SYSMO32_HAND_ACTION_RELEASE,
     Sysmo32ArmCommand,
@@ -170,6 +172,7 @@ class Sysmo32Ros2Bridge:
         self._rclpy = None
         self._node = None
         self._arm_pub = None
+        self._arm_command_publisher = None
         self._left_hand_pub = None
         self._right_hand_pub = None
         if require_ros:
@@ -187,10 +190,11 @@ class Sysmo32Ros2Bridge:
             self._node = rclpy.create_node("sysmo32_real_control")
             self._arm_msg_type = Float64MultiArray
             self._hand_msg_type = Int32
-            self._arm_pub = self._node.create_publisher(
-                Float64MultiArray,
-                self.topics.arm_command_topic,
-                self.topics.arm_command_queue_size,
+            self._arm_command_publisher = Sysmo32CompatibleCommandPublisher(
+                ros_node=self._node,
+                msg_type=Float64MultiArray,
+                topic=self.topics.arm_command_topic,
+                queue_size=self.topics.arm_command_queue_size,
             )
             self._left_hand_pub = self._node.create_publisher(
                 Int32,
@@ -225,14 +229,9 @@ class Sysmo32Ros2Bridge:
             self._rclpy.spin_once(self._node, timeout_sec=0.0)
 
     def publish_arm_command(self, command: Sysmo32ArmCommand) -> bool:
-        if not self.available or self._arm_pub is None:
+        if not self.available or self._arm_command_publisher is None:
             return False
-        if len(command.values) != SYSMO32_COMMAND_LENGTH:
-            raise ValueError("Refusing to publish non-18D SYSMO-32 command")
-        msg = self._arm_msg_type()
-        msg.data = command.to_list()
-        self._arm_pub.publish(msg)
-        return True
+        return self._arm_command_publisher.publish(command)
 
     def publish_hand_action(self, hand_side: str, action_id: int) -> bool:
         if action_id not in (SYSMO32_HAND_ACTION_RELEASE, SYSMO32_HAND_ACTION_GRASP):

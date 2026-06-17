@@ -1,27 +1,67 @@
-你是一个机器人遥操作工程代码 Agent。请基于当前 BeaVR-bot 的 SYSMO-32 实机遥操作架构，实现一个 **jerk-limited online servo smoother**，用于替代或并行支持当前七次 minimum-snap 点到点轨迹优化，从而提升 VR 遥操作的动作跟手效果。
+你是一个机器人遥操作系统开发 Agent。请基于当前 BeaVR / beavr-bot 工程，把现有 SYSMO-32 双臂遥操作架构适配到 FA 机器人。
 
-# 1. 当前架构背景
+## 一、当前 BeaVR 遥操作架构背景
 
-当前 SYSMO-32 实机遥操作链路为：
+当前工程中已经存在 SYSMO-32 的实机遥操作链路，整体数据流为：
 
 ```text
-PICO 4 App
-    -> ZMQ 网络层
-    -> VR detector / keypoint transform / operator
-    -> 左右手 CartesianTarget
-    -> Sysmo32RealControl 实机主控制循环
-    -> /joint_states 当前 12 关节反馈
-    -> Sysmo32MujocoKinematics.solve_ik 左右臂 IK
-    -> Sysmo32ArmTrajectorySmoother 七次 minimum-snap 关节轨迹
-    -> Sysmo32CommandLimiter joint jump / velocity / joint limit 限幅
-    -> Sysmo32CommandBuilder 18 维 arm command
-    -> /sysmo_left_arm_controller/commands
+PICO4 Unity
+  -> PICO4 detector
+  -> keypoint_transform left/right
+  -> Sysmo32Operator left/right
+  -> CartesianTarget via ZMQ endeff_coords
+  -> one bimanual Sysmo32RealControl
+  -> /joint_states feedback
+  -> IK + smoothing + safety limiting
+  -> arm command
+  -> ROS2 position command topic
+  -> optional MuJoCo mirror
 ```
 
-当前实机 arm command 只有一个话题：
+当前 SYSMO-32 实机控制层只启动一个双臂控制器，不是左右臂各一个控制器。它同时订阅左右手的 CartesianTarget、reset、pause/resume、transformed hand coords，并从 `/joint_states` 获取当前双臂关节反馈。
+
+当前默认 arm smoother 是：
 
 ```text
-/sysmo_left_arm_controller/commands
+jerk_limited_servo
+```
+
+用于连续追踪 VR 流式目标；也保留：
+
+```text
+min_snap
+none
+```
+
+## 二、本次目标
+
+新增 FA 机器人遥操作适配，使 FA 可以复用现有 VR 遥操作链路：
+
+```text
+PICO4 Unity
+  -> PICO4 detector
+  -> keypoint_transform left/right
+  -> FaOperator left/right
+  -> CartesianTarget via ZMQ endeff_coords
+  -> one bimanual FaRealControl
+  -> /joint_states feedback
+  -> FA C++ IK
+  -> jerk-limited smoothing
+  -> command limiting
+  -> 16D Float64MultiArray
+  -> /upper_position_controller/commands
+```
+
+FA 机器人模型文件路径为：
+
+```text
+/home/likunwei/dataCollection/beavr-bot/robots/fa_description
+```
+
+FA 上肢原生位置控制 topic 为：
+
+```text
+/upper_position_controller/commands
 ```
 
 消息类型：
@@ -30,771 +70,714 @@ PICO 4 App
 std_msgs/msg/Float64MultiArray
 ```
 
-18 维 payload 格式为：
+含义：
 
 ```text
-data[0:6]    = left_arm_6
-data[6:12]   = right_arm_6
-data[12]     = speed_mode
-data[13:17]  = reserved / default 0.0
-data[17]     = neck_joint
+一次发送 16 个上肢目标关节位置，单位 rad
 ```
 
-注意：
+16 维关节顺序来自 `controllers.yaml`：
 
 ```text
-不要创建 /sysmo_right_arm_controller/commands
-不要改变 /sysmo_left_arm_controller/commands 的消息类型
-不要改变上游 VR / Transform / Operator 的数据协议
+data[0]  = left_shoulder_pitch_joint
+data[1]  = left_shoulder_roll_joint
+data[2]  = left_shoulder_yaw_joint
+data[3]  = left_elbow_joint
+data[4]  = left_wrist_yaw_joint
+data[5]  = left_wrist_pitch_joint
+data[6]  = left_wrist_roll_joint
+
+data[7]  = right_shoulder_pitch_joint
+data[8]  = right_shoulder_roll_joint
+data[9]  = right_shoulder_yaw_joint
+data[10] = right_elbow_joint
+data[11] = right_wrist_yaw_joint
+data[12] = right_wrist_pitch_joint
+data[13] = right_wrist_roll_joint
+
+data[14] = neck_yaw_joint
+data[15] = neck_pitch_joint
 ```
 
-当前实机配置里 `speed_mode=4.0`，表示底层按较快速度执行，上层必须负责轨迹平滑和安全限幅。
+注意：本阶段不要再复用 SYSMO-32 的 18 维 `/sysmo_left_arm_controller/commands` 接口。FA 应该直接发布到 `/upper_position_controller/commands`。
 
-# 2. 为什么要改成 jerk-limited online servo
+## 三、FA C++ 逆解优先级要求
 
-当前七次 minimum-snap 是点到点轨迹：
+FA 已经有可用的 C++ 逆解功能包 `ik_7dof`，请优先复用它，不要重新从零实现 Python IK。
+
+README 中给出的核心接口如下：
+
+```cpp
+#include "ik_7dof/fa_ik_solver.hpp"
+
+using namespace fa_arm_kinematic;
+
+IKSolver solver(urdf_file, srdf_file);
+
+ArmKinematicsOptions options;
+options.reference_frame = ArmReferenceFrame::PELVIS;
+
+Eigen::VectorXd q = Eigen::VectorXd::Zero(7);
+PoseSE3 fk = solver.computeArmFK_SE3(q, ArmSide::LEFT, options);
+
+pinocchio::SE3 target;
+target.translation(fk.p);
+target.rotation(fk.R);
+
+IKResult result = solver.solveArmIK(
+    target, ArmSide::LEFT, Eigen::VectorXd(), options, 1000, 1e-3);
+```
+
+`fa_ik_solver` 支持两种参考坐标系：
 
 ```text
-start -> goal -> duration -> sample trajectory
+reference_frame:=pelvis
+reference_frame:=arm_base
 ```
 
-它适合固定目标点运动，但 VR 遥操作是连续流式目标：
+默认使用：
 
 ```text
-target_0, target_1, target_2, target_3, ...
+pelvis
 ```
 
-如果每 16ms~20ms 都有新目标，而 smoother 不断对新目标做点到点更新，会出现：
+适配时优先使用：
 
 ```text
-频繁滚动更新
-轨迹相位滞后
-小幅连续目标跟随变肉
-快速目标下 remaining / duration 被不断刷新
+ArmReferenceFrame::PELVIS
 ```
 
-当前日志结论说明：
+因为 BeaVR 中 `CartesianTarget(frame_id="base")` 更接近全身/躯干统一坐标系。若 FA 的 `base` 与 `pelvis` 不一致，请增加明确的外参变换配置，而不要在代码里硬编码猜测。
+
+## 四、实现方案要求
+
+### 1. 新增 FA robot config
+
+请参考现有 `sysmo32_config.py`、`sysmo_mujoco_config.py` 或类似配置文件，新增：
 
 ```text
-VR target 接收约 50Hz
-arm command 发布约 60Hz
-IK 左臂约 3.1ms，右臂约 2.4ms
-publish 约 0.2ms
-loop 约 7.3ms
-source_to_publish_ms 平均约 99ms
-REAL_ARM_COMMAND_DELTA 平均约 0.15rad，p95 约 0.22rad
+beavr/teleop/configs/robots/fa_config.py
 ```
 
-结论：
+配置内容至少包括：
 
 ```text
-当前不是没有发布 command；
-IK 和 ROS2 publish 不是主要瓶颈；
-机械臂能跟随，但快速目标下存在明显相位滞后；
-主要瓶颈是流式目标轨迹滞后、上游排队延迟、后级限幅/底层跟踪误差叠加。
+robot_name = "fa"
+laterality = left | right | bimanual
+control_backend = mujoco | real | real_with_mujoco
+
+model_root = /home/likunwei/dataCollection/beavr-bot/robots/fa_description
+urdf_file = 待从 fa_description 中确认
+srdf_file = 待从 fa_description 或 moveit config 中确认
+
+left_arm_joint_names:
+  - left_shoulder_pitch_joint
+  - left_shoulder_roll_joint
+  - left_shoulder_yaw_joint
+  - left_elbow_joint
+  - left_wrist_yaw_joint
+  - left_wrist_pitch_joint
+  - left_wrist_roll_joint
+
+right_arm_joint_names:
+  - right_shoulder_pitch_joint
+  - right_shoulder_roll_joint
+  - right_shoulder_yaw_joint
+  - right_elbow_joint
+  - right_wrist_yaw_joint
+  - right_wrist_pitch_joint
+  - right_wrist_roll_joint
+
+neck_joint_names:
+  - neck_yaw_joint
+  - neck_pitch_joint
+
+upper_position_command_topic = /upper_position_controller/commands
+upper_position_command_type = std_msgs/msg/Float64MultiArray
+upper_position_command_size = 16
+
+left_ee_frame = 待确认
+right_ee_frame = 待确认
+
+H_R_V_FA = FA 专用 VR 到 robot base/pelvis 的坐标变换矩阵
+
+joint_limits
+velocity_limits
+acceleration_limits
+jerk_limits
+home_joint_positions
+ready_joint_positions
+neck_default_positions
 ```
 
-因此请实现一个在线 servo smoother：
+如果 URDF、SRDF、末端 frame、joint limit 无法自动确定，请不要瞎填。代码中使用 TODO、配置项或显式报错，并在最终报告中列出需要人工确认的字段。
+
+### 2. 新增 FA Operator
+
+请参考 `Sysmo32Operator`，新增：
 
 ```text
-每个控制周期读取最新 IK/limit 后的 target_joints
-根据当前 command / velocity / acceleration 状态
-在线生成下一帧 command
-限制 velocity / acceleration / jerk
-永远追最新目标，不再规划完整点到点 duration
-```
-
-# 3. 新增 smoother 类型
-
-请新增配置项，允许选择 smoother 类型：
-
-```yaml
-arm_trajectory_smoother: "jerk_limited_servo"
-```
-
-可选值建议：
-
-```text
-"min_snap"              保留现有七次 minimum-snap 行为
-"jerk_limited_servo"    新增 jerk-limited online servo
-"none"                  不做上层 smoothing，仅保留原有限幅
-```
-
-默认建议：
-
-```yaml
-arm_trajectory_smoother: "jerk_limited_servo"
-```
-
-但如果担心兼容性，可以先默认 `"min_snap"`，同时支持通过配置切到 `"jerk_limited_servo"`。
-
-# 4. 推荐新增文件和类
-
-当前实现位置：
-
-```text
-src/beavr/teleop/components/interface/robots/sysmo32_trajectory.py
-```
-
-新增类：
-
-```python
-class Sysmo32JerkLimitedServoSmoother:
-    ...
-```
-
-左右臂各一个实例：
-
-```python
-self._left_arm_smoother = Sysmo32JerkLimitedServoSmoother(name="left", ...)
-self._right_arm_smoother = Sysmo32JerkLimitedServoSmoother(name="right", ...)
-```
-
-不要左右臂共用一个 smoother 状态。
-
-# 5. 在线 servo 状态变量
-
-每个 servo 内部维护：
-
-```python
-self._q_cmd       # 当前实际下发 command，shape=(6,)
-self._q_vel       # 当前命令速度，shape=(6,)
-self._q_acc       # 当前命令加速度，shape=(6,)
-self._last_time   # 上一次 update 时间
-self._initialized # 是否已初始化
-```
-
-初始化优先级：
-
-```text
-优先使用 /joint_states feedback
-其次使用 target_joints
-最后使用 last command
-绝对不要首帧默认从全 0 跳过去
-```
-
-# 6. jerk-limited online servo 核心算法
-
-每一帧输入：
-
-```python
-target_joints          # IK + safety pre-limit 后的目标关节，shape=(6,)
-feedback_joints        # 当前 /joint_states 对应手臂反馈，shape=(6,)
-now                    # time.monotonic()
-```
-
-每一帧输出：
-
-```python
-q_cmd                  # 本周期要下发的平滑关节 command，shape=(6,)
-```
-
-算法逻辑：
-
-```python
-error = target_joints - q_cmd
-
-desired_acc = omega**2 * error - 2.0 * damping_ratio * omega * q_vel
-
-desired_acc = clip(desired_acc, -amax, amax)
-
-delta_acc = desired_acc - q_acc
-delta_acc = clip(delta_acc, -jmax * dt, jmax * dt)
-
-q_acc = q_acc + delta_acc
-q_acc = clip(q_acc, -amax, amax)
-
-q_vel = q_vel + q_acc * dt
-q_vel = clip(q_vel, -vmax, vmax)
-
-q_cmd = q_cmd + q_vel * dt
-q_cmd = clamp_to_joint_limits(q_cmd)
-```
-
-默认使用临界阻尼：
-
-```yaml
-arm_servo_damping_ratio: 1.0
-```
-
-`omega` 控制响应速度：
-
-```text
-omega 越大，跟手越快，但更容易抖或触发限幅
-omega 越小，更稳但更慢
-```
-
-# 7. 推荐配置项
-
-请在 SYSMO-32 config / YAML 中新增：
-
-```yaml
-arm_trajectory_smoother: "jerk_limited_servo"
-
-arm_servo_omega: 35.0
-arm_servo_damping_ratio: 1.0
-
-arm_servo_max_velocity_rad_s: 3.0
-arm_servo_max_acceleration_rad_s2: 10.0
-arm_servo_max_jerk_rad_s3: 120.0
-
-arm_servo_target_deadband_rad: 0.0005
-arm_servo_max_dt_s: 0.05
-```
-
-保守真机首测建议：
-
-```yaml
-arm_trajectory_smoother: "jerk_limited_servo"
-
-arm_servo_omega: 25.0
-arm_servo_damping_ratio: 1.0
-
-arm_servo_max_velocity_rad_s: 2.0
-arm_servo_max_acceleration_rad_s2: 10.0
-arm_servo_max_jerk_rad_s3: 100.0
-
-arm_command_speed_mode: 0.0
-```
-
-稳定后再逐步提高：
-
-```yaml
-arm_servo_omega: 35.0
-arm_servo_max_velocity_rad_s: 3.0
-arm_servo_max_acceleration_rad_s2: 20.0
-arm_servo_max_jerk_rad_s3: 200.0
-arm_command_speed_mode: 4.0
-```
-
-更激进但需要谨慎：
-
-```yaml
-arm_servo_omega: 45.0
-arm_servo_max_velocity_rad_s: 3.0
-arm_servo_max_acceleration_rad_s2: 30.0
-arm_servo_max_jerk_rad_s3: 300.0
-arm_command_speed_mode: 4.0
-```
-
-不要默认使用激进配置。
-
-# 8. dt 处理要求
-
-控制循环理论接近 60Hz：
-
-```text
-dt ≈ 0.0167s
-```
-
-但实机可能有调度抖动。必须处理 dt 异常：
-
-```python
-dt = now - self._last_time
-dt = np.clip(dt, min_dt, max_dt)
-```
-
-如果 `dt > max_dt`，说明控制循环断帧或 pause/resume 后恢复。此时不要直接积分很大一步，应该：
-
-```text
-clamp dt 到 max_dt
-必要时 reset velocity / acceleration
-低频 warning
-```
-
-推荐：
-
-```yaml
-arm_servo_max_dt_s: 0.05
-```
-
-# 9. feedback resync 要求
-
-如果命令状态和真实 `/joint_states` 差距过大，说明底层跟不上、暂停恢复、或者发生了控制断层。
-
-请实现 resync：
-
-```python
-if feedback_joints is valid:
-    err_feedback = max(abs(feedback_joints - q_cmd))
-    if err_feedback > resync_threshold_rad:
-        q_cmd = feedback_joints.copy()
-        q_vel[:] = 0.0
-        q_acc[:] = 0.0
-```
-
-后续可选配置：
-
-```yaml
-arm_servo_resync_threshold_rad: 0.15
-```
-
-当前代码未默认启用 feedback resync。原因是最近日志里 `REAL_ARM_COMMAND_DELTA`
-本身会达到 0.15rad 左右，如果每帧按 feedback 重同步，可能把 command 状态拖住。
-
-注意：
-
-```text
-resync 不能每帧频繁触发，否则 command 会被 feedback 拖住，跟手性变差。
-需要低频日志记录 resync 次数。
-```
-
-# 10. target jump 处理要求
-
-如果 IK 目标突然大跳，比如断帧、重置、VR tracking 丢失恢复：
-
-```python
-target_jump = max(abs(target_joints - previous_target_joints))
-```
-
-如果超过：
-
-```yaml
-arm_servo_target_jump_threshold_rad: 0.6
-```
-
-当前代码仍由 `Sysmo32CommandLimiter.max_joint_jump_rad` 负责最终跳变保护。
-
-不要用激进速度追过去。应选择以下策略之一：
-
-```text
-策略 A：保持当前 command，并等待下一帧稳定 target
-策略 B：reset servo，以当前 feedback 为 q_cmd，速度/加速度清零
-策略 C：临时降低 omega / vmax / amax / jmax 一段时间
-```
-
-首版建议策略 B：
-
-```python
-reset(feedback_joints or q_cmd)
-```
-
-并低频 warning。
-
-# 11. pause/resume 行为
-
-pause 时：
-
-```text
-reset online servo
-q_cmd 对齐当前 /joint_states 或当前 hold command
-q_vel = 0
-q_acc = 0
-继续发布 hold command，不追旧 target
-```
-
-resume 时：
-
-```text
-从当前 /joint_states 重新初始化
-不要继续追 pause 前旧 target
-清空 pending target 或忽略 pause 前 target
-```
-
-这点必须和现有 `safety_hold_arm_on_pause=True`、`pause_hold_heartbeat_hz=20.0` 兼容。
-
-# 12. target missing 行为
-
-如果某一侧手臂本周期没有新 target：
-
-```text
-不要外推旧目标
-不要继续用旧速度漂移
-应保持当前 command 或继续缓慢收敛到 last target
-```
-
-建议首版：
-
-```python
-if missing_target:
-    q_vel *= damping_decay
-    q_acc[:] = 0.0
-    q_cmd = q_cmd
-```
-
-或者：
-
-```text
-继续以 last target 更新，但必须有 target timeout，例如 0.1s。
-超过 timeout 后 hold 当前 command。
-```
-
-后续可选配置：
-
-```yaml
-arm_servo_target_timeout_s: 0.10
-```
-
-当前代码仍复用 `CartesianTarget` stale 检查和 pause/reset 时的 smoother reset。
-
-超过 timeout：
-
-```text
-hold current command
-q_vel -> 0
-q_acc -> 0
-```
-
-# 13. joint limit 与后级 limiter 顺序
-
-当前架构中原有后级 limiter 是：
-
-```text
-Sysmo32CommandLimiter
-    max_joint_velocity_rad_s = 3.0
-    max_joint_jump_rad = 0.5
-```
-
-请保持后级 limiter，不要删除。
-
-新顺序建议为：
-
-```text
-IK target
-    -> optional pre-clamp joint limit
-    -> online jerk-limited servo
-    -> Sysmo32CommandLimiter 后级 safety limit
-    -> Sysmo32CommandBuilder 18 维 command
-    -> /sysmo_left_arm_controller/commands
-```
-
-servo 内部也可以做 joint limit clamp，但它是防御性保护。最终安全仍由 `Sysmo32CommandLimiter` 兜底。
-
-# 14. RealControl 接入要求
-
-当前 `Sysmo32RealControl` 中应该已有类似逻辑：
-
-```text
-left IK joints
-right IK joints
--> smoother
--> limiter
--> command builder
--> publish
-```
-
-请改造成可配置：
-
-```python
-if self.arm_trajectory_smoother == "min_snap":
-    left_smooth = self.left_arm_min_snap.update_and_sample(...)
-    right_smooth = self.right_arm_min_snap.update_and_sample(...)
-
-elif self.arm_trajectory_smoother == "jerk_limited_servo":
-    left_smooth = self.left_arm_servo.update(
-        target_joints=left_limited_or_ik_target,
-        feedback_joints=current_left_feedback,
-        now=now,
-        target_timestamp=left_target_timestamp,
-        target_valid=left_target_valid,
-        paused=not self._teleop_active,
-    )
-    right_smooth = self.right_arm_servo.update(...)
-
-elif self.arm_trajectory_smoother == "none":
-    left_smooth = left_limited_or_ik_target
-    right_smooth = right_limited_or_ik_target
-```
-
-然后统一进入：
-
-```python
-limited_command = self.command_limiter.limit(
-    left_smooth,
-    right_smooth,
-    current_joint_states,
-    ...
-)
-
-cmd = self.command_builder.build(
-    left_arm=limited_command.left,
-    right_arm=limited_command.right,
-    speed_mode=self.arm_command_speed_mode,
-    ...
-)
-
-self.arm_pub.publish(cmd)
-```
-
-最终发布仍然只能是：
-
-```text
-/sysmo_left_arm_controller/commands
-```
-
-不要新增 `/sysmo_right_arm_controller/commands`。
-
-# 15. command cache / LeRobot action cache
-
-LeRobot action cache 应记录最终实际下发的平滑 command，而不是 IK raw target。
-
-也就是：
-
-```text
-action = after online servo + after final command limiter 的 left/right arm command
-```
-
-如果当前 action cache 语义已经记录最终 arm command，请保持该语义。
-
-建议额外 debug 字段记录：
-
-```text
-raw_ik_target
-online_servo_output
-final_limited_command
-joint_states_feedback
-```
-
-但主 action 应该是最终实际下发 command。
-
-# 16. 日志和诊断要求
-
-新增启动配置日志：
-
-```text
-SYSMO-32 online jerk-limited servo config:
-enabled/type=...
-omega=...
-damping_ratio=...
-vmax=...
-amax=...
-jmax=...
-resync_threshold=...
-target_timeout=...
-speed_mode=...
-```
-
-新增低频诊断：
-
-```text
-[Diag][ONLINE_SERVO]
-side=left/right
-target_error_max_rad=...
-cmd_vel_max_rad_s=...
-cmd_acc_max_rad_s2=...
-cmd_jerk_max_rad_s3=...
-feedback_error_max_rad=...
-resync_count=...
-target_timeout_count=...
-target_jump_count=...
-dt_ms=...
-```
-
-新增与原有诊断联动观察：
-
-```text
-[Diag][REAL_ARM_COMMAND_DELTA]
-[Diag][TIMING_REAL]
-[Diag][REAL_ARM_COMMAND_RATE]
-limit=joint velocity limited / joint jump limited
+FaOperator
 ```
 
 目标：
 
 ```text
-REAL_ARM_COMMAND_DELTA 不应持续增大
-joint velocity limited 次数不应显著增加
-joint jump limited 应减少或不出现
-source_to_publish_ms 不一定因 smoother 直接下降，但动作相位滞后应降低
+继承现有 XArmOperator 或通用 Operator 重定向逻辑
+只替换 FA 专用的 H_R_V_FA 坐标变换矩阵
+reset 时记录机器人当前末端位姿和当前 VR 手部基准位姿
+正常运行时计算手相对初始帧的运动
+映射到 FA pelvis/base frame
+生成 CartesianTarget(frame_id="base")
+通过 ZMQ endeff_coords 发布给下游控制层
 ```
 
-# 17. 测试要求
-
-请增加单元测试或离线脚本：
+要求：
 
 ```text
-tests/interface/test_sysmo32_trajectory.py
+不要修改 PICO4 Unity
+不要修改 PICO4 detector
+不要修改 keypoint_transform 输出协议
+不要修改 CartesianTarget 数据结构
+不要破坏 SYSMO-32 Operator
+FA 和 SYSMO-32 通过 robot_name 或配置文件选择
 ```
 
-或：
+### 3. 新增 FA C++ IK 适配层
+
+请新增一个 FA IK 封装层，例如：
 
 ```text
-scripts/offline_test_sysmo32_trajectory.py
+FaArmIkSolver
 ```
 
-至少验证：
-
-1. 首帧从 feedback 初始化，不从 0 跳变。
-2. target 固定时，q_cmd 单调接近 target。
-3. velocity 不超过 vmax。
-4. acceleration 不超过 amax。
-5. jerk 不超过 jmax。
-6. dt 异常大时不会积分出大跳变。
-7. feedback 和 q_cmd 偏差超过 resync_threshold 时会 reset 到 feedback。
-8. target jump 超阈值时会 reset 或 hold。
-9. pause 时 reset，resume 从当前 feedback 重新初始化。
-10. target timeout 后 hold 当前 command，不继续漂移。
-11. 左右臂状态独立。
-12. 输出 shape 必须是 6。
-13. 最终 command builder 输出 18 维。
-14. 不创建 `/sysmo_right_arm_controller/commands`。
-
-# 18. 仿真验证流程
-
-请提供仿真验证方法：
-
-1. 使用 `backend=mujoco` 或 `real_with_mujoco`。
-2. 设置：
-
-```yaml
-arm_trajectory_smoother: "jerk_limited_servo"
-arm_servo_omega: 25.0
-arm_servo_max_velocity_rad_s: 2.0
-arm_servo_max_acceleration_rad_s2: 10.0
-arm_servo_max_jerk_rad_s3: 100.0
-```
-
-3. 记录：
+推荐实现方式之一：
 
 ```text
-raw IK target
-online servo output
-final limited command
-joint_states feedback
+方案 A：新增 ROS2 C++ IK service/action 节点
+  Python FaRealControl 调用该 service/action 获取 IK 结果
+
+方案 B：使用 pybind11 封装 ik_7dof/fa_ik_solver.hpp
+  Python 侧直接调用 C++ IKSolver
+
+方案 C：FaRealControl 改为 C++ 节点
+  直接在 C++ 中订阅 ZMQ/ROS2 输入并调用 IKSolver
 ```
 
-4. 绘制每个关节曲线，确认：
+优先推荐：
 
 ```text
-online servo output 比 raw IK target 平滑
-online servo output 比 min-snap 响应更快
-velocity / acceleration / jerk 没超限
+方案 A 或方案 B
 ```
 
-# 19. 真机保守测试流程
+原因：低侵入，方便保留现有 BeaVR Python 遥操作链路。
 
-真机首测使用保守配置：
-
-```yaml
-arm_trajectory_smoother: "jerk_limited_servo"
-arm_servo_omega: 25.0
-arm_servo_damping_ratio: 1.0
-arm_servo_max_velocity_rad_s: 2.0
-arm_servo_max_acceleration_rad_s2: 10.0
-arm_servo_max_jerk_rad_s3: 100.0
-arm_command_speed_mode: 0.0
-```
-
-真机验证步骤：
+IK 适配层输入：
 
 ```text
-1. 小幅慢速移动 VR 手
-2. 确认 arm command 发布约 60Hz
-3. 确认没有 /sysmo_right_arm_controller/commands
-4. 确认 pause/resume 正常
-5. 检查 joint velocity limited / joint jump limited
-6. 检查 REAL_ARM_COMMAND_DELTA
-7. 检查是否有明显抖动或冲击
+arm_side: left | right
+target_pose: CartesianTarget 对应的 SE3
+current_arm_q: 当前对应手臂 7 维关节角
+reference_frame: pelvis | arm_base
+max_iters
+eps
 ```
 
-如果稳定但慢，再调：
+IK 适配层输出：
 
-```yaml
-arm_servo_omega: 35.0
-arm_servo_max_velocity_rad_s: 3.0
-arm_servo_max_acceleration_rad_s2: 20.0
-arm_servo_max_jerk_rad_s3: 200.0
-arm_command_speed_mode: 0.0
+```text
+success: bool
+q_target: 7 维目标关节角
+position_error
+orientation_error
+iterations
+solve_time_ms
+message
 ```
 
-如果仍稳定，再测试：
+要求：
 
-```yaml
-arm_command_speed_mode: 4.0
+```text
+IK 初值必须优先使用 /joint_states 中对应手臂当前 7 维关节角
+只对有新 CartesianTarget 的手臂调用 IK
+没有新 target 的手臂沿用上一帧安全目标
+IK max_iters 必须配置化
+IK eps 必须配置化
+reference_frame 必须配置化，默认 pelvis
+IK 失败时保持上一帧安全目标，不要输出 NaN
+IK 输出必须检查维度为 7
+IK 输出必须检查有限值 np.isfinite / std::isfinite
+IK 输出必须经过 joint limit 检查或裁剪
 ```
 
-如果 `speed_mode=4.0` 后抖动或限幅变多，回退到：
+### 4. 新增 FA RealControl
 
-```yaml
-arm_command_speed_mode: 0.0
+请新增：
+
+```text
+FaRealControl
 ```
 
-或者降低：
+它应该是一个双臂统一控制器，类似 `Sysmo32RealControl`，不要左右臂各启动一个控制器。
 
-```yaml
-arm_servo_omega
-arm_servo_max_acceleration_rad_s2
-arm_servo_max_jerk_rad_s3
+职责：
+
+```text
+同时订阅 left/right CartesianTarget
+同时处理 left/right reset
+同时处理 pause/resume
+订阅 /joint_states
+提取 FA 左右上肢 7+7 关节反馈
+调用 FA C++ IK
+经过 jerk_limited_servo smoother
+经过 command limiter
+组包成 16 维 Float64MultiArray
+发布到 /upper_position_controller/commands
 ```
 
-# 20. 与 min-snap 的兼容和回退
+控制链路：
 
-必须保留原有 min-snap 实现，不要直接删掉。
-
-配置回退：
-
-```yaml
-arm_trajectory_smoother: "min_snap"
+```text
+CartesianTarget
+  -> FaArmIkSolver / ik_7dof::IKSolver
+  -> FaJerkLimitedServoSmoother 或通用 smoother
+  -> FaCommandLimiter
+  -> FaUpperPositionCommandBuilder
+  -> std_msgs/msg/Float64MultiArray[16]
+  -> /upper_position_controller/commands
 ```
 
-完全关闭：
+### 5. FA 16 维 command builder
 
-```yaml
-arm_trajectory_smoother: "none"
+请新增：
+
+```text
+FaUpperPositionCommandBuilder
 ```
 
-如果线上测试发现 online servo 有问题，可以立即切回 min-snap 或 none。
+输入：
 
-# 21. 实现注意事项
+```text
+left_arm_7
+right_arm_7
+neck_yaw
+neck_pitch
+```
 
-1. 不要在 smoother 内部做 ROS2 publish。
-2. 不要在 smoother 内部订阅 ZMQ。
-3. smoother 只处理关节数组，不处理 CartesianTarget。
-4. IK 仍由 `Sysmo32MujocoKinematics.solve_ik()` 完成。
-5. `/joint_states` 仍由 `Sysmo32RealControl` 读取后传给 smoother。
-6. command builder 仍负责 18 维格式。
-7. command limiter 仍作为最终安全兜底。
-8. pause/resume 状态由 `Sysmo32RealControl` 传入 smoother。
-9. 不要为左右臂各自发布 ROS command；最终必须统一发布一个 18 维 command。
-10. 不要改变手部 `/left_topic_to_hand`、`/right_topic_to_hand` 的逻辑。
+输出：
 
-# 22. 交付内容
+```text
+std_msgs/msg/Float64MultiArray
+长度固定为 16
+单位 rad
+```
 
-完成后请输出：
+映射关系必须严格为：
+
+```text
+data[0]  = left_arm_7[0]  # left_shoulder_pitch_joint
+data[1]  = left_arm_7[1]  # left_shoulder_roll_joint
+data[2]  = left_arm_7[2]  # left_shoulder_yaw_joint
+data[3]  = left_arm_7[3]  # left_elbow_joint
+data[4]  = left_arm_7[4]  # left_wrist_yaw_joint
+data[5]  = left_arm_7[5]  # left_wrist_pitch_joint
+data[6]  = left_arm_7[6]  # left_wrist_roll_joint
+
+data[7]  = right_arm_7[0] # right_shoulder_pitch_joint
+data[8]  = right_arm_7[1] # right_shoulder_roll_joint
+data[9]  = right_arm_7[2] # right_shoulder_yaw_joint
+data[10] = right_arm_7[3] # right_elbow_joint
+data[11] = right_arm_7[4] # right_wrist_yaw_joint
+data[12] = right_arm_7[5] # right_wrist_pitch_joint
+data[13] = right_arm_7[6] # right_wrist_roll_joint
+
+data[14] = neck_yaw_joint
+data[15] = neck_pitch_joint
+```
+
+要求：
+
+```text
+发布前 assert len(data) == 16
+任何 NaN/Inf 直接拒绝发布
+任何关节超限必须限幅或拒绝发布
+日志中打印 left/right/neck 的最大变化量
+pause 时保持上一帧安全目标或进入 hold
+```
+
+### 6. joint_states 解析
+
+`FaRealControl` 必须从 `/joint_states` 中按关节名解析，而不是按数组下标假设。
+
+必须解析：
+
+```text
+left_shoulder_pitch_joint
+left_shoulder_roll_joint
+left_shoulder_yaw_joint
+left_elbow_joint
+left_wrist_yaw_joint
+left_wrist_pitch_joint
+left_wrist_roll_joint
+
+right_shoulder_pitch_joint
+right_shoulder_roll_joint
+right_shoulder_yaw_joint
+right_elbow_joint
+right_wrist_yaw_joint
+right_wrist_pitch_joint
+right_wrist_roll_joint
+
+neck_yaw_joint
+neck_pitch_joint
+```
+
+要求：
+
+```text
+如果 /joint_states 缺少任一关节，real 模式不得发布命令
+如果 /joint_states 超时，real 模式不得发布命令
+超时时间配置化，例如 joint_state_timeout_sec
+```
+
+### 7. smoother 和 limiter
+
+保留当前架构中的：
+
+```text
+jerk_limited_servo
+min_snap
+none
+```
+
+FA 默认使用：
+
+```text
+jerk_limited_servo
+```
+
+原因：VR 遥操作目标是连续流式变化目标，不是离散点到点轨迹。`jerk_limited_servo` 更适合跟踪 VR 目标。
+
+新增或复用：
+
+```text
+FaJerkLimitedServoSmoother
+FaCommandLimiter
+```
+
+要求：
+
+```text
+支持 7 维左臂
+支持 7 维右臂
+支持 neck_yaw / neck_pitch hold 默认值
+速度限制配置化
+加速度限制配置化
+jerk 限制配置化
+target jump threshold 配置化
+resync threshold 配置化
+max_dt / min_dt 配置化
+pause/resume/reset 行为保留
+```
+
+### 8. control_backend
+
+FA 支持：
+
+```text
+mujoco
+real
+real_with_mujoco
+```
+
+要求：
+
+```text
+real:
+  必须读取新鲜 /joint_states
+  必须调用 FA C++ IK
+  必须发布 /upper_position_controller/commands
+
+mujoco:
+  可只做 dry-run / mirror / IK 验证
+  不发布真实 /upper_position_controller/commands
+
+real_with_mujoco:
+  真实命令路径与 real 相同
+  同时启动 MuJoCo mirror 观察同一条 command
+```
+
+如果当前 FA MuJoCo mirror 暂时不可用，需要明确输出 warning，不要影响 real 链路实现。
+
+### 9. 配置入口
+
+请修改机器人加载入口，例如：
+
+```text
+load_robot_config(robot_name="fa", ...)
+```
+
+使其支持：
+
+```text
+robot_name = "fa"
+control_backend = "mujoco" | "real" | "real_with_mujoco"
+laterality = "left" | "right" | "bimanual"
+```
+
+同时确保：
+
+```text
+robot_name="sysmo32" 保持原行为
+robot_name="fa" 走新增 FA 配置
+```
+
+### 10. 启动方式
+
+请补充 FA 启动说明。命令以工程实际入口为准，不要编造不存在的入口。
+
+示例形式：
+
+```bash
+# FA dry-run / MuJoCo
+python -m beavr.teleop.main --robot fa --control-backend mujoco
+
+# FA real
+python -m beavr.teleop.main --robot fa --control-backend real
+
+# FA real + mujoco mirror
+python -m beavr.teleop.main --robot fa --control-backend real_with_mujoco
+```
+
+如果工程实际入口不是 `beavr.teleop.main`，请根据实际代码补充正确启动命令。
+
+## 五、建议文件结构
+
+请优先按下面结构实现，具体路径以工程实际结构为准：
+
+```text
+beavr/teleop/configs/robots/fa_config.py
+beavr/teleop/operators/fa_operator.py
+beavr/teleop/components/real/fa_real_control.py
+beavr/teleop/components/real/fa_command_limiter.py
+beavr/teleop/components/real/fa_upper_position_command_builder.py
+beavr/teleop/components/real/fa_arm_ik_client.py
+beavr/teleop/components/real/fa_arm_ik_service_node.cpp
+```
+
+如果采用 pybind11，则可以替换为：
+
+```text
+beavr/teleop/kinematics/fa_ik_pybind.cpp
+beavr/teleop/kinematics/fa_arm_ik_solver.py
+```
+
+## 六、测试要求
+
+### 1. 配置加载测试
+
+```text
+load_robot_config("fa", laterality=..., control_backend=...)
+```
+
+要求能正常返回 FA 配置。
+
+### 2. /joint_states 解析测试
+
+输入模拟 JointState，检查能按名称解析：
+
+```text
+left_arm_7
+right_arm_7
+neck_2
+```
+
+禁止按固定下标解析 `/joint_states`。
+
+### 3. FA C++ IK 测试
+
+调用 `ik_7dof` 提供的测试方式：
+
+```bash
+ros2 run ik_7dof fa_arm_kinematic_node --ros-args \
+  -p urdf_file:=<FA_URDF_PATH> \
+  -p srdf_file:=<FA_SRDF_PATH> \
+  -p arm_side:=left \
+  -p reference_frame:=pelvis \
+  -p num_tests:=100 \
+  -p max_iters:=500 \
+  -p eps:=1e-3
+```
+
+右臂也要测：
+
+```bash
+ros2 run ik_7dof fa_arm_kinematic_node --ros-args \
+  -p urdf_file:=<FA_URDF_PATH> \
+  -p srdf_file:=<FA_SRDF_PATH> \
+  -p arm_side:=right \
+  -p reference_frame:=pelvis \
+  -p num_tests:=100 \
+  -p max_iters:=500 \
+  -p eps:=1e-3
+```
+
+要求输出：
+
+```text
+关节名称和限位
+正逆解位置/姿态误差
+平均耗时
+平均迭代步数
+成功率
+```
+
+如果失败，检查生成的失败样本：
+
+```text
+fa_left_arm_ik_failed_cases.log
+fa_right_arm_ik_failed_cases.log
+```
+
+### 4. FaRealControl IK 集成测试
+
+给定小范围 CartesianTarget：
+
+```text
+当前位置附近 +x / +y / +z 小位移
+```
+
+要求：
+
+```text
+IK 不输出 NaN
+输出 7 维 arm q_target
+关节值在 limit 内
+失败时保持上一帧目标
+```
+
+### 5. FA 16 维 command builder 测试
+
+输入：
+
+```text
+left_arm_7
+right_arm_7
+neck_yaw
+neck_pitch
+```
+
+检查输出：
+
+```text
+Float64MultiArray.data 长度 = 16
+单位 = rad
+顺序严格符合 controllers.yaml
+```
+
+映射检查：
+
+```text
+data[0:7]   = left_arm_7
+data[7:14]  = right_arm_7
+data[14:16] = neck_2
+```
+
+### 6. ROS2 topic 测试
+
+在 real 模式中检查：
+
+```bash
+ros2 topic echo /upper_position_controller/commands
+ros2 topic info /upper_position_controller/commands
+```
+
+要求：
+
+```text
+topic = /upper_position_controller/commands
+type = std_msgs/msg/Float64MultiArray
+data 长度 = 16
+```
+
+### 7. pause/resume/reset 测试
+
+要求：
+
+```text
+pause 时停止更新真实命令或保持上一帧安全目标
+resume 后恢复追踪
+reset 后重新记录 VR 手部基准位姿和机器人当前末端位姿
+```
+
+### 8. SYSMO-32 回归测试
+
+必须确认：
+
+```text
+robot_name="sysmo32" 原功能不受影响
+/sysmo_left_arm_controller/commands 原 SYSMO-32 路径不受影响
+```
+
+## 七、代码约束
+
+1. 不要删除或破坏 SYSMO-32 相关代码。
+2. 不要修改 PICO4 Unity。
+3. 不要修改 PICO4 detector。
+4. 不要修改 keypoint_transform 输出协议。
+5. 不要修改 CartesianTarget 数据结构。
+6. FA 不再发布 `/sysmo_left_arm_controller/commands`。
+7. FA 必须发布 `/upper_position_controller/commands`。
+8. FA command 长度必须固定为 16。
+9. FA arm IK 必须优先使用 `ik_7dof/fa_ik_solver.hpp`。
+10. IK 初值必须来自 `/joint_states` 当前关节角。
+11. `/joint_states` 必须按关节名解析，不要按下标假设。
+12. 所有关键参数必须配置化。
+13. 所有不确定字段必须在代码 TODO 和最终报告里明确列出。
+14. 不允许静默截断 7 维手臂关节。
+15. 不允许发布 NaN/Inf。
+16. 不允许在 joint_states 不新鲜时继续发布 real command。
+
+## 八、最终输出
+
+完成后请给出：
 
 1. 修改文件列表。
-2. 新增 `Sysmo32JerkLimitedServoSmoother` 类说明。
-3. 新增配置项说明。
-4. RealControl 接入位置说明。
-5. 与原 min-snap 的切换方式。
-6. 18 维 command 发布格式是否保持不变。
-7. pause/resume 行为说明。
-8. target timeout / target jump / feedback resync 行为说明。
-9. 仿真测试方法。
-10. 真机保守测试方法。
-11. 如何回退到 min-snap。
-12. 是否新增或误用了 `/sysmo_right_arm_controller/commands`，答案必须是没有。
+2. 新增类和职责说明。
+3. FA 适配后的数据流。
+4. FA 16 维 `/upper_position_controller/commands` command 映射说明。
+5. FA C++ IK 的调用方式说明。
+6. `pelvis` / `arm_base` 参考坐标系选择说明。
+7. 当前仍需人工确认的字段：
 
-# 23. 验收标准
+   * FA URDF 路径
+   * FA SRDF 路径
+   * left ee frame
+   * right ee frame
+   * H_R_V_FA 坐标变换矩阵
+   * joint limits 是否直接来自 URDF
+   * home/ready pose
+   * neck 默认角度
+8. 测试命令和测试结果。
+9. 如果有失败项，明确说明失败原因，不要假装完成。
 
-最终数据流应为：
+## 九、验收标准
 
-```text
-IK/limit 后的左臂目标 + IK/limit 后的右臂目标
-    -> left/right jerk-limited online servo
-    -> final command limiter
-    -> 18 维 Float64MultiArray
-    -> /sysmo_left_arm_controller/commands
-    -> MuJoCo mirror
-    -> LeRobot action cache
-```
-
-验收时必须确认：
+满足以下条件才算完成：
 
 ```text
-左右臂 servo 状态独立
-输出 velocity / acceleration / jerk 不超配置限制
-pause 时不追旧目标
-resume 后从当前 joint_states 初始化
-target timeout 后不继续漂移
-target jump 后不产生大跳变
-feedback error 过大时可 resync
-arm command 发布频率仍接近 60Hz
-Float64MultiArray.data 长度仍为 18
-data[0:6] 是左臂最终 command
-data[6:12] 是右臂最终 command
-data[12] 是 arm_command_speed_mode
-data[13:17] 是 0.0
-data[17] 是 neck_joint
-没有创建 /sysmo_right_arm_controller/commands
+robot_name="sysmo32" 原功能不受影响
+robot_name="fa" 能加载配置
+FaOperator 能生成 CartesianTarget
+FaRealControl 能订阅 /joint_states
+FaRealControl 能按关节名解析 FA 上肢 7+7+2 关节
+FA IK 通过 ik_7dof/fa_ik_solver.hpp 调用
+IK 输出左/右臂 7 维目标关节角
+jerk_limited_servo smoother 保留
+FaUpperPositionCommandBuilder 输出 16 维 Float64MultiArray
+FA real 模式发布 /upper_position_controller/commands
+发布消息类型为 std_msgs/msg/Float64MultiArray
+发布 data 长度固定为 16
+pause/resume/reset 行为保留
+joint_states 超时或缺关节时不发布真实命令
 ```

@@ -167,6 +167,132 @@ PICO4 Unity
   -> optional MuJoCo mirror
 ```
 
+## FA Teleoperation Adapter
+
+FA 机器人通过 `robot_name=fa` 走独立配置、Operator、IK client、RealControl 和 16D upper-position command 适配层。FA real 模式不复用 SYSMO-32 的 18D arm command ABI。
+
+```text
+PICO4 Unity
+  -> PICO4 detector
+  -> keypoint_transform left/right
+  -> FaOperator left/right
+  -> CartesianTarget via ZMQ endeff_coords
+  -> one bimanual FaRealControl
+  -> /joint_states feedback
+  -> FaArmIkClient / ik_7dof::IKSolver
+  -> FA 7D seventh-order min-snap smoothing + limiter
+  -> 16D Float64MultiArray
+  -> /upper_position_controller/commands
+  -> optional MuJoCo mirror
+```
+
+FA model root:
+
+```text
+/home/likunwei/dataCollection/beavr-bot/robots/fa_description
+```
+
+Current FA model defaults:
+
+- model file: `robots/fa_description/urdf/fa_robot.urdf`
+- SRDF file: `/home/likunwei/humanoid_ws/src/fa_moveit2_config/config/fa_robot.srdf`
+- left/right arm joints: `*_shoulder_pitch`, `*_shoulder_roll`, `*_shoulder_yaw`, `*_elbow`, `*_wrist_yaw`, `*_wrist_pitch`, `*_wrist_roll`
+- FA end-effector frame: `left_hand_base_link` / `right_hand_base_link`
+- C++ IK source: `/home/likunwei/humanoid_ws/src/ik_7dof/include/ik_7dof/fa_ik_solver.hpp`
+- Python IK module: `ik_7dof_pybind.FaIkSolver` from `/home/likunwei/humanoid_ws/src/ik_7dof`
+- IK reference frame default: `pelvis`
+- native command publisher: `FaNativeCommandPublisher`
+
+FA 16D command mapping:
+
+```text
+data[0:7]    = left_arm_7
+data[7:14]   = right_arm_7
+data[14]     = neck_yaw_joint
+data[15]     = neck_pitch_joint
+```
+
+Launch examples use the existing entrypoint and flags:
+
+```bash
+# build the C++ IK pybind module first
+cd /home/likunwei/humanoid_ws
+source /opt/ros/humble/setup.bash
+colcon build --packages-select ik_7dof
+source install/setup.bash
+
+# dry-run / MuJoCo
+cd /home/likunwei/dataCollection/beavr-bot
+python -m beavr.teleop.main \
+  --robot_name=fa \
+  --laterality=bimanual \
+  --teleop.flags.robot_interface=True \
+  --teleop.flags.sim_env=True \
+  --control_backend=mujoco
+
+# real, using FA native /upper_position_controller/commands
+python -m beavr.teleop.main \
+  --robot_name=fa \
+  --laterality=bimanual \
+  --teleop.flags.robot_interface=True \
+  --control_backend=real
+
+# real + MuJoCo mirror
+python -m beavr.teleop.main \
+  --robot_name=fa \
+  --laterality=bimanual \
+  --teleop.flags.robot_interface=True \
+  --teleop.flags.sim_env=True \
+  --control_backend=real_with_mujoco
+```
+
+Robot-board deployment without a full `humanoid_ws`:
+
+```bash
+# On the development machine:
+cd /home/likunwei/dataCollection/beavr-bot
+scripts/package_ik7dof_runtime.sh /home/likunwei/humanoid_ws/install/ik_7dof /tmp/ik_7dof_runtime.tgz
+
+# Copy /tmp/ik_7dof_runtime.tgz to the board, then on the board:
+mkdir -p /opt/fa_runtime
+tar -C /opt/fa_runtime -xzf /path/to/ik_7dof_runtime.tgz
+export IK_7DOF_INSTALL_PREFIX=/opt/fa_runtime/ik_7dof
+```
+
+FA RViz command mirror:
+
+```bash
+cd /home/likunwei/dataCollection/beavr-bot
+source /opt/ros/humble/setup.bash
+colcon build \
+  --base-paths robots/fa_description robots/fa_rviz_command_bridge \
+  --packages-select fa_description fa_rviz_command_bridge
+source install/setup.bash
+
+# RViz follows the same 16D command stream as MuJoCo / real mode.
+ros2 launch fa_rviz_command_bridge fa_command_rviz.launch.py
+
+# If FA MuJoCo is already publishing /joint_states, avoid duplicate publishers:
+ros2 launch fa_rviz_command_bridge fa_command_rviz.launch.py use_command_bridge:=false
+```
+
+If the runtime log repeatedly shows `PICO4: 暂未收到Unity原始数据`, no raw hand frames are reaching the BeaVR detector yet. In that state the operator will stay in reset waiting for a valid VR hand initialization frame, so neither MuJoCo nor RViz will move even though the FA model and IK are loaded.
+
+For a headless smoke test:
+
+```bash
+ros2 launch fa_rviz_command_bridge fa_command_rviz.launch.py use_rviz:=false
+ros2 topic pub --once /upper_position_controller/commands std_msgs/msg/Float64MultiArray \
+  "{data: [0.0, 0.2, 0.0, -0.3, 0.0, 0.1, 0.0, 0.0, -0.2, 0.0, -0.3, 0.0, 0.1, 0.0, 0.0, 0.0]}"
+ros2 topic echo --once /joint_states
+```
+
+Known fields that still need confirmation before hardware operation:
+
+- physical TCP frame/site relative to the wrist/hand link
+- whether `base` in BeaVR should map directly to FA `pelvis` or needs an external transform
+- final home/ready joint poses, neck defaults, and production joint/velocity/acceleration/jerk limits
+
 ## Additional Features
 
 ### Apple Vision Pro Support

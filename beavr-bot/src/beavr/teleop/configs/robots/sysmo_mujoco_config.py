@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 from beavr.teleop.configs.constants import network, ports
 
@@ -53,6 +54,10 @@ class Sysmo32MujocoCommandMirrorCfg:
     joint_state_topic: str = "/joint_states"
     joint_state_publish_hz: float = 50.0
     arm_command_interpolation_steps: int = 5
+    interpolation_profile: str = "quintic"
+    expected_command_length: int = 18
+    joint_state_joint_names: Optional[tuple[str, ...]] = None
+    kinematics_type: str = "sysmo32"
 
     def build(self):
         from beavr.teleop.components.simulation.sysmo32_mujoco_command_sim import (
@@ -74,6 +79,10 @@ class Sysmo32MujocoCommandMirrorCfg:
             joint_state_topic=self.joint_state_topic,
             joint_state_publish_hz=self.joint_state_publish_hz,
             arm_command_interpolation_steps=self.arm_command_interpolation_steps,
+            interpolation_profile=self.interpolation_profile,
+            expected_command_length=self.expected_command_length,
+            joint_state_joint_names=self.joint_state_joint_names,
+            kinematics_type=self.kinematics_type,
         )
 
 

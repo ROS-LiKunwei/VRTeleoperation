@@ -883,3 +883,18 @@ class Sysmo32AdapterConfig(BeavrBotConfig):
                 "teleop_port": ports.XARM_TELEOPERATION_STATE_PORT,
             },
         ]
+
+
+@RobotConfig.register_subclass("fa_adapter")
+@dataclass
+class FaAdapterConfig(Sysmo32AdapterConfig):
+    """FA adapter for LeRobot recording while FA uses the 18D compatibility ABI."""
+
+    robot_type: str = "fa"
+
+    def __post_init__(self):
+        super().__post_init__()
+        for robot_config in self.robot_configs:
+            robot_config["name"] = robot_config["name"].replace("sysmo32", "fa")
+            robot_config["state_topic"] = robot_config["state_topic"].replace("sysmo32", "fa")
+            robot_config["joint_count"] = 7
