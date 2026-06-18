@@ -11,9 +11,13 @@ using System.Threading;
 public class CameraOneStreamer : MonoBehaviour
 {
     private Thread imageStreamer;
+    private Thread projectionControlStreamer;
     private readonly object imageLock = new object();
+    private readonly object projectionControlLock = new object();
     private byte[] latestImageBytes;
     private bool hasNewImage;
+    private string latestProjectionCommand;
+    private bool hasProjectionCommand;
 
     public RawImage image;
     public RawImage statusBackground;
@@ -30,9 +34,13 @@ public class CameraOneStreamer : MonoBehaviour
     //public NetworkConfigs netConf;
     private bool connectionEstablished = false;
     private volatile bool imageThreadRunning;
+    private volatile bool projectionControlThreadRunning;
+    private bool projectionVisible = true;
     private string communicationAddress;
+    private string projectionControlAddress;
     private NetworkManager netConfig;
     private SubscriberSocket socket;
+    private SubscriberSocket projectionControlSocket;
 
     private void StartImageThread()
     {
@@ -62,6 +70,33 @@ public class CameraOneStreamer : MonoBehaviour
         }
     }
 
+    private void StartProjectionControlThread()
+    {
+        try
+        {
+            projectionControlAddress = netConfig.getCameraProjectionControlAddress();
+            bool AddressAvailable = !String.Equals(projectionControlAddress, "tcp://:");
+
+            if (AddressAvailable && !netConfig.ForceDisconnect)
+            {
+                StartProjectionControlConnection();
+                if (projectionControlSocket == null)
+                {
+                    return;
+                }
+
+                projectionControlThreadRunning = true;
+                projectionControlStreamer = new Thread(getProjectionControl);
+                projectionControlStreamer.IsBackground = true;
+                projectionControlStreamer.Start();
+            }
+        }
+        catch (Exception e)
+        {
+            Debug.LogError("Error starting camera projection control thread: " + e.Message);
+        }
+    }
+
     public void StartConnection()
     {
         try
@@ -85,6 +120,29 @@ public class CameraOneStreamer : MonoBehaviour
         {
             Debug.LogError("Error establishing camera connection: " + e.Message);
             connectionEstablished = false;
+        }
+    }
+
+    private void StartProjectionControlConnection()
+    {
+        try
+        {
+            if (projectionControlSocket != null)
+            {
+                projectionControlSocket.Close();
+                projectionControlSocket.Dispose();
+            }
+
+            projectionControlSocket = new SubscriberSocket();
+            projectionControlSocket.Options.ReceiveHighWatermark = 1;
+            projectionControlSocket.Connect(projectionControlAddress);
+            projectionControlSocket.Subscribe("camera_projection_toggle");
+            Debug.Log("Camera projection control connection established to: " + projectionControlAddress);
+        }
+        catch (Exception e)
+        {
+            Debug.LogError("Error establishing camera projection control connection: " + e.Message);
+            projectionControlSocket = null;
         }
     }
 
@@ -138,6 +196,53 @@ public class CameraOneStreamer : MonoBehaviour
         }
     }
 
+    private void getProjectionControl()
+    {
+        try
+        {
+            while (true)
+            {
+                if (!projectionControlThreadRunning)
+                {
+                    break;
+                }
+
+                SubscriberSocket currentSocket = projectionControlSocket;
+                if (currentSocket == null)
+                {
+                    break;
+                }
+
+                List<string> frames = null;
+                if (!currentSocket.TryReceiveMultipartStrings(TimeSpan.FromMilliseconds(100), ref frames, 2))
+                {
+                    continue;
+                }
+
+                if (frames == null || frames.Count == 0)
+                {
+                    continue;
+                }
+
+                string command = frames[frames.Count - 1];
+                if (string.IsNullOrEmpty(command))
+                {
+                    continue;
+                }
+
+                lock (projectionControlLock)
+                {
+                    latestProjectionCommand = command.Trim();
+                    hasProjectionCommand = true;
+                }
+            }
+        }
+        catch (Exception e)
+        {
+            Debug.LogError("Camera projection control thread error: " + e.Message);
+        }
+    }
+
     public void Start()
     {
         // Getting the Network Config Updater gameobject
@@ -168,6 +273,8 @@ public class CameraOneStreamer : MonoBehaviour
         ConfigureDisplayRect(16f / 9f);
         ResolveViewTransform();
         PlaceDisplayInViewCenter();
+        ApplyProjectionVisibility();
+        StartProjectionControlThread();
     }
 
     public void Update()
@@ -220,6 +327,8 @@ public class CameraOneStreamer : MonoBehaviour
         {
             StartImageThread();
         }
+
+        UpdateProjectionControl();
     }
 
     private void LateUpdate()
@@ -262,6 +371,61 @@ public class CameraOneStreamer : MonoBehaviour
             viewTransform.up * viewOffsetMeters.y +
             viewTransform.forward * viewOffsetMeters.z;
         transform.rotation = viewTransform.rotation;
+    }
+
+    private void UpdateProjectionControl()
+    {
+        string command = null;
+        lock (projectionControlLock)
+        {
+            if (hasProjectionCommand)
+            {
+                command = latestProjectionCommand;
+                hasProjectionCommand = false;
+            }
+        }
+
+        if (string.IsNullOrEmpty(command))
+        {
+            return;
+        }
+
+        bool previous = projectionVisible;
+        if (command == "camera_projection_on")
+        {
+            projectionVisible = true;
+        }
+        else if (command == "camera_projection_off")
+        {
+            projectionVisible = false;
+        }
+        else if (command == "camera_projection_toggle")
+        {
+            projectionVisible = !projectionVisible;
+        }
+        else
+        {
+            return;
+        }
+
+        if (projectionVisible != previous)
+        {
+            ApplyProjectionVisibility();
+            Debug.Log("Camera projection visibility: " + projectionVisible + " command=" + command);
+        }
+    }
+
+    private void ApplyProjectionVisibility()
+    {
+        if (image != null)
+        {
+            image.enabled = projectionVisible;
+        }
+        ResolveStatusBackground();
+        if (statusBackground != null)
+        {
+            statusBackground.enabled = projectionVisible;
+        }
     }
 
     private void ConfigureDisplayRect(float aspectRatio)
@@ -380,6 +544,37 @@ public class CameraOneStreamer : MonoBehaviour
             }
         }
 
+        projectionControlThreadRunning = false;
+        if (projectionControlStreamer != null && projectionControlStreamer.IsAlive)
+        {
+            try
+            {
+                if (!projectionControlStreamer.Join(300))
+                {
+                    projectionControlStreamer.Abort();
+                }
+                projectionControlStreamer = null;
+            }
+            catch (Exception e)
+            {
+                Debug.LogError("Error stopping camera projection control thread: " + e.Message);
+            }
+        }
+
+        if (projectionControlSocket != null)
+        {
+            try
+            {
+                projectionControlSocket.Close();
+                projectionControlSocket.Dispose();
+                projectionControlSocket = null;
+            }
+            catch (Exception e)
+            {
+                Debug.LogError("Error closing camera projection control socket: " + e.Message);
+            }
+        }
+
         connectionEstablished = false;
         Debug.Log("Camera connection closed");
     }
@@ -390,6 +585,10 @@ public class CameraOneStreamer : MonoBehaviour
         if (!connectionEstablished)
         {
             StartImageThread();
+        }
+        if (projectionControlSocket == null)
+        {
+            StartProjectionControlThread();
         }
     }
 }

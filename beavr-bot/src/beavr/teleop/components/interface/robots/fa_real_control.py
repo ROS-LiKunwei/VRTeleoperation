@@ -17,13 +17,12 @@ from beavr.teleop.components.detector.detector_types import SessionCommand
 from beavr.teleop.components.interface.interface_types import CartesianState
 from beavr.teleop.components.interface.robots.arm_command_publisher import FaNativeCommandPublisher
 from beavr.teleop.components.interface.robots.fa_arm_ik_client import (
-    FaArmIkConfig,
     FaArmIkClientBase,
+    FaArmIkConfig,
     FaPybindIkClient,
 )
 from beavr.teleop.components.interface.robots.fa_command_builder import (
     FA_ARM_JOINT_COUNT,
-    FA_NECK_JOINT_NAMES,
     FA_UPPER_COMMAND_LENGTH,
     FaCommandLimiter,
     FaJointStateCache,
@@ -41,6 +40,15 @@ from beavr.teleop.components.interface.robots.fa_trajectory import (
     FaJerkLimitedServoConfig,
     FaJerkLimitedServoSmoother,
 )
+from beavr.teleop.components.interface.robots.sysmo32_command import (
+    SYSMO32_HAND_ACTION_GRASP,
+    SYSMO32_HAND_ACTION_RELEASE,
+    Sysmo32HandAction,
+)
+from beavr.teleop.components.interface.robots.sysmo32_real_control import (
+    SYSMO32_LEFT_HAND_ACTION_TOPIC,
+    SYSMO32_RIGHT_HAND_ACTION_TOPIC,
+)
 from beavr.teleop.components.operator.operator_types import CartesianTarget
 from beavr.teleop.configs.constants import ports, robots
 
@@ -53,14 +61,31 @@ FA_UPPER_COMMAND_TOPIC = "fa_upper_position_command"
 class FaRos2Topics:
     joint_state_topic: str = "/joint_states"
     upper_position_command_topic: str = "/upper_position_controller/commands"
+    left_hand_topic: str = "/left_topic_to_hand"
+    right_hand_topic: str = "/right_topic_to_hand"
     upper_position_command_queue_size: int = 60
+    hand_command_queue_size: int = 10
     joint_state_timeout_s: float = 1.0
+
+
+@dataclass
+class FaSysmoHandConfig:
+    release_action: int = SYSMO32_HAND_ACTION_RELEASE
+    grasp_action: int = SYSMO32_HAND_ACTION_GRASP
+    publish_on_change_only: bool = True
+    heartbeat_hz: float = 3.0
+    force_release_on_pause: bool = True
+    right_grasp_command: str = "grab_right_structure"
+    right_release_command: str = "loose_right_hand"
+    left_grasp_command: str = "grab_left_structure"
+    left_release_command: str = "loose_left_hand"
 
 
 @dataclass
 class FaRealControlConfig:
     control_backend: str = "mujoco"
     ros2: FaRos2Topics = field(default_factory=FaRos2Topics)
+    hand: FaSysmoHandConfig = field(default_factory=FaSysmoHandConfig)
     upper: FaUpperPositionSafetyConfig = field(default_factory=FaUpperPositionSafetyConfig)
     kinematics: FaKinematicsConfig = field(default_factory=FaKinematicsConfig)
     ik: FaArmIkConfig = field(
@@ -74,6 +99,7 @@ class FaRealControlConfig:
     pause_hold_heartbeat_hz: float = 20.0
     allow_mujoco_mirror_without_joint_state: bool = True
     publish_upper_command_topic_in_mujoco: bool = False
+    publish_hand_command_topic_in_mujoco: bool = False
     arm_trajectory_smoother: str = "min_snap"
     arm_trajectory_segment_time_s: float = 0.18
     arm_trajectory_min_duration_s: float = 0.06
@@ -98,16 +124,26 @@ class FaRealControlConfig:
 
 
 class FaRos2Bridge:
-    """ROS2 bridge for FA joint states and native 16D command publishing."""
+    """ROS2 bridge for FA joint states, upper commands, and sysmo hand strings."""
 
-    def __init__(self, topics: FaRos2Topics, require_ros: bool, node_name: str = "fa_real_control"):
+    def __init__(
+        self,
+        topics: FaRos2Topics,
+        require_ros: bool,
+        hand_config: Optional[FaSysmoHandConfig] = None,
+        node_name: str = "fa_real_control",
+    ):
         self.topics = topics
         self.require_ros = require_ros
+        self.hand_config = hand_config or FaSysmoHandConfig()
         self.available = False
         self.joint_cache = FaJointStateCache(topics.joint_state_timeout_s)
         self._rclpy = None
         self._node = None
         self._upper_publisher = None
+        self._left_hand_pub = None
+        self._right_hand_pub = None
+        self._hand_msg_type = None
         if require_ros:
             self._init_ros2(node_name)
 
@@ -115,24 +151,39 @@ class FaRos2Bridge:
         try:
             import rclpy
             from sensor_msgs.msg import JointState
-            from std_msgs.msg import Float64MultiArray
+            from std_msgs.msg import Float64MultiArray, String
 
             self._rclpy = rclpy
             if not rclpy.ok():
                 rclpy.init(args=None)
             self._node = rclpy.create_node(node_name)
+            self._hand_msg_type = String
             self._upper_publisher = FaNativeCommandPublisher(
                 ros_node=self._node,
                 msg_type=Float64MultiArray,
                 topic=self.topics.upper_position_command_topic,
                 queue_size=self.topics.upper_position_command_queue_size,
             )
-            self._node.create_subscription(JointState, self.topics.joint_state_topic, self._on_joint_state, 10)
+            self._left_hand_pub = self._node.create_publisher(
+                String,
+                self.topics.left_hand_topic,
+                self.topics.hand_command_queue_size,
+            )
+            self._right_hand_pub = self._node.create_publisher(
+                String,
+                self.topics.right_hand_topic,
+                self.topics.hand_command_queue_size,
+            )
+            self._node.create_subscription(
+                JointState, self.topics.joint_state_topic, self._on_joint_state, 10
+            )
             self.available = True
             logger.info(
-                "FA ROS2 bridge connected: joint_state=%s command=%s",
+                "FA ROS2 bridge connected: joint_state=%s command=%s hand_left=%s hand_right=%s",
                 self.topics.joint_state_topic,
                 self.topics.upper_position_command_topic,
+                self.topics.left_hand_topic,
+                self.topics.right_hand_topic,
             )
         except Exception as exc:
             self.available = False
@@ -152,6 +203,30 @@ class FaRos2Bridge:
         if not self.available or self._upper_publisher is None:
             return False
         return self._upper_publisher.publish(command)
+
+    def hand_command_string(self, hand_side: str, action_id: int) -> str:
+        if hand_side == robots.LEFT:
+            if action_id == self.hand_config.grasp_action:
+                return self.hand_config.left_grasp_command
+            if action_id == self.hand_config.release_action:
+                return self.hand_config.left_release_command
+        else:
+            if action_id == self.hand_config.grasp_action:
+                return self.hand_config.right_grasp_command
+            if action_id == self.hand_config.release_action:
+                return self.hand_config.right_release_command
+        raise ValueError(f"Invalid FA sysmo hand action: side={hand_side} action={action_id}")
+
+    def publish_hand_action(self, hand_side: str, action_id: int) -> bool:
+        if not self.available or self._hand_msg_type is None:
+            return False
+        msg = self._hand_msg_type()
+        msg.data = self.hand_command_string(hand_side, action_id)
+        if hand_side == robots.LEFT:
+            self._left_hand_pub.publish(msg)
+        else:
+            self._right_hand_pub.publish(msg)
+        return True
 
     def close(self) -> None:
         if self._node is not None:
@@ -175,6 +250,7 @@ class FaRealControl(Component):
         right_endeff_publish_port: Optional[int] = None,
         left_endeff_publish_port: Optional[int] = None,
         upper_command_mirror_port: int = ports.SYSMO32_ARM_COMMAND_MIRROR_PORT,
+        hand_action_mirror_port: int = ports.SYSMO32_HAND_ACTION_MIRROR_PORT,
         urdf_path: str = "/home/likunwei/dataCollection/beavr-bot/robots/fa_description/urdf/fa_robot.urdf",
         config: Optional[FaRealControlConfig] = None,
         ik_client: Optional[FaArmIkClientBase] = None,
@@ -188,11 +264,20 @@ class FaRealControl(Component):
         self.config.control_backend = control_backend
         self._publisher_manager = ZMQPublisherManager.get_instance()
         self._upper_command_mirror_port = upper_command_mirror_port
+        self._hand_action_mirror_port = hand_action_mirror_port
         self._right_state_publish_port = right_state_publish_port
         self._left_state_publish_port = left_state_publish_port
         self._right_endeff_publish_port = right_endeff_publish_port or right_state_publish_port
         self._left_endeff_publish_port = left_endeff_publish_port or left_state_publish_port
-        self._publisher_manager.register_topic(self.host, self._upper_command_mirror_port, FA_UPPER_COMMAND_TOPIC)
+        self._publisher_manager.register_topic(
+            self.host, self._upper_command_mirror_port, FA_UPPER_COMMAND_TOPIC
+        )
+        self._publisher_manager.register_topic(
+            self.host, self._hand_action_mirror_port, SYSMO32_LEFT_HAND_ACTION_TOPIC
+        )
+        self._publisher_manager.register_topic(
+            self.host, self._hand_action_mirror_port, SYSMO32_RIGHT_HAND_ACTION_TOPIC
+        )
         self._publisher_manager.register_topic(self.host, self._right_state_publish_port, "fa_right")
         self._publisher_manager.register_topic(self.host, self._left_state_publish_port, "fa_left")
 
@@ -202,8 +287,12 @@ class FaRealControl(Component):
         self._left_target_subscriber = ZMQSubscriber(
             host, left_target_port, "endeff_coords", message_type=CartesianTarget
         )
-        self._right_reset_subscriber = ZMQSubscriber(host, right_target_port, "reset", message_type=SessionCommand)
-        self._left_reset_subscriber = ZMQSubscriber(host, left_target_port, "reset", message_type=SessionCommand)
+        self._right_reset_subscriber = ZMQSubscriber(
+            host, right_target_port, "reset", message_type=SessionCommand
+        )
+        self._left_reset_subscriber = ZMQSubscriber(
+            host, left_target_port, "reset", message_type=SessionCommand
+        )
         self._pause_subscriber = ZMQSubscriber(
             host, teleoperation_state_port, robots.PAUSE, message_type=SessionCommand
         )
@@ -215,10 +304,12 @@ class FaRealControl(Component):
             self._pause_subscriber,
         ]
 
-        require_ros = self.control_backend in ("real", "real_with_mujoco") or (
-            self.control_backend == "mujoco" and self.config.publish_upper_command_topic_in_mujoco
+        require_ros = (
+            self.control_backend in ("real", "real_with_mujoco")
+            or (self.control_backend == "mujoco" and self.config.publish_upper_command_topic_in_mujoco)
+            or (self.control_backend == "mujoco" and self.config.publish_hand_command_topic_in_mujoco)
         )
-        self._ros2 = FaRos2Bridge(self.config.ros2, require_ros=require_ros)
+        self._ros2 = FaRos2Bridge(self.config.ros2, require_ros=require_ros, hand_config=self.config.hand)
         self._dry_joint_cache = FaJointStateCache(self.config.ros2.joint_state_timeout_s)
         self._dry_joint_cache.update(
             np.zeros(FA_ARM_JOINT_COUNT),
@@ -245,6 +336,11 @@ class FaRealControl(Component):
         self._last_pause_hold_publish_time = 0.0
         self._next_state_publish_time_s = 0.0
         self._last_published_upper_command: Optional[FaUpperPositionCommand] = None
+        self._last_hand_actions = {
+            robots.LEFT: self.config.hand.release_action,
+            robots.RIGHT: self.config.hand.release_action,
+        }
+        self._last_hand_publish_time = {robots.LEFT: 0.0, robots.RIGHT: 0.0}
         self._last_safety_log_time: Dict[str, float] = {}
 
     def _make_default_ik_client(self) -> FaArmIkClientBase:
@@ -252,7 +348,9 @@ class FaRealControl(Component):
 
     def _validate_backend(self) -> None:
         if self.control_backend not in ("real", "mujoco", "real_with_mujoco"):
-            raise ValueError(f"control_backend must be one of: real, mujoco, real_with_mujoco; got {self.control_backend}")
+            raise ValueError(
+                f"control_backend must be one of: real, mujoco, real_with_mujoco; got {self.control_backend}"
+            )
 
     def _make_arm_smoother(self, hand_side: str):
         if self.config.arm_trajectory_smoother == "min_snap":
@@ -327,12 +425,17 @@ class FaRealControl(Component):
         self._real_reset_ready = self.control_backend == "mujoco"
         self._latest_targets = {robots.LEFT: None, robots.RIGHT: None}
         snapshot = self._pause_hold_snapshot()
+        if self.config.hand.force_release_on_pause:
+            for hand_side in (robots.LEFT, robots.RIGHT):
+                self._publish_hand_action(hand_side, self.config.hand.release_action, reason, force=True)
         if snapshot is not None:
             self._limiter.reset(snapshot.upper_joints)
             self._left_arm_smoother.reset(snapshot.left_arm)
             self._right_arm_smoother.reset(snapshot.right_arm)
             if self.config.safety_hold_arm_on_pause:
-                self._pause_hold_command = self._builder.build(snapshot.left_arm, snapshot.right_arm, snapshot.neck)
+                self._pause_hold_command = self._builder.build(
+                    snapshot.left_arm, snapshot.right_arm, snapshot.neck
+                )
                 self._publish_pause_hold_if_needed(force=True, reason=reason)
 
     def _pause_hold_snapshot(self) -> Optional[FaJointStateSnapshot]:
@@ -342,7 +445,11 @@ class FaRealControl(Component):
         return self._current_joint_snapshot()
 
     def _publish_pause_hold_if_needed(self, force: bool = False, reason: str = "pause hold") -> None:
-        if self._teleop_active or not self.config.safety_hold_arm_on_pause or self._pause_hold_command is None:
+        if (
+            self._teleop_active
+            or not self.config.safety_hold_arm_on_pause
+            or self._pause_hold_command is None
+        ):
             return
         now = time.time()
         period = 1.0 / max(0.1, float(self.config.pause_hold_heartbeat_hz))
@@ -379,7 +486,9 @@ class FaRealControl(Component):
             self.host,
             publish_port,
             "endeff_homo",
-            CartesianState(timestamp_s=time.time(), h_matrix=tuple(tuple(float(v) for v in row) for row in homo)),
+            CartesianState(
+                timestamp_s=time.time(), h_matrix=tuple(tuple(float(v) for v in row) for row in homo)
+            ),
         )
         self._needs_reset = False
         self._real_reset_ready = real_fresh or self.control_backend == "mujoco"
@@ -388,7 +497,10 @@ class FaRealControl(Component):
         self._right_arm_smoother.reset(snapshot.right_arm)
 
     def _receive_cartesian_targets(self) -> None:
-        for hand_side, subscriber in ((robots.LEFT, self._left_target_subscriber), (robots.RIGHT, self._right_target_subscriber)):
+        for hand_side, subscriber in (
+            (robots.LEFT, self._left_target_subscriber),
+            (robots.RIGHT, self._right_target_subscriber),
+        ):
             msg = subscriber.recv_keypoints()
             if msg is None:
                 continue
@@ -396,6 +508,62 @@ class FaRealControl(Component):
                 self._warn_safety(f"{hand_side}_wrong_target_side", f"wrong target side: {msg.hand_side}")
                 continue
             self._latest_targets[hand_side] = msg
+            self._handle_target_hand_command(hand_side, msg.hand_command)
+
+    def _handle_target_hand_command(self, hand_side: str, hand_command: Optional[int]) -> None:
+        if hand_command is None:
+            return
+        if hand_command == self.config.hand.release_action:
+            action_id = self.config.hand.release_action
+        elif hand_command == self.config.hand.grasp_action:
+            action_id = self.config.hand.grasp_action
+        else:
+            self._warn_safety(
+                f"{hand_side}_invalid_hand_command", f"FA sysmo hand command ignored: {hand_command}"
+            )
+            return
+        self._publish_hand_action(hand_side, action_id, reason="vr_hand_command")
+
+    def _publish_hand_action(self, hand_side: str, action_id: int, reason: str, force: bool = False) -> None:
+        now = time.time()
+        heartbeat_period = 1.0 / max(0.1, float(self.config.hand.heartbeat_hz))
+        changed = action_id != self._last_hand_actions[hand_side]
+        heartbeat_due = now - self._last_hand_publish_time[hand_side] >= heartbeat_period
+        if not force and self.config.hand.publish_on_change_only and not changed and not heartbeat_due:
+            return
+
+        action = Sysmo32HandAction(now, hand_side, int(action_id), reason=reason)
+        if (
+            self.control_backend in ("real", "real_with_mujoco")
+            or self.config.publish_hand_command_topic_in_mujoco
+        ):
+            published = self._ros2.publish_hand_action(hand_side, action.action_id)
+            if not published and self.control_backend == "real":
+                self._warn_safety(
+                    "ros_hand_unavailable", f"FA ROS2 sysmo hand publisher unavailable for {hand_side}"
+                )
+
+        if self.control_backend in ("mujoco", "real_with_mujoco"):
+            topic = (
+                SYSMO32_LEFT_HAND_ACTION_TOPIC
+                if hand_side == robots.LEFT
+                else SYSMO32_RIGHT_HAND_ACTION_TOPIC
+            )
+            self._publisher_manager.publish(self.host, self._hand_action_mirror_port, topic, action)
+
+        self._last_hand_actions[hand_side] = action.action_id
+        self._last_hand_publish_time[hand_side] = now
+        try:
+            ros_command = self._ros2.hand_command_string(hand_side, action.action_id)
+        except ValueError:
+            ros_command = str(action.action_id)
+        logger.info(
+            "FA sysmo hand action: %s action=%d ros_string=%s reason=%s",
+            hand_side,
+            action.action_id,
+            ros_command,
+            reason,
+        )
 
     def _publish_lerobot_joint_states(self) -> None:
         if self.config.state_publish_fps <= 0.0:
@@ -410,7 +578,9 @@ class FaRealControl(Component):
         self._publish_lerobot_arm_state(robots.RIGHT, snapshot.right_arm, self._right_state_publish_port, now)
         self._publish_lerobot_arm_state(robots.LEFT, snapshot.left_arm, self._left_state_publish_port, now)
 
-    def _publish_lerobot_arm_state(self, hand_side: str, joints: Sequence[float], port: int, now: float) -> None:
+    def _publish_lerobot_arm_state(
+        self, hand_side: str, joints: Sequence[float], port: int, now: float
+    ) -> None:
         state = {
             "joint_states": {"joint_position": [float(v) for v in joints], "timestamp": now},
             "joint_angles_rad": [float(v) for v in joints],
@@ -462,7 +632,10 @@ class FaRealControl(Component):
                 if reference is None:
                     reference = np.asarray(current_arm, dtype=np.float64)
                 max_jump = float(np.max(np.abs(solved - reference)))
-                if self.config.max_ik_solution_jump_rad > 0.0 and max_jump > self.config.max_ik_solution_jump_rad:
+                if (
+                    self.config.max_ik_solution_jump_rad > 0.0
+                    and max_jump > self.config.max_ik_solution_jump_rad
+                ):
                     self._warn_safety(
                         f"{hand_side}_ik_solution_jump",
                         f"{hand_side} IK solution jump held: {max_jump:.3f} rad",
@@ -507,14 +680,20 @@ class FaRealControl(Component):
             state_ready = self._real_joint_state_fresh() or allow_stale_real_hold
             reset_ready = self._real_reset_ready or not require_real_reset
             if not state_ready or not reset_ready:
-                self._warn_safety("real_reset_required", "FA real command held until fresh /joint_states and reset")
+                self._warn_safety(
+                    "real_reset_required", "FA real command held until fresh /joint_states and reset"
+                )
                 return False
             if not self._ros2.publish_upper_command(command):
                 self._warn_safety("ros_upper_unavailable", "ROS2 FA upper publisher unavailable")
                 return False
         if self.control_backend in ("mujoco", "real_with_mujoco"):
-            self._publisher_manager.publish(self.host, self._upper_command_mirror_port, FA_UPPER_COMMAND_TOPIC, command)
-            self._dry_joint_cache.update(command.left_arm, command.right_arm, command.neck, now_s=command.timestamp_s)
+            self._publisher_manager.publish(
+                self.host, self._upper_command_mirror_port, FA_UPPER_COMMAND_TOPIC, command
+            )
+            self._dry_joint_cache.update(
+                command.left_arm, command.right_arm, command.neck, now_s=command.timestamp_s
+            )
         self._last_published_upper_command = command
         return True
 

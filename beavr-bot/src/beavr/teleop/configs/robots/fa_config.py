@@ -23,7 +23,7 @@ from beavr.teleop.components.interface.robots.fa_real_control import (
     FaRealControlConfig,
     FaRos2Topics,
 )
-from beavr.teleop.components.operator.robots.fa_operator import FaOperator, H_R_V_FA
+from beavr.teleop.components.operator.robots.fa_operator import H_R_V_FA, FaOperator
 from beavr.teleop.configs.constants import network, ports, robots
 from beavr.teleop.configs.robots import TeleopRobotConfig
 from beavr.teleop.configs.robots.shared_components import SharedComponentRegistry
@@ -57,6 +57,7 @@ class FaRealControlCfg:
     left_state_publish_port: int = ports.XARM_STATE_PUBLISH_PORT + SYSMO32_LEFT_PORT_OFFSET
     teleoperation_state_port: int = ports.XARM_TELEOPERATION_STATE_PORT
     upper_command_mirror_port: int = ports.SYSMO32_ARM_COMMAND_MIRROR_PORT
+    hand_action_mirror_port: int = ports.SYSMO32_HAND_ACTION_MIRROR_PORT
     urdf_path: str = FA_URDF_PATH
     config: FaRealControlConfig = field(
         default_factory=lambda: FaRealControlConfig(
@@ -64,20 +65,49 @@ class FaRealControlCfg:
             ros2=FaRos2Topics(
                 joint_state_topic="/joint_states",
                 upper_position_command_topic=FA_UPPER_POSITION_COMMAND_TOPIC,
+                left_hand_topic="/left_topic_to_hand",
+                right_hand_topic="/right_topic_to_hand",
                 upper_position_command_queue_size=60,
+                hand_command_queue_size=10,
                 joint_state_timeout_s=1.0,
             ),
             upper=FaUpperPositionSafetyConfig(
                 neck_default_positions_rad=(0.0, 0.0),
                 joint_lower_limits_rad=(
-                    -2.79, -0.33, -2.79, -1.40, -2.79, -0.52, -1.57,
-                    -2.79, -3.49, -2.79, -1.40, -2.79, -0.52, -1.57,
-                    -3.14, -3.14,
+                    -2.79,
+                    -0.33,
+                    -2.79,
+                    -1.40,
+                    -2.79,
+                    -0.52,
+                    -1.57,
+                    -2.79,
+                    -3.49,
+                    -2.79,
+                    -1.40,
+                    -2.79,
+                    -0.52,
+                    -1.57,
+                    -3.14,
+                    -3.14,
                 ),
                 joint_upper_limits_rad=(
-                    2.79, 3.49, 2.79, 0.26, 2.79, 0.52, 1.57,
-                    2.79, 0.33, 2.79, 0.26, 2.79, 0.52, 1.57,
-                    3.14, 3.14,
+                    2.79,
+                    3.49,
+                    2.79,
+                    0.26,
+                    2.79,
+                    0.52,
+                    1.57,
+                    2.79,
+                    0.33,
+                    2.79,
+                    0.26,
+                    2.79,
+                    0.52,
+                    1.57,
+                    3.14,
+                    3.14,
                 ),
                 max_joint_velocity_rad_s=tuple([3.0] * FA_UPPER_COMMAND_LENGTH),
                 max_joint_jump_rad=0.5,
@@ -136,6 +166,7 @@ class FaRealControlCfg:
             left_state_publish_port=self.left_state_publish_port,
             teleoperation_state_port=self.teleoperation_state_port,
             upper_command_mirror_port=self.upper_command_mirror_port,
+            hand_action_mirror_port=self.hand_action_mirror_port,
             urdf_path=self.urdf_path,
             config=self.config,
         )
@@ -289,7 +320,12 @@ class FaConfig:
                     endeff_publish_port=ports.XARM_ENDEFF_SUBSCRIBE_PORT + SYSMO32_RIGHT_PORT_OFFSET,
                     endeff_subscribe_port=ports.XARM_ENDEFF_PUBLISH_PORT + SYSMO32_RIGHT_PORT_OFFSET,
                     hand_side=robots.RIGHT,
-                    logging_config={"enabled": False, "log_dir": "logs", "log_poses": True, "log_prefix": "fa_right"},
+                    logging_config={
+                        "enabled": False,
+                        "log_dir": "logs",
+                        "log_poses": True,
+                        "log_prefix": "fa_right",
+                    },
                 )
             )
         if self.laterality in (Laterality.LEFT, Laterality.BIMANUAL):
@@ -299,7 +335,12 @@ class FaConfig:
                     endeff_publish_port=ports.XARM_ENDEFF_SUBSCRIBE_PORT + SYSMO32_LEFT_PORT_OFFSET,
                     endeff_subscribe_port=ports.XARM_ENDEFF_PUBLISH_PORT + SYSMO32_LEFT_PORT_OFFSET,
                     hand_side=robots.LEFT,
-                    logging_config={"enabled": False, "log_dir": "logs", "log_poses": True, "log_prefix": "fa_left"},
+                    logging_config={
+                        "enabled": False,
+                        "log_dir": "logs",
+                        "log_poses": True,
+                        "log_prefix": "fa_left",
+                    },
                 )
             )
 
