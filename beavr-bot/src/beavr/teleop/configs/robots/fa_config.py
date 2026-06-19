@@ -24,7 +24,7 @@ from beavr.teleop.components.interface.robots.fa_real_control import (
     FaRos2Topics,
 )
 from beavr.teleop.components.operator.robots.fa_operator import H_R_V_FA, FaOperator
-from beavr.teleop.configs.constants import network, ports, robots
+from beavr.teleop.configs.constants import cameras, network, ports, robots
 from beavr.teleop.configs.robots import TeleopRobotConfig
 from beavr.teleop.configs.robots.shared_components import SharedComponentRegistry
 from beavr.teleop.configs.robots.sysmo32_config import (
@@ -299,15 +299,37 @@ class FaConfig:
             self.camera_streamers = [
                 Sysmo32RealCameraStreamerCfg(
                     host=network.HOST_ADDRESS,
-                    port=ports.SIM_IMAGE_PORT,
+                    port=cameras.RECORD_CAMERA_FRONT_STREAM_PORT,
                     camera_name="front",
                     camera_type="opencv",
-                    camera_index=0,
+                    camera_index=cameras.RECORD_CAMERA_INDEX_FRONT,
                     fps=30,
                     width=640,
                     height=480,
                     rotation=180,
-                )
+                ),
+                Sysmo32RealCameraStreamerCfg(
+                    host=network.HOST_ADDRESS,
+                    port=cameras.RECORD_CAMERA_LEFT_WRIST_STREAM_PORT,
+                    camera_name="left_wrist",
+                    camera_type="opencv",
+                    camera_index=cameras.RECORD_CAMERA_INDEX_LEFT_WRIST,
+                    fps=30,
+                    width=640,
+                    height=480,
+                    rotation=180,
+                ),
+                Sysmo32RealCameraStreamerCfg(
+                    host=network.HOST_ADDRESS,
+                    port=cameras.RECORD_CAMERA_RIGHT_WRIST_STREAM_PORT,
+                    camera_name="right_wrist",
+                    camera_type="opencv",
+                    camera_index=cameras.RECORD_CAMERA_INDEX_RIGHT_WRIST,
+                    fps=30,
+                    width=640,
+                    height=480,
+                    rotation=180,
+                ),
             ]
 
         self.robots = [FaRealControlCfg(host=network.HOST_ADDRESS, control_backend=self.control_backend)]

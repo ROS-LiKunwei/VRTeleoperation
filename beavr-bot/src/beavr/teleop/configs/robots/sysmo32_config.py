@@ -42,7 +42,7 @@ from beavr.teleop.components.interface.robots.sysmo32_real_control import (
 )
 from beavr.teleop.components.interface.robots.sysmo32_robot import Sysmo32Robot
 from beavr.teleop.components.operator.robots.sysmo32_operator import Sysmo32Operator
-from beavr.teleop.configs.constants import network, ports, robots
+from beavr.teleop.configs.constants import cameras, network, ports, robots
 from beavr.teleop.configs.robots import TeleopRobotConfig
 from beavr.teleop.configs.robots.shared_components import SharedComponentRegistry
 from beavr.teleop.configs.robots.sysmo_mujoco_config import Sysmo32MujocoCommandMirrorCfg
@@ -149,9 +149,9 @@ class Sysmo32RealControlCfg:
                 reserved=(0.0, 0.0, 0.0, 0.0),
                 neck_joint=0.0,
                 max_joint_velocity_rad_s=tuple([3.0] * 12),
-                max_joint_jump_rad=0.5, # 单周期关节跳变
-                max_translation_step_m=0.30, # 笛卡尔平移步长
-                max_rotation_step_rad=0.5, # 笛卡尔姿态步长
+                max_joint_jump_rad=0.5,  # 单周期关节跳变
+                max_translation_step_m=0.30,  # 笛卡尔平移步长
+                max_rotation_step_rad=0.5,  # 笛卡尔姿态步长
             ),
             hand=Sysmo32HandConfig(
                 default_action=1,
@@ -175,7 +175,7 @@ class Sysmo32RealControlCfg:
             ik_nullspace_gain=0.08,
             ik_nullspace_step_limit_rad=0.04,
             ik_orientation_weight=0.2,
-            ik_max_joint_step_rad=1.0, # IK 单次关节步长
+            ik_max_joint_step_rad=1.0,  # IK 单次关节步长
             ik_max_iter=5,
             ik_pos_tol_m=1e-3,
             ik_ori_tol_rad=2e-2,
@@ -434,15 +434,37 @@ class Sysmo32Config:
             self.camera_streamers = [
                 Sysmo32RealCameraStreamerCfg(
                     host=network.HOST_ADDRESS,
-                    port=ports.SIM_IMAGE_PORT,
+                    port=cameras.RECORD_CAMERA_FRONT_STREAM_PORT,
                     camera_name="front",
                     camera_type="opencv",
-                    camera_index=0,
+                    camera_index=cameras.RECORD_CAMERA_INDEX_FRONT,
                     fps=30,
                     width=640,
                     height=480,
                     rotation=180,
-                )
+                ),
+                Sysmo32RealCameraStreamerCfg(
+                    host=network.HOST_ADDRESS,
+                    port=cameras.RECORD_CAMERA_LEFT_WRIST_STREAM_PORT,
+                    camera_name="left_wrist",
+                    camera_type="opencv",
+                    camera_index=cameras.RECORD_CAMERA_INDEX_LEFT_WRIST,
+                    fps=30,
+                    width=640,
+                    height=480,
+                    rotation=180,
+                ),
+                Sysmo32RealCameraStreamerCfg(
+                    host=network.HOST_ADDRESS,
+                    port=cameras.RECORD_CAMERA_RIGHT_WRIST_STREAM_PORT,
+                    camera_name="right_wrist",
+                    camera_type="opencv",
+                    camera_index=cameras.RECORD_CAMERA_INDEX_RIGHT_WRIST,
+                    fps=30,
+                    width=640,
+                    height=480,
+                    rotation=180,
+                ),
             ]
 
         # Robot配置：sysmo32真实接口是一条双臂18维命令，因此只启动一个双臂控制层。
