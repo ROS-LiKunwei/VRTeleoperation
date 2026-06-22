@@ -1,413 +1,781 @@
-你是一个机器人遥操作系统开发 Agent。请基于当前 BeaVR / beavr-bot 工程，把现有 SYSMO-32 双臂遥操作架构适配到 FA 机器人。
+你现在是一个资深 ROS2 C++ 机器人控制工程师，请帮我把现有遥操作工程中的 FA 上肢 minimum snap 七次多项式轨迹优化逻辑，单独摘出来做成一个独立的 C++ ROS2 功能包。
 
-## 一、背景
+最终功能包生成路径：
 
-当前工程中已经存在 SYSMO-32 的实机遥操作链路，整体数据流为：
-
-```text
-PICO4 Unity
-  -> PICO4 detector
-  -> keypoint_transform left/right
-  -> Sysmo32Operator left/right
-  -> CartesianTarget via ZMQ endeff_coords
-  -> one bimanual Sysmo32RealControl
-  -> /joint_states feedback
-  -> IK + smoothing + safety limiting
-  -> 18D Sysmo32ArmCommand
-  -> /sysmo_left_arm_controller/commands
-  -> optional MuJoCo mirror
+```bash
+/home/likunwei/humanoid_ws/src/min_snap
 ```
 
-当前 SYSMO-32 实机控制层只启动一个双臂控制器，不是左右臂各一个控制器。它同时订阅左右手的 CartesianTarget、reset、pause/resume、transformed hand coords，并从 `/joint_states` 获取当前 12 关节反馈。
+功能包名：
 
-当前默认 arm smoother 是 `jerk_limited_servo`，用于连续追踪 VR 流式目标；也保留 `min_snap` 和 `none` 模式。
+```bash
+min_snap
+```
 
-当前真实机器人 arm command 只有一个 ROS2 topic：
+要求使用 ROS2 Humble，主要实现语言为 C++，绘图脚本可以使用 Python。
 
-```text
-/sysmo_left_arm_controller/commands
+---
+
+# 一、任务背景
+
+当前 beavr-bot 遥操作工程中已经有 FA 上肢轨迹优化代码框架，核心逻辑是：
+
+1. 左右臂各 7 个关节分别进行 minimum snap 七次多项式轨迹规划。
+2. 轨迹优化发生在目标关节角度输入之后、FA 16 维上肢位置命令发布之前。
+3. 输出最终发布到 FA 机器人原生上肢位置控制 topic：
+
+```bash
+/upper_position_controller/commands
+```
+
+消息类型：
+
+```bash
 std_msgs/msg/Float64MultiArray
 ```
 
-18 维 payload 格式固定为：
+消息长度固定为 16。
 
-```text
-data[0:6]    = left_arm_6
-data[6:12]   = right_arm_6
-data[12]     = speed_mode
-data[13:17]  = reserved
-data[17]     = neck_joint
-```
+我现在希望把 minimum snap 轨迹优化从遥操作系统中解耦出来，做成一个独立 ROS2 C++ 功能包，作为通用的上肢关节轨迹优化节点使用。
 
-注意：不要新增 `/sysmo_right_arm_controller/commands`，不要改变 `/sysmo_left_arm_controller/commands` 的消息类型。手部动作走独立路径，不要合并进 18 维 arm command。
+---
 
-## 二、目标
+# 二、FA 上肢 16 维控制命令 ABI
 
-请在现有架构基础上新增 FA 机器人适配层，使 FA 机器人可以复用现有 VR 遥操作链路。
-
-FA 机器人模型文件路径为：
-
-```text
-/home/likunwei/dataCollection/beavr-bot/robots/fa_description
-```
-
-本阶段要求：
-
-1. 新增 FA 机器人配置、运动学、Operator、RealControl 或兼容控制封装。
-2. FA 机器人先复用 SYSMO-32 的 ROS2 控制接口。
-3. 后续再将底层 ROS2 控制接口替换为 FA 机器人的真实 ROS2 控制接口。
-4. 当前阶段重点保证：VR 输入、坐标变换、IK、平滑器、命令限幅、18 维命令发布链路先跑通。
-5. 不要破坏现有 SYSMO-32 功能。
-6. 不要大规模重构工程，只做清晰、可回滚、低侵入式适配。
-
-## 三、实现要求
-
-### 1. 新增 FA robot config
-
-请参考现有 `sysmo32_config.py`、`sysmo_mujoco_config.py` 或类似机器人配置文件，新增 FA 机器人的配置文件，例如：
-
-```text
-beavr/teleop/configs/robots/fa_config.py
-```
-
-配置内容至少包括：
-
-```text
-robot_name = "fa"
-laterality 支持 left / right / bimanual
-control_backend 支持 mujoco / real / real_with_mujoco
-模型路径指向 /home/likunwei/dataCollection/beavr-bot/robots/fa_description
-左右臂关节名
-左右臂关节数量
-左右末端 frame/site 名称
-左右臂 joint limits
-速度限制
-加速度限制
-jerk 限制
-默认 home / ready 关节位姿
-VR 到 robot base 的坐标变换矩阵 H_R_V_FA
-```
-
-如果 FA 机器人关节名、末端 frame 名、MJCF/URDF 文件名无法确定，请不要硬编码猜测。请在代码里用清晰的 TODO、配置项或自动解析逻辑处理，并在最终总结中列出需要人工确认的字段。
-
-### 2. 新增 FA Operator
-
-请参考 `Sysmo32Operator` 的实现，新增：
-
-```text
-FaOperator
-```
-
-目标：
-
-```text
-继承现有 XArmOperator 或通用 Operator 重定向逻辑
-只替换 FA 专用的 H_R_V_FA 坐标变换矩阵
-reset 时记录机器人当前末端位姿和当前 VR 手部基准位姿
-正常运行时计算手相对初始帧的运动
-映射到 FA robot base frame
-生成 CartesianTarget(frame_id="base")
-通过 ZMQ endeff_coords 发布给下游控制层
-```
-
-要求：
-
-```text
-不要修改 keypoint_transform 的输出协议
-不要修改 CartesianTarget 的数据结构
-不要破坏 SYSMO-32 Operator
-FA 和 SYSMO-32 通过 robot_name 或配置文件选择
-```
-
-### 3. 新增 FA MuJoCo / Kinematics 适配
-
-请参考 `Sysmo32MujocoKinematics.solve_ik`，新增 FA 版本，例如：
-
-```text
-FaMujocoKinematics
-```
-
-目标：
-
-```text
-加载 /home/likunwei/dataCollection/beavr-bot/robots/fa_description 下的 FA 模型
-支持左臂 IK
-支持右臂 IK
-输入 CartesianTarget
-输入当前全身/双臂 joint state
-输出对应 arm joint target
-```
-
-要求：
-
-```text
-IK 初值优先使用当前 /joint_states 对应臂关节值
-只对有新 target 的手臂跑 IK
-没有新 target 的手臂沿用上一帧目标
-IK max_iter 必须配置化
-阻尼 DLS 参数必须配置化
-失败时保持上一帧安全目标，不要输出 NaN
-对 joint limit 做裁剪或安全检查
-```
-
-如果 FA 模型是 URDF 而不是 MJCF，请优先检查工程现有的模型加载方式。可以新增 URDF->MuJoCo 的适配说明或转换脚本，但不要引入破坏性依赖。
-
-### 4. 新增 FA RealControl
-
-请新增或封装一个 FA 控制层，例如：
-
-```text
-FaRealControl
-```
-
-本阶段要求先复用 SYSMO-32 的 ROS2 控制接口：
-
-```text
-订阅：/joint_states
-发布：/sysmo_left_arm_controller/commands
-消息：std_msgs/msg/Float64MultiArray
-payload：18 维
-```
-
-暂时沿用当前 SYSMO-32 18 维 payload 格式：
-
-```text
-data[0:6]    = left_arm_6
-data[6:12]   = right_arm_6
-data[12]     = speed_mode
-data[13:17]  = reserved
-data[17]     = neck_joint
-```
-
-如果 FA 机器人左右臂不是 6+6 关节，请先做兼容层：
-
-```text
-FA 内部 IK 输出真实关节维度
-临时命令发布层适配到 18 维 sysmo32 payload
-多余维度需要显式处理
-不足维度需要显式报错或配置映射
-不要静默截断关键关节
-```
-
-要求：
-
-```text
-保留 jerk_limited_servo smoother
-保留 min_snap / none 模式
-保留 Sysmo32CommandLimiter 类似的命令限幅逻辑，可新增 FaCommandLimiter
-保留 pause/resume/reset 行为
-保留 real / mujoco / real_with_mujoco 三种 backend
-real 模式必须依赖新鲜 /joint_states
-real_with_mujoco 模式既发布真实命令，也启动 MuJoCo mirror 观察同一条命令
-```
-
-### 5. 后续 FA ROS2 控制接口预留
-
-请在代码结构中预留 FA 原生 ROS2 控制接口替换点，但当前不要强行实现未知接口。
-
-建议新增抽象层：
-
-```text
-ArmCommandPublisherBase
-Sysmo32CompatibleCommandPublisher
-FaNativeCommandPublisher  # 先留 TODO 或 skeleton
-```
-
-当前 FA 使用：
-
-```text
-Sysmo32CompatibleCommandPublisher
-```
-
-后续只需要把 publisher 替换为：
-
-```text
-FaNativeCommandPublisher
-```
-
-不要让 IK、smoother、operator、VR 输入链路依赖具体 ROS2 topic。
-
-### 6. 配置入口
-
-请修改机器人加载入口，例如：
-
-```text
-load_robot_config(robot_name="fa", ...)
-```
-
-使其支持：
-
-```text
-robot_name = "fa"
-control_backend = "mujoco" | "real" | "real_with_mujoco"
-laterality = left | right | bimanual
-```
-
-同时确保：
-
-```text
-robot_name="sysmo32" 仍然保持原行为
-robot_name="fa" 走新增 FA 配置
-```
-
-### 7. 启动方式
-
-请补充或新增启动说明，例如：
+发布 topic：
 
 ```bash
-# dry-run / MuJoCo
-python -m beavr.teleop.main --robot fa --control-backend mujoco
-
-# real, but using sysmo32-compatible ROS2 command interface
-python -m beavr.teleop.main --robot fa --control-backend real
-
-# real + mujoco mirror
-python -m beavr.teleop.main --robot fa --control-backend real_with_mujoco
+/upper_position_controller/commands
 ```
 
-如果工程当前不是这个入口，请根据实际入口补充正确命令，不要编造不存在的命令。
+消息类型：
 
-## 四、约束
+```cpp
+std_msgs::msg::Float64MultiArray
+```
 
-1. 不要删除或破坏 SYSMO-32 相关代码。
-2. 不要修改 PICO4 Unity、PICO4 detector、keypoint_transform 的通信协议。
-3. 不要改变 CartesianTarget 数据结构。
-4. 不要新增 `/sysmo_right_arm_controller/commands`。
-5. 不要改变 `/sysmo_left_arm_controller/commands` 消息类型。
-6. 当前阶段 FA 真机发布仍然走 SYSMO-32 兼容 18 维 command。
-7. FA 原生 ROS2 控制接口只做预留，不要在信息不足时乱写。
-8. 所有新增代码要尽量 class 化、模块化、低侵入。
-9. 对所有关键参数使用配置文件，不要散落硬编码。
-10. 任何不确定字段必须在代码和最终报告中明确列出。
+长度固定为 16。
 
-## 五、建议文件结构
-
-请优先按下面结构实现，具体路径以工程实际结构为准：
+关节顺序必须严格如下：
 
 ```text
-beavr/teleop/configs/robots/fa_config.py
-beavr/teleop/operators/fa_operator.py
-beavr/teleop/kinematics/fa_mujoco_kinematics.py
-beavr/teleop/components/real/fa_real_control.py
-beavr/teleop/components/real/fa_command_limiter.py
-beavr/teleop/components/real/fa_command_builder.py
-beavr/teleop/components/real/arm_command_publisher.py
+data[0]  = left_shoulder_pitch_joint
+data[1]  = left_shoulder_roll_joint
+data[2]  = left_shoulder_yaw_joint
+data[3]  = left_elbow_joint
+data[4]  = left_wrist_yaw_joint
+data[5]  = left_wrist_pitch_joint
+data[6]  = left_wrist_roll_joint
+
+data[7]  = right_shoulder_pitch_joint
+data[8]  = right_shoulder_roll_joint
+data[9]  = right_shoulder_yaw_joint
+data[10] = right_elbow_joint
+data[11] = right_wrist_yaw_joint
+data[12] = right_wrist_pitch_joint
+data[13] = right_wrist_roll_joint
+
+data[14] = neck_yaw_joint
+data[15] = neck_pitch_joint
+```
+
+本功能包只对左右臂 14 个关节做 minimum snap 轨迹优化。
+
+neck 两个关节不参与轨迹优化，默认保持当前 `/joint_states` 中的 neck 位置；如果 `/joint_states` 中没有 neck 状态，则 neck 默认保持 0.0 或配置文件中的默认值。
+
+---
+
+# 三、功能包目标
+
+请实现一个独立 C++ ROS2 package：
+
+```bash
+min_snap
+```
+
+包内至少包含：
+
+```text
+min_snap/
+├── CMakeLists.txt
+├── package.xml
+├── include/min_snap/
+│   ├── min_snap_trajectory.hpp
+│   ├── min_snap_planner.hpp
+│   ├── fa_joint_mapping.hpp
+│   └── trajectory_recorder.hpp
+├── src/
+│   ├── min_snap_trajectory.cpp
+│   ├── min_snap_planner.cpp
+│   ├── min_snap_node.cpp
+│   └── trajectory_recorder.cpp
+├── config/
+│   └── min_snap.yaml
+├── scripts/
+│   └── plot_min_snap_tracking.py
+└── README.md
+```
+
+可以根据工程需要增减文件，但整体结构要清晰。
+
+---
+
+# 四、节点设计
+
+请实现 ROS2 节点：
+
+```bash
+min_snap_node
+```
+
+节点职责：
+
+1. 订阅双臂目标关节角度。
+2. 接收期望轨迹执行时间。
+3. 接收电机最大速度限制。
+4. 接收电机最大加速度限制。
+5. 生成满足速度、加速度约束的七次 minimum snap 轨迹。
+6. 按固定控制频率采样轨迹。
+7. 发布 16 维 FA 上肢控制命令到：
+
+```bash
+/upper_position_controller/commands
+```
+
+8. 订阅 `/joint_states`，记录实际关节位置、速度和期望轨迹。
+9. 提供 CSV 记录和 Python 绘图脚本。
+
+---
+
+# 五、输入接口设计
+
+请为轨迹目标设计一个清晰的 ROS2 输入接口。
+
+优先建议使用自定义 message，例如：
+
+```text
+MinSnapTarget.msg
+```
+
+字段建议：
+
+```text
+float64[] left_arm_target_rad
+float64[] right_arm_target_rad
+float64 expected_duration_s
+float64 max_velocity_rad_s
+float64 max_acceleration_rad_s2
+```
+
+要求：
+
+```text
+left_arm_target_rad  长度必须为 7
+right_arm_target_rad 长度必须为 7
+expected_duration_s > 0
+max_velocity_rad_s > 0
+max_acceleration_rad_s2 > 0
+```
+
+如果你认为使用 `std_msgs/msg/Float64MultiArray` 更简单，也可以实现，但必须在 README 中明确输入数组格式。
+
+推荐输入 topic：
+
+```bash
+/min_snap/target
+```
+
+推荐消息格式：
+
+```text
+left_arm_target_rad[0:7]
+right_arm_target_rad[0:7]
+expected_duration_s
+max_velocity_rad_s
+max_acceleration_rad_s2
+```
+
+---
+
+# 六、输出接口设计
+
+轨迹采样后发布到：
+
+```bash
+/upper_position_controller/commands
+```
+
+类型：
+
+```cpp
+std_msgs::msg::Float64MultiArray
+```
+
+长度固定为 16。
+
+发布频率通过参数配置：
+
+```yaml
+publish_hz: 200.0
+```
+
+注意：
+
+1. 输出必须始终是 16 维。
+2. 左臂填充 data[0] ~ data[6]。
+3. 右臂填充 data[7] ~ data[13]。
+4. neck 填充 data[14] ~ data[15]。
+5. 不允许发布长度错误的数组。
+6. 如果还没收到 `/joint_states`，允许等待实际关节状态后再开始规划，避免起点不可信。
+
+---
+
+# 七、minimum snap 七次多项式轨迹要求
+
+每个关节轨迹形式为：
+
+```text
+q(t) = a0 + a1 t + a2 t^2 + a3 t^3 + a4 t^4 + a5 t^5 + a6 t^6 + a7 t^7
+```
+
+需要支持直接计算：
+
+```text
+position     q(t)
+velocity     q_dot(t)
+acceleration q_ddot(t)
+jerk         q_dddot(t)
+```
+
+边界条件：
+
+轨迹起点 t = 0：
+
+```text
+q(0)       = 当前起点位置
+q_dot(0)   = 当前起点速度
+q_ddot(0)  = 当前起点加速度
+q_jerk(0)  = 0
+```
+
+轨迹终点 t = T：
+
+```text
+q(T)       = 目标关节位置
+q_dot(T)   = 目标速度，默认为 0
+q_ddot(T)  = 目标加速度，默认为 0
+q_jerk(T)  = 0
+```
+
+实现细节：
+
+```text
+a0 = q0
+a1 = v0
+a2 = 0.5 * acc0
+a3 = 0
+```
+
+`a4 ~ a7` 通过 4x4 线性方程求解，使终点位置、速度、加速度、jerk 满足约束。
+
+要求：
+
+1. 每个关节独立求解七次多项式。
+2. 左右臂可以共用一套 planner 类，但状态必须分开管理。
+3. planner 必须能保存当前轨迹段的起点状态、终点状态、开始时间、持续时间和多项式系数。
+4. planner 必须支持任意时刻采样 position、velocity、acceleration、jerk。
+
+---
+
+# 八、速度和加速度硬约束逻辑
+
+这是最核心的逻辑，必须严格实现。
+
+输入包括：
+
+```text
+expected_duration_s
+max_velocity_rad_s
+max_acceleration_rad_s2
+```
+
+但是不能盲目使用 expected_duration_s。
+
+必须检查规划出来的轨迹是否满足：
+
+```text
+max(|q_dot(t)|)  <= max_velocity_rad_s
+max(|q_ddot(t)|) <= max_acceleration_rad_s2
+```
+
+如果不能满足，则必须自动增大轨迹执行时间 T，直到满足最大速度和最大加速度约束。
+
+初始 T：
+
+```text
+T = max(expected_duration_s, min_duration_s)
+```
+
+建议保留原有经验计算逻辑：
+
+```text
+T >= abs(delta) * 2.1875 / max_velocity_rad_s
+T >= sqrt(abs(delta) * 7.513188404399293 / max_acceleration_rad_s2)
 ```
 
 其中：
 
 ```text
-arm_command_publisher.py
-  - ArmCommandPublisherBase
-  - Sysmo32CompatibleCommandPublisher
-  - FaNativeCommandPublisher skeleton
+delta = goal_position - start_position
 ```
 
-## 六、测试要求
+对 14 个关节全部计算，最终 T 取所有关节约束中的最大值。
 
-请至少完成以下测试：
-
-### 1. 配置加载测试
+也可以在生成轨迹后通过密集采样校验峰值速度和峰值加速度，例如每段采样 200 ~ 1000 个点。如果采样发现超过限制，则继续增大 T，例如：
 
 ```text
-load_robot_config("fa", laterality=..., control_backend=...)
+T = T * 1.1
 ```
 
-要求能正常返回 FA 配置。
+直到满足约束，或者达到最大迭代次数。
 
-### 2. 模型加载测试
-
-```text
-FaMujocoKinematics 能加载 fa_description 下的模型
-能识别左右臂关节
-能识别左右末端 frame/site
-```
-
-如果失败，需要输出明确错误信息，告诉用户缺少哪个字段或模型文件。
-
-### 3. IK 测试
-
-给定一个小范围 CartesianTarget：
+必须打印 warning，例如：
 
 ```text
-当前位置附近 +x / +y / +z 小位移
+[WARN] Requested duration 0.300 s violates velocity/acceleration limits. Extended trajectory duration to 0.842 s.
 ```
 
 要求：
 
-```text
-IK 不输出 NaN
-输出关节数正确
-关节值在 limit 内
-失败时保持上一帧目标
-```
+1. 速度和加速度限制必须作用在最终生成的轨迹上。
+2. 不能只依赖发布端限幅器来兜底。
+3. 如果 expected_duration_s 太短，必须自动延长。
+4. 如果用户给的 max_velocity_rad_s 或 max_acceleration_rad_s2 非法，必须拒绝该目标并打印错误。
+5. README 中必须明确说明：最终执行时间可能大于用户输入的 expected_duration_s，因为需要满足电机速度和加速度约束。
 
-### 4. ROS2 command 测试
+---
 
-在 real 模式中：
+# 九、在线重规划逻辑
 
-```text
-读取 /joint_states
-发布 /sysmo_left_arm_controller/commands
-消息类型 std_msgs/msg/Float64MultiArray
-data 长度为 18
-```
+这是第二个核心逻辑，必须严格实现。
 
-### 5. 双臂链路测试
+当轨迹正在执行过程中，如果 `/min_snap/target` 收到新的目标关节角度，不能等当前轨迹执行完再规划。
 
-输入左右手 CartesianTarget，检查：
+必须立即进行重规划。
+
+重规划起点必须使用当前轨迹正在执行的状态，而不是简单使用最新 `/joint_states`：
 
 ```text
-左臂 target 写入 data[0:6]
-右臂 target 写入 data[6:12]
-speed_mode 写入 data[12]
-reserved 写入 data[13:17]
-neck_joint 写入 data[17]
+start_position     = 当前轨迹采样位置
+start_velocity     = 当前轨迹采样速度
+start_acceleration = 当前轨迹采样加速度
+start_jerk         = 0
 ```
 
-### 6. pause/resume/reset 测试
+重规划终点：
+
+```text
+goal_position     = 新收到的目标关节角度
+goal_velocity     = 0
+goal_acceleration = 0
+goal_jerk         = 0
+```
+
+重规划后要求：
+
+1. 位置连续。
+2. 速度连续。
+3. 加速度连续。
+4. jerk 可以不跨段连续，起点 jerk 固定为 0 即可。
+5. 重新计算满足速度和加速度约束的轨迹时长。
+6. 打印重规划日志，例如：
+
+```text
+[INFO] Replanned min-snap trajectory from active trajectory state.
+```
+
+如果当前没有正在执行的轨迹，则以 `/joint_states` 中当前关节位置作为起点，速度优先使用 `/joint_states.velocity`，如果没有速度则默认为 0，加速度默认为 0。
+
+---
+
+# 十、/joint_states 订阅和状态管理
+
+节点需要订阅：
+
+```bash
+/joint_states
+```
+
+类型：
+
+```cpp
+sensor_msgs::msg::JointState
+```
 
 要求：
 
-```text
-pause 时停止更新真实命令或保持安全目标
-resume 后恢复追踪
-reset 后重新记录 VR 手部基准位姿和机器人当前末端位姿
+1. 根据 joint name 映射实际关节位置和速度。
+2. 支持 14 个手臂关节。
+3. 支持 neck 两个关节。
+4. 如果 `/joint_states` 缺失某个关节，需要打印 warning，但不要崩溃。
+5. 如果长期没有收到 `/joint_states`，不要发布危险命令。
+6. 提供参数：
+
+```yaml
+joint_state_timeout_s: 0.5
+require_joint_state_before_start: true
 ```
 
-## 七、最终输出
+如果 `require_joint_state_before_start=true`，在收到有效 joint_states 前不能开始轨迹规划。
 
-完成后请给出：
+---
 
-1. 修改文件列表。
-2. 新增类和职责说明。
-3. FA 适配后的数据流。
-4. 当前仍复用 SYSMO-32 ROS2 控制接口的位置。
-5. 后续替换为 FA 原生 ROS2 控制接口时需要改哪些文件。
-6. 需要人工确认的 FA 模型字段，例如：
+# 十一、记录功能
 
-   * 模型文件名
-   * 左右臂 joint names
-   * 左右末端 frame/site names
-   * joint limits
-   * home/ready pose
-   * FA 原生 ROS2 command topic
-   * FA 原生 ROS2 command message type
-7. 测试命令和测试结果。
-8. 如果有失败项，明确说明失败原因，不要假装完成。
+请移植并保留现有的 `/joint_states` 和优化轨迹记录功能。
 
-## 八、验收标准
+记录开关通过参数控制：
 
-满足以下条件才算完成：
+```yaml
+record_tracking: true
+tracking_output_dir: "/home/likunwei/humanoid_ws/src/min_snap/logs"
+```
+
+CSV 文件名建议：
 
 ```text
-robot_name="sysmo32" 原功能不受影响
-robot_name="fa" 能加载配置
-FA 模型能被加载或给出明确缺失信息
-FA IK 接口存在并可被 FaRealControl 调用
-FA real 模式能复用 /joint_states 和 /sysmo_left_arm_controller/commands
-发布的 Float64MultiArray 长度固定为 18
-pause/resume/reset 行为保留
-jerk_limited_servo smoother 保留
-FA 原生 ROS2 控制接口有清晰替换点
+min_snap_tracking_YYYYMMDD_HHMMSS.csv
 ```
+
+CSV 字段至少包括：
+
+```text
+time_s
+
+joint_states.position.<joint_name>
+joint_states.velocity.<joint_name>
+
+desired.position.<joint_name>
+desired.velocity.<joint_name>
+desired.acceleration.<joint_name>
+desired.jerk.<joint_name>
+
+error.position.<joint_name>
+```
+
+其中：
+
+```text
+error.position.<joint_name> = joint_states.position.<joint_name> - desired.position.<joint_name>
+```
+
+要求：
+
+1. 每次发布命令时记录一行。
+2. desired 数据来自 minimum snap planner 当前采样值。
+3. actual 数据来自 `/joint_states`。
+4. 如果 `/joint_states` 中某个关节不存在，对应字段留空或写 NaN。
+5. neck 的 desired velocity、acceleration、jerk 可以记录为 0。
+6. 程序退出时正常关闭 CSV 文件。
+
+---
+
+# 十二、Python 绘图脚本
+
+请实现：
+
+```bash
+scripts/plot_min_snap_tracking.py
+```
+
+功能：
+
+```bash
+python3 scripts/plot_min_snap_tracking.py <csv_file>
+```
+
+默认输出：
+
+```text
+*_left_tracking.png
+*_right_tracking.png
+*_neck_tracking.png
+```
+
+每张图包含 4 行：
+
+1. `joint_states.position` 和 `desired.position`
+2. `desired.velocity`
+3. `desired.acceleration`
+4. `desired.jerk`
+
+要求支持参数：
+
+```bash
+--groups left
+--groups right
+--groups neck
+--groups left right
+```
+
+绘图建议使用：
+
+```python
+matplotlib
+pandas
+```
+
+要求：
+
+1. 自动识别 CSV 字段。
+2. 如果某些字段不存在，跳过并打印 warning。
+3. 图片保存到 CSV 同目录。
+4. README 中给出绘图命令示例。
+
+---
+
+# 十三、参数文件
+
+请提供：
+
+```bash
+config/min_snap.yaml
+```
+
+参数至少包括：
+
+```yaml
+min_snap_node:
+  ros__parameters:
+    publish_hz: 200.0
+
+    target_topic: "/min_snap/target"
+    command_topic: "/upper_position_controller/commands"
+    joint_states_topic: "/joint_states"
+
+    min_duration_s: 0.01
+    default_expected_duration_s: 0.5
+    default_max_velocity_rad_s: 0.25
+    default_max_acceleration_rad_s2: 0.25
+
+    duration_scale_on_violation: 1.1
+    max_duration_search_iterations: 50
+    constraint_sample_count: 500
+
+    replan_threshold_rad: 0.0005
+
+    require_joint_state_before_start: true
+    joint_state_timeout_s: 0.5
+
+    record_tracking: true
+    tracking_output_dir: "/home/likunwei/humanoid_ws/src/min_snap/logs"
+
+    neck_default_position:
+      - 0.0
+      - 0.0
+```
+
+---
+
+# 十四、类设计建议
+
+请尽量按下面结构实现。
+
+## 1. MinSnapTrajectory
+
+职责：
+
+1. 保存单个关节七次多项式系数。
+2. 根据时间 t 采样 position、velocity、acceleration、jerk。
+3. 提供峰值速度和峰值加速度采样检查。
+
+建议接口：
+
+```cpp
+struct TrajectoryState {
+  double position;
+  double velocity;
+  double acceleration;
+  double jerk;
+};
+
+class MinSnapTrajectory {
+public:
+  bool solve(
+    double q0,
+    double v0,
+    double a0,
+    double q1,
+    double v1,
+    double a1,
+    double duration);
+
+  TrajectoryState sample(double t) const;
+
+  double duration() const;
+};
+```
+
+## 2. MinSnapArmPlanner
+
+职责：
+
+1. 管理 7 个关节的 trajectory。
+2. 接收 start state 和 goal state。
+3. 自动扩展 duration 以满足速度和加速度限制。
+4. 支持在线重规划。
+
+建议接口：
+
+```cpp
+class MinSnapArmPlanner {
+public:
+  bool plan(
+    const std::array<double, 7>& start_pos,
+    const std::array<double, 7>& start_vel,
+    const std::array<double, 7>& start_acc,
+    const std::array<double, 7>& goal_pos,
+    double expected_duration,
+    double max_velocity,
+    double max_acceleration);
+
+  ArmTrajectorySample sample(double elapsed_time) const;
+
+  bool active() const;
+  bool finished(double elapsed_time) const;
+};
+```
+
+## 3. MinSnapNode
+
+职责：
+
+1. ROS2 参数读取。
+2. 订阅 target。
+3. 订阅 joint_states。
+4. 管理左右臂 planner。
+5. 定时器采样并发布 16 维命令。
+6. 在线重规划。
+7. 调用 recorder 记录 CSV。
+
+## 4. TrajectoryRecorder
+
+职责：
+
+1. 创建 CSV。
+2. 写 header。
+3. 每周期写入 actual、desired、error。
+4. 节点退出时关闭文件。
+
+---
+
+# 十五、安全和鲁棒性要求
+
+必须处理以下情况：
+
+1. 输入目标数组长度不为 7：拒绝并打印错误。
+2. 输入目标中包含 NaN 或 inf：拒绝并打印错误。
+3. expected_duration_s <= 0：使用默认值或拒绝，并打印 warning。
+4. max_velocity_rad_s <= 0：拒绝。
+5. max_acceleration_rad_s2 <= 0：拒绝。
+6. 没有 `/joint_states`：不发布新轨迹命令。
+7. `/joint_states` 超时：暂停发布或保持最后安全命令，并打印 warning。
+8. 轨迹执行中收到新目标：立即重规划。
+9. 目标变化小于 `replan_threshold_rad`：可以忽略，避免高频微小目标导致频繁重规划。
+10. 输出到 `/upper_position_controller/commands` 的数组长度必须始终为 16。
+
+---
+
+# 十六、构建和运行方式
+
+请确保可以在 ROS2 Humble 下构建：
+
+```bash
+cd /home/likunwei/humanoid_ws
+colcon build --packages-select min_snap --cmake-args -DCMAKE_BUILD_TYPE=Release
+source install/setup.bash
+```
+
+运行：
+
+```bash
+ros2 run min_snap min_snap_node --ros-args --params-file /home/likunwei/humanoid_ws/src/min_snap/config/min_snap.yaml
+```
+
+发送测试目标：
+
+如果使用自定义 msg，请在 README 中提供示例命令。
+
+如果使用 Float64MultiArray 输入，请提供类似：
+
+```bash
+ros2 topic pub /min_snap/target std_msgs/msg/Float64MultiArray "data: [...]"
+```
+
+但更推荐自定义 msg，因为需要同时传目标角度、期望执行时间、最大速度、最大加速度。
+
+---
+
+# 十七、测试要求
+
+请至少提供以下验证方式：
+
+1. 编译通过：
+
+```bash
+colcon build --packages-select min_snap --cmake-args -DCMAKE_BUILD_TYPE=Release
+```
+
+2. 节点能正常启动。
+
+3. 输入目标后，节点能发布 16 维命令：
+
+```bash
+ros2 topic echo /upper_position_controller/commands
+```
+
+4. 轨迹速度不超过输入的 `max_velocity_rad_s`。
+
+5. 轨迹加速度不超过输入的 `max_acceleration_rad_s2`。
+
+6. 如果 expected_duration_s 太短，程序会自动延长 duration 并打印 warning。
+
+7. 轨迹执行过程中再次发送目标，程序会从当前轨迹 position、velocity、acceleration 进行重规划。
+
+8. CSV 文件可以正常生成。
+
+9. Python 脚本可以读取 CSV 并输出 tracking 图。
+
+---
+
+# 十八、README 内容要求
+
+请在 README.md 中写清楚：
+
+1. 功能包用途。
+2. 订阅 topic。
+3. 发布 topic。
+4. FA 16 维命令顺序。
+5. 输入目标格式。
+6. minimum snap 七次多项式边界条件。
+7. 为什么 expected_duration_s 可能会被自动增大。
+8. 在线重规划逻辑。
+9. `/joint_states` 记录字段说明。
+10. 绘图脚本使用方法。
+11. 编译和运行命令。
+12. 常见问题排查。
+
+---
+
+# 十九、重要实现原则
+
+请严格遵守：
+
+1. 不要再依赖 beavr-bot 的 Python 代码。
+2. 不要把 IK、VR、遥操作逻辑带进这个功能包。
+3. 这个功能包只处理“关节目标角度 → min-snap 轨迹 → 16 维 FA 上肢命令”。
+4. 速度、加速度约束必须在轨迹规划阶段满足，而不是靠发布端限幅器兜底。
+5. 在线重规划必须从当前轨迹状态出发，不能简单从新 `/joint_states` 位置重启，否则会造成速度、加速度不连续。
+6. C++ 代码要有清晰类结构，避免所有逻辑堆在一个 node 文件里。
+7. 所有 topic、频率、限制参数都要可配置。
+8. 代码生成完成后，请给出最终文件列表、关键实现说明和运行命令。

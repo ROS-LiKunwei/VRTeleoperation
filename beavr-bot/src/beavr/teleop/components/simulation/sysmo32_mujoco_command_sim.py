@@ -67,8 +67,8 @@ class Sysmo32MujocoCommandMirror(Component):
         interpolation_profile = str(interpolation_profile or "quintic").strip().lower()
         if interpolation_profile in ("septic", "seventh_order", "minimum_snap"):
             interpolation_profile = "min_snap"
-        if interpolation_profile not in ("quintic", "min_snap"):
-            raise ValueError("interpolation_profile must be one of: quintic, min_snap")
+        if interpolation_profile not in ("linear", "quintic", "min_snap"):
+            raise ValueError("interpolation_profile must be one of: linear, quintic, min_snap")
         self.host = host
         self.control_dt = control_dt
         self.render = render
@@ -428,6 +428,8 @@ def _min_snap_blend(progress: float) -> float:
 
 
 def _trajectory_blend(progress: float, interpolation_profile: str = "quintic") -> float:
+    if interpolation_profile == "linear":
+        return float(np.clip(progress, 0.0, 1.0))
     if interpolation_profile == "min_snap":
         return _min_snap_blend(progress)
     return _quintic_blend(progress)

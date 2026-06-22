@@ -42,6 +42,7 @@ from beavr.teleop.components.interface.interface_types import (
     CommandedCartesianState,
     Sysmo32JointCommand,
 )
+from beavr.teleop.components.interface.robots.arm_command_publisher import MinSnapTargetPublisher
 from beavr.teleop.components.operator.operator_types import CartesianTarget
 from beavr.teleop.configs.constants import robots
 
@@ -95,36 +96,44 @@ class Sysmo32RosBridge:
         left_hand_topic: str = "/left_topic_to_hand",
         right_hand_topic: str = "/right_topic_to_hand",
         arm_command_topic: str = SYSMO32_ARM_COMMAND_TOPIC,
+        min_snap_target_topic: str = "/min_snap/target",
     ):
         self._enabled = False
         self._last_hand_command: Optional[int] = None
         self._hand_topic = right_hand_topic if is_right_arm else left_hand_topic
         self._arm_command_topic = arm_command_topic
+        self._min_snap_target_topic = min_snap_target_topic
         self._is_right_arm = is_right_arm
 
         try:
             import rclpy
-            from std_msgs.msg import Float64MultiArray, Int32
+            from min_snap.msg import MinSnapTarget
+            from std_msgs.msg import Int32
         except ImportError as exc:
             logger.warning(f"ROS2 bridge disabled for {node_name}: {exc}")
             self._rclpy = None
             self._node = None
             self._hand_msg_type = None
-            self._arm_msg_type = None
+            self._min_snap_msg_type = None
             return
 
         self._rclpy = rclpy
         self._hand_msg_type = Int32
-        self._arm_msg_type = Float64MultiArray
+        self._min_snap_msg_type = MinSnapTarget
         if not rclpy.ok():
             rclpy.init(args=None)
         self._node = rclpy.create_node(node_name)
         self._hand_publisher = self._node.create_publisher(Int32, self._hand_topic, 10)
-        self._arm_publisher = self._node.create_publisher(Float64MultiArray, self._arm_command_topic, 60)
+        self._min_snap_target_publisher = MinSnapTargetPublisher(
+            self._node,
+            MinSnapTarget,
+            self._min_snap_target_topic,
+            10,
+        )
         self._enabled = True
         logger.info(
             f"ROS2 bridge enabled for {node_name}, hand topic={self._hand_topic}, "
-            f"arm topic={self._arm_command_topic}"
+            f"min_snap target={self._min_snap_target_topic}, min_snap output={self._arm_command_topic}"
         )
 
     @property
@@ -166,17 +175,19 @@ class Sysmo32RosBridge:
         else:
             Sysmo32RosBridge._shared_left_arm_joints = joints.copy()
 
-        full_command = build_sysmo32_full_command(
+        logger.debug(
+            "[真实机器人发送前] ROS2 min_snap target topic=%s left=%s right=%s",
+            self._min_snap_target_topic,
             Sysmo32RosBridge._shared_left_arm_joints,
             Sysmo32RosBridge._shared_right_arm_joints,
         )
-        msg = self._arm_msg_type()
-        msg.data = full_command
-        logger.debug(
-            f"[真实机器人发送前] ROS2 arm msg topic={self._arm_command_topic}, "
-            f"type=std_msgs/Float64MultiArray, data={msg.data}"
+        self._min_snap_target_publisher.publish(
+            Sysmo32RosBridge._shared_left_arm_joints,
+            Sysmo32RosBridge._shared_right_arm_joints,
+            expected_duration_s=0.5,
+            max_velocity_rad_s=3.0,
+            max_acceleration_rad_s2=10.0,
         )
-        self._arm_publisher.publish(msg)
 
     def close(self):
         if not self._enabled or self._node is None:

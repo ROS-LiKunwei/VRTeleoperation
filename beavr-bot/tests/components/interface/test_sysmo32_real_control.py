@@ -19,7 +19,6 @@ from beavr.teleop.components.interface.robots.sysmo32_command import (
     Sysmo32JointStateCache,
 )
 from beavr.teleop.components.interface.robots.sysmo32_real_control import (
-    SYSMO32_ARM_COMMAND_TOPIC,
     SYSMO32_LEFT_HAND_ACTION_TOPIC,
     SYSMO32_RIGHT_HAND_ACTION_TOPIC,
     Sysmo32RealControl,
@@ -63,6 +62,29 @@ def _curled_hand_keypoints() -> np.ndarray:
     return keypoints
 
 
+class FakeSysmo32Ros2Bridge:
+    def __init__(self, topics, require_ros):
+        self.available = True
+        self.require_ros = require_ros
+        self.joint_cache = Sysmo32JointStateCache(topics.joint_state_timeout_s)
+        self.published_min_snap_targets = []
+        self.published_hand_actions = []
+
+    def spin_once(self):
+        return None
+
+    def publish_min_snap_target(self, command, expected_duration_s, max_velocity_rad_s, max_acceleration_rad_s2):
+        self.published_min_snap_targets.append(command)
+        return True
+
+    def publish_hand_action(self, hand_side, action_id):
+        self.published_hand_actions.append((hand_side, action_id))
+        return True
+
+    def close(self):
+        return None
+
+
 def test_sysmo32_arm_command_contract_defaults():
     command = Sysmo32CommandBuilder().build([0.1] * 6, [-0.1] * 6, timestamp_s=1.0)
 
@@ -92,13 +114,16 @@ def test_sysmo32_speed_mode_4_is_allowed():
     assert command.speed_mode == 4.0
 
 
-def test_sysmo32_real_control_config_normalizes_arm_smoother_mode():
-    config = Sysmo32RealControlConfig(arm_trajectory_smoother="servo")
+def test_sysmo32_real_control_config_normalizes_external_min_snap_limits():
+    config = Sysmo32RealControlConfig(
+        min_snap_expected_duration_s=-1.0,
+        min_snap_max_velocity_rad_s=-2.0,
+        min_snap_max_acceleration_rad_s2=-3.0,
+    )
 
-    assert config.arm_trajectory_smoother == "jerk_limited_servo"
-
-    with pytest.raises(ValueError, match="arm_trajectory_smoother"):
-        Sysmo32RealControlConfig(arm_trajectory_smoother="bad_mode")
+    assert config.min_snap_expected_duration_s > 0.0
+    assert config.min_snap_max_velocity_rad_s > 0.0
+    assert config.min_snap_max_acceleration_rad_s2 > 0.0
 
 
 def test_sysmo32_ik_nullspace_delta_moves_only_unconstrained_joint_toward_reference():
@@ -401,6 +426,7 @@ def test_real_control_reset_does_not_replace_ik_elbow_reference_with_current_joi
             return np.eye(4, dtype=np.float64)
 
     monkeypatch.setattr(real_mod, "ZMQSubscriber", FakeSubscriber)
+    monkeypatch.setattr(real_mod, "Sysmo32Ros2Bridge", FakeSysmo32Ros2Bridge)
     monkeypatch.setattr(real_mod, "Sysmo32MujocoKinematics", FakeKinematics)
     monkeypatch.setattr(real_mod, "cleanup_zmq_resources", lambda: None)
 
@@ -463,6 +489,7 @@ def test_real_control_publishes_lerobot_joint_states_at_configured_rate(monkeypa
             self.urdf_path = urdf_path
 
     monkeypatch.setattr(real_mod, "ZMQSubscriber", FakeSubscriber)
+    monkeypatch.setattr(real_mod, "Sysmo32Ros2Bridge", FakeSysmo32Ros2Bridge)
     monkeypatch.setattr(real_mod, "Sysmo32MujocoKinematics", FakeKinematics)
     monkeypatch.setattr(real_mod, "cleanup_zmq_resources", lambda: None)
 
@@ -533,6 +560,7 @@ def test_hand_action_not_published_before_first_hand_frame(monkeypatch, bus):
             return np.zeros(6)
 
     monkeypatch.setattr(real_mod, "ZMQSubscriber", FakeSubscriber)
+    monkeypatch.setattr(real_mod, "Sysmo32Ros2Bridge", FakeSysmo32Ros2Bridge)
     monkeypatch.setattr(real_mod, "Sysmo32MujocoKinematics", FakeKinematics)
     monkeypatch.setattr(real_mod, "cleanup_zmq_resources", lambda: None)
 
@@ -580,6 +608,7 @@ def test_hand_action_publishes_after_first_hand_frame(monkeypatch, bus):
             return np.zeros(6)
 
     monkeypatch.setattr(real_mod, "ZMQSubscriber", FakeSubscriber)
+    monkeypatch.setattr(real_mod, "Sysmo32Ros2Bridge", FakeSysmo32Ros2Bridge)
     monkeypatch.setattr(real_mod, "Sysmo32MujocoKinematics", FakeKinematics)
     monkeypatch.setattr(real_mod, "cleanup_zmq_resources", lambda: None)
 
@@ -628,6 +657,7 @@ def test_pause_publishes_release_after_hand_frame_started(monkeypatch, bus):
             return np.zeros(6)
 
     monkeypatch.setattr(real_mod, "ZMQSubscriber", FakeSubscriber)
+    monkeypatch.setattr(real_mod, "Sysmo32Ros2Bridge", FakeSysmo32Ros2Bridge)
     monkeypatch.setattr(real_mod, "Sysmo32MujocoKinematics", FakeKinematics)
     monkeypatch.setattr(real_mod, "cleanup_zmq_resources", lambda: None)
 
@@ -673,13 +703,13 @@ def test_real_with_mujoco_pause_publishes_hold_from_real_joint_state(monkeypatch
             self.require_ros = require_ros
             self.joint_cache = Sysmo32JointStateCache(topics.joint_state_timeout_s)
             self.joint_cache.update([0.10] * 6, [-0.20] * 6, now_s=time.time())
-            self.published_arm_commands = []
+            self.published_min_snap_targets = []
 
         def spin_once(self):
             return None
 
-        def publish_arm_command(self, command):
-            self.published_arm_commands.append(command)
+        def publish_min_snap_target(self, command, expected_duration_s, max_velocity_rad_s, max_acceleration_rad_s2):
+            self.published_min_snap_targets.append(command)
             return True
 
         def publish_hand_action(self, hand_side, action_id):
@@ -715,11 +745,10 @@ def test_real_with_mujoco_pause_publishes_hold_from_real_joint_state(monkeypatch
 
     controller._enter_pause("unit-test pause")
 
-    assert len(controller._ros2.published_arm_commands) == 1
-    hold_command = controller._ros2.published_arm_commands[0]
+    assert len(controller._ros2.published_min_snap_targets) == 1
+    hold_command = controller._ros2.published_min_snap_targets[0]
     assert np.allclose(hold_command.left_arm, [0.10] * 6)
     assert np.allclose(hold_command.right_arm, [-0.20] * 6)
-    assert bus.recv_latest(ports.SYSMO32_ARM_COMMAND_MIRROR_PORT, SYSMO32_ARM_COMMAND_TOPIC) == hold_command
     assert controller._pause_hold_command == hold_command
     assert not controller._teleop_active
     controller.cleanup()
@@ -743,13 +772,13 @@ def test_pause_hold_heartbeat_republishes_last_hold_command(monkeypatch):
             self.available = True
             self.joint_cache = Sysmo32JointStateCache(topics.joint_state_timeout_s)
             self.joint_cache.update([0.30] * 6, [-0.40] * 6, now_s=time.time())
-            self.published_arm_commands = []
+            self.published_min_snap_targets = []
 
         def spin_once(self):
             return None
 
-        def publish_arm_command(self, command):
-            self.published_arm_commands.append(command)
+        def publish_min_snap_target(self, command, expected_duration_s, max_velocity_rad_s, max_acceleration_rad_s2):
+            self.published_min_snap_targets.append(command)
             return True
 
         def publish_hand_action(self, hand_side, action_id):
@@ -782,15 +811,15 @@ def test_pause_hold_heartbeat_republishes_last_hold_command(monkeypatch):
     )
 
     controller._enter_pause("unit-test pause")
-    assert len(controller._ros2.published_arm_commands) == 1
+    assert len(controller._ros2.published_min_snap_targets) == 1
 
     controller._ros2.joint_cache.snapshot.timestamp_s = 0.0
     controller._last_pause_hold_publish_time = 0.0
     controller._publish_pause_hold_if_needed()
 
-    assert len(controller._ros2.published_arm_commands) == 2
-    assert np.allclose(controller._ros2.published_arm_commands[1].left_arm, [0.30] * 6)
-    assert np.allclose(controller._ros2.published_arm_commands[1].right_arm, [-0.40] * 6)
+    assert len(controller._ros2.published_min_snap_targets) == 2
+    assert np.allclose(controller._ros2.published_min_snap_targets[1].left_arm, [0.30] * 6)
+    assert np.allclose(controller._ros2.published_min_snap_targets[1].right_arm, [-0.40] * 6)
     controller.cleanup()
 
 
@@ -815,6 +844,7 @@ def test_mujoco_command_mirror_accepts_ros2_real_command_topic():
     mirror = Sysmo32MujocoCommandMirror.__new__(Sysmo32MujocoCommandMirror)
     applied = []
     mirror.apply_arm_command = applied.append
+    mirror._arm_command_type = Sysmo32ArmCommand
     data = [0.1] * 6 + [-0.2] * 6 + [0.0] * 6
 
     mirror._on_ros_arm_command(SimpleNamespace(data=data))
@@ -851,7 +881,7 @@ def test_mujoco_command_mirror_uses_quintic_interpolation():
     assert mirror._trajectory_target_positions is None
 
 
-def test_mujoco_backend_publishes_same_command_to_ros_and_mirror(monkeypatch, bus):
+def test_mujoco_backend_publishes_joint_goal_to_min_snap_only(monkeypatch, bus):
     import beavr.teleop.components.interface.robots.sysmo32_real_control as real_mod
 
     class FakeSubscriber:
@@ -869,13 +899,13 @@ def test_mujoco_backend_publishes_same_command_to_ros_and_mirror(monkeypatch, bu
             self.available = True
             self.require_ros = require_ros
             self.joint_cache = Sysmo32JointStateCache(topics.joint_state_timeout_s)
-            self.published_arm_commands = []
+            self.published_min_snap_targets = []
 
         def spin_once(self):
             return None
 
-        def publish_arm_command(self, command):
-            self.published_arm_commands.append(command)
+        def publish_min_snap_target(self, command, expected_duration_s, max_velocity_rad_s, max_acceleration_rad_s2):
+            self.published_min_snap_targets.append(command)
             return True
 
         def publish_hand_action(self, hand_side, action_id):
@@ -910,7 +940,6 @@ def test_mujoco_backend_publishes_same_command_to_ros_and_mirror(monkeypatch, bu
         transformed_left_port=ports.LEFT_KEYPOINT_TRANSFORM_PORT,
         config=Sysmo32RealControlConfig(
             allow_placeholder_ik_for_mujoco=True,
-            publish_arm_command_topic_in_mujoco=True,
         ),
     )
     controller._latest_targets[robots.RIGHT] = CartesianTarget(
@@ -924,9 +953,7 @@ def test_mujoco_backend_publishes_same_command_to_ros_and_mirror(monkeypatch, bu
     controller._publish_arm_command_if_safe()
 
     assert controller._ros2.require_ros
-    assert len(controller._ros2.published_arm_commands) == 1
-    mirror_command = bus.recv_latest(ports.SYSMO32_ARM_COMMAND_MIRROR_PORT, SYSMO32_ARM_COMMAND_TOPIC)
-    assert mirror_command == controller._ros2.published_arm_commands[0]
+    assert len(controller._ros2.published_min_snap_targets) == 1
     controller.cleanup()
 
 
@@ -947,13 +974,13 @@ def test_real_with_mujoco_holds_mirror_until_real_reset(monkeypatch, bus):
         def __init__(self, topics, require_ros):
             self.available = True
             self.joint_cache = Sysmo32JointStateCache(topics.joint_state_timeout_s)
-            self.published_arm_commands = []
+            self.published_min_snap_targets = []
 
         def spin_once(self):
             return None
 
-        def publish_arm_command(self, command):
-            self.published_arm_commands.append(command)
+        def publish_min_snap_target(self, command, expected_duration_s, max_velocity_rad_s, max_acceleration_rad_s2):
+            self.published_min_snap_targets.append(command)
             return True
 
         def publish_hand_action(self, hand_side, action_id):
@@ -998,12 +1025,11 @@ def test_real_with_mujoco_holds_mirror_until_real_reset(monkeypatch, bus):
 
     controller._publish_arm_command_if_safe()
 
-    assert controller._ros2.published_arm_commands == []
-    assert bus.recv_latest(ports.SYSMO32_ARM_COMMAND_MIRROR_PORT, SYSMO32_ARM_COMMAND_TOPIC) is None
+    assert controller._ros2.published_min_snap_targets == []
     controller.cleanup()
 
 
-def test_real_with_mujoco_mirrors_after_real_publish_gate(monkeypatch, bus):
+def test_real_with_mujoco_publishes_min_snap_target_after_real_gate(monkeypatch, bus):
     import beavr.teleop.components.interface.robots.sysmo32_real_control as real_mod
 
     class FakeSubscriber:
@@ -1021,13 +1047,13 @@ def test_real_with_mujoco_mirrors_after_real_publish_gate(monkeypatch, bus):
             self.available = True
             self.joint_cache = Sysmo32JointStateCache(topics.joint_state_timeout_s)
             self.joint_cache.update([0.0] * 6, [0.0] * 6, now_s=time.time())
-            self.published_arm_commands = []
+            self.published_min_snap_targets = []
 
         def spin_once(self):
             return None
 
-        def publish_arm_command(self, command):
-            self.published_arm_commands.append(command)
+        def publish_min_snap_target(self, command, expected_duration_s, max_velocity_rad_s, max_acceleration_rad_s2):
+            self.published_min_snap_targets.append(command)
             return True
 
         def publish_hand_action(self, hand_side, action_id):
@@ -1073,9 +1099,7 @@ def test_real_with_mujoco_mirrors_after_real_publish_gate(monkeypatch, bus):
 
     controller._publish_arm_command_if_safe()
 
-    assert len(controller._ros2.published_arm_commands) == 1
-    mirror_command = bus.recv_latest(ports.SYSMO32_ARM_COMMAND_MIRROR_PORT, SYSMO32_ARM_COMMAND_TOPIC)
-    assert mirror_command == controller._ros2.published_arm_commands[0]
+    assert len(controller._ros2.published_min_snap_targets) == 1
     controller.cleanup()
 
 
@@ -1085,7 +1109,6 @@ def test_sysmo32_config_routes_backends():
     assert len(mujoco_cfg.robots) == 1
     assert len(mujoco_cfg.environment) == 1
     assert mujoco_cfg.camera_streamers == []
-    assert mujoco_cfg.robots[0].config.publish_arm_command_topic_in_mujoco
     assert mujoco_cfg.environment[0].arm_command_source == "ros2"
     assert mujoco_cfg.environment[0].ros_arm_command_topic == "/sysmo_left_arm_controller/commands"
     assert mujoco_cfg.environment[0].publish_joint_states

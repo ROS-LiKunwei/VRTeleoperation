@@ -30,6 +30,7 @@ class FaArmIkConfig:
     module_name: str = "ik_7dof_pybind"
     reference_frame: str = "pelvis"
     max_iters: int = 200
+    max_joint_step_rad: float = 1.0
     eps: float = 1e-3
     log_enabled: bool = True
     log_dir: str = ""
@@ -40,6 +41,7 @@ class FaArmIkConfig:
         if not str(self.module_name).strip():
             raise ValueError("module_name must not be empty")
         object.__setattr__(self, "max_iters", max(1, int(self.max_iters)))
+        object.__setattr__(self, "max_joint_step_rad", max(0.0, float(self.max_joint_step_rad)))
         object.__setattr__(self, "eps", max(1e-9, float(self.eps)))
 
 
@@ -110,6 +112,7 @@ class FaPybindIkClient(FaArmIkClientBase):
         except (TypeError, ValueError):
             q_target_array = current
             has_usable_q_target = False
+        q_target_array = _limit_joint_step(current, q_target_array, self.config.max_joint_step_rad)
         position_error = float(out.get("position_error", np.inf))
         orientation_error = float(out.get("orientation_error", np.inf))
         acceptable_solution = (
@@ -162,6 +165,16 @@ def _as_arm_q(values: Sequence[float]) -> np.ndarray:
     if q.shape != (FA_ARM_JOINT_COUNT,) or not np.all(np.isfinite(q)):
         raise ValueError("FA arm IK input/output must contain 7 finite joints")
     return q
+
+
+def _limit_joint_step(current: np.ndarray, target: np.ndarray, max_step_rad: float) -> np.ndarray:
+    if max_step_rad <= 0.0:
+        return target
+    delta = target - current
+    delta_norm = float(np.linalg.norm(delta))
+    if delta_norm <= max_step_rad:
+        return target
+    return current + delta * (max_step_rad / delta_norm)
 
 
 def _quat_xyzw_to_rotation(quat_xyzw: Sequence[float]) -> np.ndarray:
@@ -219,6 +232,7 @@ class _FaIkCsvLogger:
         "hand_command",
         "reference_frame",
         "max_iters",
+        "max_joint_step_rad",
         "eps",
         "target_x",
         "target_y",
@@ -280,6 +294,7 @@ class _FaIkCsvLogger:
             "hand_command": getattr(target, "hand_command", ""),
             "reference_frame": config.reference_frame,
             "max_iters": int(config.max_iters),
+            "max_joint_step_rad": f"{float(config.max_joint_step_rad):.9g}",
             "eps": f"{float(config.eps):.9g}",
             "success": int(result.success),
             "has_solution": int(result.has_solution),

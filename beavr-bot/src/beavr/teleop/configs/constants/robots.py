@@ -166,7 +166,7 @@ RECORDED_DATA_JOINT_ANGLES_RAD = "joint_angles_rad"
 # -----------------------------------------------------------------------------
 # VR frequency constants
 # -----------------------------------------------------------------------------
-VR_FREQ = 60
+VR_FREQ = 90
 RECORDER_FREQ = 30
 ARM_TELEOP_CONT = 1
 ARM_TELEOP_STOP = 0

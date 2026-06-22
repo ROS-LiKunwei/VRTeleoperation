@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from beavr.teleop.common.configs.loader import Laterality, log_laterality_configuration
@@ -36,10 +38,37 @@ from beavr.teleop.configs.robots.sysmo_mujoco_config import Sysmo32MujocoCommand
 
 logger = logging.getLogger(__name__)
 
+
+def _beavr_bot_root() -> Path:
+    return Path(os.environ.get("BEAVR_BOT_ROOT", Path(__file__).resolve().parents[5])).expanduser()
+
+
+def _first_existing_path(env_name: str, candidates: list[Path], default: str = "") -> str:
+    env_value = os.environ.get(env_name)
+    if env_value:
+        return str(Path(env_value).expanduser())
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+    return default
+
+
 ROBOT_NAME_FA = "fa"
-FA_DESCRIPTION_PATH = "/home/likunwei/dataCollection/beavr-bot/robots/fa_description"
-FA_URDF_PATH = f"{FA_DESCRIPTION_PATH}/urdf/fa_robot.urdf"
-FA_SRDF_PATH = "/home/likunwei/humanoid_ws/src/fa_moveit2_config/config/fa_robot.srdf"
+BEAVR_BOT_ROOT = _beavr_bot_root()
+FA_DESCRIPTION_PATH = str(BEAVR_BOT_ROOT / "robots" / "fa_description")
+FA_URDF_PATH = _first_existing_path(
+    "FA_URDF_PATH",
+    [BEAVR_BOT_ROOT / "robots" / "fa_description" / "urdf" / "fa_robot.urdf"],
+    str(BEAVR_BOT_ROOT / "robots" / "fa_description" / "urdf" / "fa_robot.urdf"),
+)
+FA_SRDF_PATH = _first_existing_path(
+    "FA_SRDF_PATH",
+    [
+        Path.home() / "likunwei_ws" / "src" / "fa_moveit2_config" / "config" / "fa_robot.srdf",
+        Path.home() / "humanoid_ws" / "src" / "fa_moveit2_config" / "config" / "fa_robot.srdf",
+        Path("/home/likunwei/humanoid_ws/src/fa_moveit2_config/config/fa_robot.srdf"),
+    ],
+)
 FA_UPPER_POSITION_COMMAND_TOPIC = "/upper_position_controller/commands"
 
 
@@ -56,7 +85,6 @@ class FaRealControlCfg:
     right_state_publish_port: int = ports.XARM_STATE_PUBLISH_PORT + SYSMO32_RIGHT_PORT_OFFSET
     left_state_publish_port: int = ports.XARM_STATE_PUBLISH_PORT + SYSMO32_LEFT_PORT_OFFSET
     teleoperation_state_port: int = ports.XARM_TELEOPERATION_STATE_PORT
-    upper_command_mirror_port: int = ports.SYSMO32_ARM_COMMAND_MIRROR_PORT
     urdf_path: str = FA_URDF_PATH
     config: FaRealControlConfig = field(
         default_factory=lambda: FaRealControlConfig(
@@ -64,7 +92,9 @@ class FaRealControlCfg:
             ros2=FaRos2Topics(
                 joint_state_topic="/joint_states",
                 upper_position_command_topic=FA_UPPER_POSITION_COMMAND_TOPIC,
+                min_snap_target_topic="/min_snap/target",
                 upper_position_command_queue_size=60,
+                min_snap_target_queue_size=10,
                 joint_state_timeout_s=1.0,
             ),
             upper=FaUpperPositionSafetyConfig(
@@ -79,20 +109,33 @@ class FaRealControlCfg:
                     2.79, 0.33, 2.79, 0.26, 2.79, 0.52, 1.57,
                     3.14, 3.14,
                 ),
-                max_joint_velocity_rad_s=tuple([3.0] * FA_UPPER_COMMAND_LENGTH),
+                max_joint_velocity_rad_s=tuple([1.2] * FA_UPPER_COMMAND_LENGTH),
                 max_joint_jump_rad=0.5,
                 max_translation_step_m=0.30,
                 max_rotation_step_rad=0.5,
             ),
             state_publish_fps=30.0,
+            command_publish_hz=100.0,
             safety_hold_arm_on_pause=True,
             pause_hold_heartbeat_hz=20.0,
             allow_mujoco_mirror_without_joint_state=True,
-            publish_upper_command_topic_in_mujoco=False,
-            arm_trajectory_smoother="min_snap",
-            arm_servo_max_velocity_rad_s=3.0,
-            arm_servo_max_acceleration_rad_s2=10.0,
-            arm_servo_max_jerk_rad_s3=120.0,
+            max_ik_solution_jump_rad=0.5,
+            ik_solution_jump_clip_rad=0.3,
+            ik_max_position_error_m=0.15,
+            ik_max_orientation_error_rad=1.2,
+            min_snap_expected_duration_s=0.35,
+            min_snap_max_velocity_rad_s=1.0,
+            min_snap_max_acceleration_rad_s2=5.0,
+            min_snap_target_publish_hz=30.0,
+            min_snap_target_epsilon_rad=0.002,
+            ik_cartesian_position_deadband_m=0.012,
+            ik_cartesian_orientation_deadband_rad=0.06,
+            initial_pose_enabled=True,
+            initial_left_arm_positions_rad=(-0.40, 0.38, -0.63, -1.05, -0.86, 0.17, -0.01),
+            initial_right_arm_positions_rad=(-0.63, -0.28, 0.73, -0.84, 0.92, 0.23, 0.43),
+            initial_pose_duration_s=5.0,
+            initial_pose_max_velocity_rad_s=0.8,
+            initial_pose_max_acceleration_rad_s2=5.0,
             kinematics=FaKinematicsConfig(
                 model_path=FA_URDF_PATH,
                 left_joint_names=FA_LEFT_ARM_JOINT_NAMES,
@@ -108,15 +151,14 @@ class FaRealControlCfg:
                 module_name="ik_7dof_pybind",
                 reference_frame="pelvis",
                 max_iters=200,
-                eps=1e-3,
+                max_joint_step_rad=1.0,
+                eps=0.01,
             ),
         )
     )
 
     def _apply_backend_overrides(self):
         self.config.control_backend = self.control_backend
-        if self.control_backend == "mujoco":
-            self.config.publish_upper_command_topic_in_mujoco = False
         if self.control_backend == "real_with_mujoco":
             self.config.allow_mujoco_mirror_without_joint_state = False
 
@@ -135,7 +177,6 @@ class FaRealControlCfg:
             right_state_publish_port=self.right_state_publish_port,
             left_state_publish_port=self.left_state_publish_port,
             teleoperation_state_port=self.teleoperation_state_port,
-            upper_command_mirror_port=self.upper_command_mirror_port,
             urdf_path=self.urdf_path,
             config=self.config,
         )
@@ -186,6 +227,7 @@ class FaOperatorCfg:
             rotation_delta_frame=self.rotation_delta_frame,
             h_r_v=H_R_V_FA,
         )
+
 
 
 @dataclass
@@ -264,7 +306,7 @@ class FaConfig:
             )
 
         self.camera_streamers = []
-        if self.control_backend == "real":
+        if self.control_backend == "real" and os.environ.get("FA_ENABLE_REAL_CAMERA", "0") == "1":
             self.camera_streamers = [
                 Sysmo32RealCameraStreamerCfg(
                     host=network.HOST_ADDRESS,
@@ -305,7 +347,7 @@ class FaConfig:
 
         self.environment = []
         if self.control_backend in ("mujoco", "real_with_mujoco"):
-            self.environment = [
+            self.environment.append(
                 Sysmo32MujocoCommandMirrorCfg(
                     host=network.HOST_ADDRESS,
                     arm_command_port=ports.SYSMO32_ARM_COMMAND_MIRROR_PORT,
@@ -316,17 +358,17 @@ class FaConfig:
                     render=True,
                     load_model=True,
                     print_hand_action_only=True,
-                    arm_command_source="zmq" if self.control_backend == "mujoco" else "ros2",
+                    arm_command_source="ros2",
                     ros_arm_command_topic=FA_UPPER_POSITION_COMMAND_TOPIC,
                     publish_joint_states=self.control_backend == "mujoco",
                     joint_state_topic="/joint_states",
                     joint_state_publish_hz=50.0,
                     arm_command_interpolation_steps=5,
-                    interpolation_profile="min_snap",
+                    interpolation_profile="linear",
                     expected_command_length=FA_UPPER_COMMAND_LENGTH,
                     joint_state_joint_names=FA_LEFT_ARM_JOINT_NAMES + FA_RIGHT_ARM_JOINT_NAMES,
                 )
-            ]
+            )
 
     def build(self):
         return {

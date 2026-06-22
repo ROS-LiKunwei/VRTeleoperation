@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, Optional, Sequence
 
 import numpy as np
@@ -15,7 +17,7 @@ from beavr.teleop.common.network.utils import cleanup_zmq_resources
 from beavr.teleop.components import Component
 from beavr.teleop.components.detector.detector_types import SessionCommand
 from beavr.teleop.components.interface.interface_types import CartesianState
-from beavr.teleop.components.interface.robots.arm_command_publisher import FaNativeCommandPublisher
+from beavr.teleop.components.interface.robots.arm_command_publisher import MinSnapTargetPublisher
 from beavr.teleop.components.interface.robots.fa_arm_ik_client import (
     FaArmIkConfig,
     FaArmIkClientBase,
@@ -35,12 +37,6 @@ from beavr.teleop.components.interface.robots.fa_command_builder import (
 from beavr.teleop.components.interface.robots.fa_mujoco_kinematics import (
     FaKinematicsConfig,
 )
-from beavr.teleop.components.interface.robots.fa_trajectory import (
-    FaArmTrajectoryConfig,
-    FaArmTrajectorySmoother,
-    FaJerkLimitedServoConfig,
-    FaJerkLimitedServoSmoother,
-)
 from beavr.teleop.components.operator.operator_types import CartesianTarget
 from beavr.teleop.configs.constants import ports, robots
 
@@ -49,11 +45,38 @@ logger = logging.getLogger(__name__)
 FA_UPPER_COMMAND_TOPIC = "fa_upper_position_command"
 
 
+def _default_beavr_bot_root() -> Path:
+    return Path(os.environ.get("BEAVR_BOT_ROOT", Path(__file__).resolve().parents[6])).expanduser()
+
+
+def _default_fa_urdf_path() -> str:
+    env_value = os.environ.get("FA_URDF_PATH")
+    if env_value:
+        return str(Path(env_value).expanduser())
+    return str(_default_beavr_bot_root() / "robots" / "fa_description" / "urdf" / "fa_robot.urdf")
+
+
+def _default_fa_srdf_path() -> str:
+    env_value = os.environ.get("FA_SRDF_PATH")
+    if env_value:
+        return str(Path(env_value).expanduser())
+    for candidate in (
+        Path.home() / "likunwei_ws" / "src" / "fa_moveit2_config" / "config" / "fa_robot.srdf",
+        Path.home() / "humanoid_ws" / "src" / "fa_moveit2_config" / "config" / "fa_robot.srdf",
+        Path("/home/likunwei/humanoid_ws/src/fa_moveit2_config/config/fa_robot.srdf"),
+    ):
+        if candidate.exists():
+            return str(candidate)
+    return ""
+
+
 @dataclass
 class FaRos2Topics:
     joint_state_topic: str = "/joint_states"
     upper_position_command_topic: str = "/upper_position_controller/commands"
+    min_snap_target_topic: str = "/min_snap/target"
     upper_position_command_queue_size: int = 60
+    min_snap_target_queue_size: int = 1
     joint_state_timeout_s: float = 1.0
 
 
@@ -65,73 +88,113 @@ class FaRealControlConfig:
     kinematics: FaKinematicsConfig = field(default_factory=FaKinematicsConfig)
     ik: FaArmIkConfig = field(
         default_factory=lambda: FaArmIkConfig(
-            urdf_file="/home/likunwei/dataCollection/beavr-bot/robots/fa_description/urdf/fa_robot.urdf",
-            srdf_file="/home/likunwei/humanoid_ws/src/fa_moveit2_config/config/fa_robot.srdf",
+            urdf_file=_default_fa_urdf_path(),
+            srdf_file=_default_fa_srdf_path(),
         )
     )
     state_publish_fps: float = 30.0
+    command_publish_hz: float = 1000.0
     safety_hold_arm_on_pause: bool = True
     pause_hold_heartbeat_hz: float = 20.0
     allow_mujoco_mirror_without_joint_state: bool = True
-    publish_upper_command_topic_in_mujoco: bool = False
-    arm_trajectory_smoother: str = "min_snap"
-    arm_trajectory_segment_time_s: float = 0.18
-    arm_trajectory_min_duration_s: float = 0.06
-    arm_trajectory_replan_threshold_rad: float = 0.0005
-    arm_trajectory_max_acceleration_rad_s2: float = 12.0
-    arm_servo_max_velocity_rad_s: float = 3.0
-    arm_servo_max_acceleration_rad_s2: float = 10.0
-    arm_servo_max_jerk_rad_s3: float = 120.0
-    arm_servo_omega: float = 35.0
-    arm_servo_damping_ratio: float = 1.0
-    arm_servo_target_deadband_rad: float = 0.0005
-    arm_servo_max_dt_s: float = 0.05
-    max_ik_solution_jump_rad: float = 0.5
+    max_ik_solution_jump_rad: float = 0.3
+    ik_solution_jump_clip_rad: float = 0.3
+    ik_max_position_error_m: float = 0.15
+    ik_max_orientation_error_rad: float = 1.2
+    min_snap_expected_duration_s: float = 0.016
+    min_snap_max_velocity_rad_s: float = 1.5
+    min_snap_max_acceleration_rad_s2: float = 15.0
+    min_snap_target_publish_hz: float = 60.0
+    min_snap_target_epsilon_rad: float = 0.002
+    ik_cartesian_position_deadband_m: float = 0.012
+    ik_cartesian_orientation_deadband_rad: float = 0.06
+    initial_pose_enabled: bool = False
+    initial_left_arm_positions_rad: Optional[tuple[float, ...]] = None
+    initial_right_arm_positions_rad: Optional[tuple[float, ...]] = None
+    initial_pose_duration_s: float = 4.0
+    initial_pose_max_velocity_rad_s: float = 0.5
+    initial_pose_max_acceleration_rad_s2: float = 2.0
 
     def __post_init__(self):
-        self.arm_trajectory_smoother = str(self.arm_trajectory_smoother or "none").strip().lower()
-        if self.arm_trajectory_smoother in ("jerk", "servo", "online_servo"):
-            self.arm_trajectory_smoother = "jerk_limited_servo"
-        if self.arm_trajectory_smoother not in ("none", "min_snap", "jerk_limited_servo"):
-            raise ValueError("arm_trajectory_smoother must be one of: none, min_snap, jerk_limited_servo")
         self.max_ik_solution_jump_rad = max(0.0, float(self.max_ik_solution_jump_rad))
+        self.ik_solution_jump_clip_rad = max(0.0, float(self.ik_solution_jump_clip_rad))
+        self.ik_max_position_error_m = max(0.0, float(self.ik_max_position_error_m))
+        self.ik_max_orientation_error_rad = max(0.0, float(self.ik_max_orientation_error_rad))
+        self.min_snap_expected_duration_s = max(1e-4, float(self.min_snap_expected_duration_s))
+        self.min_snap_max_velocity_rad_s = max(1e-6, float(self.min_snap_max_velocity_rad_s))
+        self.min_snap_max_acceleration_rad_s2 = max(1e-6, float(self.min_snap_max_acceleration_rad_s2))
+        self.min_snap_target_publish_hz = max(1.0, float(self.min_snap_target_publish_hz))
+        self.min_snap_target_epsilon_rad = max(0.0, float(self.min_snap_target_epsilon_rad))
+        self.ik_cartesian_position_deadband_m = max(0.0, float(self.ik_cartesian_position_deadband_m))
+        self.ik_cartesian_orientation_deadband_rad = max(0.0, float(self.ik_cartesian_orientation_deadband_rad))
+        self.initial_pose_duration_s = max(1e-3, float(self.initial_pose_duration_s))
+        self.initial_pose_max_velocity_rad_s = max(1e-6, float(self.initial_pose_max_velocity_rad_s))
+        self.initial_pose_max_acceleration_rad_s2 = max(1e-6, float(self.initial_pose_max_acceleration_rad_s2))
+        if self.initial_pose_enabled:
+            self.initial_left_arm_positions_rad = tuple(
+                float(v) for v in self._validate_initial_arm_pose(
+                    self.initial_left_arm_positions_rad,
+                    "initial_left_arm_positions_rad",
+                )
+            )
+            self.initial_right_arm_positions_rad = tuple(
+                float(v) for v in self._validate_initial_arm_pose(
+                    self.initial_right_arm_positions_rad,
+                    "initial_right_arm_positions_rad",
+                )
+            )
+
+    @staticmethod
+    def _validate_initial_arm_pose(values: Optional[Sequence[float]], label: str) -> np.ndarray:
+        if values is None:
+            raise ValueError(f"{label} must be set when initial_pose_enabled is true")
+        array = np.asarray(values, dtype=np.float64)
+        if array.shape != (FA_ARM_JOINT_COUNT,) or not np.all(np.isfinite(array)):
+            raise ValueError(f"{label} must contain {FA_ARM_JOINT_COUNT} finite values")
+        return array
 
 
 class FaRos2Bridge:
     """ROS2 bridge for FA joint states and native 16D command publishing."""
 
-    def __init__(self, topics: FaRos2Topics, require_ros: bool, node_name: str = "fa_real_control"):
+    def __init__(
+        self,
+        topics: FaRos2Topics,
+        require_ros: bool,
+        node_name: str = "fa_real_control",
+    ):
         self.topics = topics
         self.require_ros = require_ros
         self.available = False
         self.joint_cache = FaJointStateCache(topics.joint_state_timeout_s)
         self._rclpy = None
         self._node = None
-        self._upper_publisher = None
+        self._min_snap_target_publisher = None
         if require_ros:
             self._init_ros2(node_name)
 
     def _init_ros2(self, node_name: str) -> None:
         try:
             import rclpy
+            from min_snap.msg import MinSnapTarget
             from sensor_msgs.msg import JointState
-            from std_msgs.msg import Float64MultiArray
 
             self._rclpy = rclpy
             if not rclpy.ok():
                 rclpy.init(args=None)
             self._node = rclpy.create_node(node_name)
-            self._upper_publisher = FaNativeCommandPublisher(
+            self._min_snap_target_publisher = MinSnapTargetPublisher(
                 ros_node=self._node,
-                msg_type=Float64MultiArray,
-                topic=self.topics.upper_position_command_topic,
-                queue_size=self.topics.upper_position_command_queue_size,
+                msg_type=MinSnapTarget,
+                topic=self.topics.min_snap_target_topic,
+                queue_size=self.topics.min_snap_target_queue_size,
             )
             self._node.create_subscription(JointState, self.topics.joint_state_topic, self._on_joint_state, 10)
             self.available = True
             logger.info(
-                "FA ROS2 bridge connected: joint_state=%s command=%s",
+                "FA ROS2 bridge connected: joint_state=%s min_snap_target=%s min_snap_output=%s",
                 self.topics.joint_state_topic,
+                self.topics.min_snap_target_topic,
                 self.topics.upper_position_command_topic,
             )
         except Exception as exc:
@@ -148,10 +211,22 @@ class FaRos2Bridge:
         if self.available and self._rclpy is not None and self._node is not None:
             self._rclpy.spin_once(self._node, timeout_sec=0.0)
 
-    def publish_upper_command(self, command: FaUpperPositionCommand) -> bool:
-        if not self.available or self._upper_publisher is None:
+    def publish_min_snap_target(
+        self,
+        command: FaUpperPositionCommand,
+        expected_duration_s: float,
+        max_velocity_rad_s: float,
+        max_acceleration_rad_s2: float,
+    ) -> bool:
+        if not self.available or self._min_snap_target_publisher is None:
             return False
-        return self._upper_publisher.publish(command)
+        return self._min_snap_target_publisher.publish(
+            command.left_arm,
+            command.right_arm,
+            expected_duration_s,
+            max_velocity_rad_s,
+            max_acceleration_rad_s2,
+        )
 
     def close(self) -> None:
         if self._node is not None:
@@ -174,8 +249,7 @@ class FaRealControl(Component):
         teleoperation_state_port: int,
         right_endeff_publish_port: Optional[int] = None,
         left_endeff_publish_port: Optional[int] = None,
-        upper_command_mirror_port: int = ports.SYSMO32_ARM_COMMAND_MIRROR_PORT,
-        urdf_path: str = "/home/likunwei/dataCollection/beavr-bot/robots/fa_description/urdf/fa_robot.urdf",
+        urdf_path: str = "",
         config: Optional[FaRealControlConfig] = None,
         ik_client: Optional[FaArmIkClientBase] = None,
         **_,
@@ -183,16 +257,15 @@ class FaRealControl(Component):
         self.notify_component_start("fa_real_control")
         self.host = host
         self.control_backend = control_backend
+        urdf_path = urdf_path or _default_fa_urdf_path()
         self._validate_backend()
         self.config = config or FaRealControlConfig(control_backend=control_backend)
         self.config.control_backend = control_backend
         self._publisher_manager = ZMQPublisherManager.get_instance()
-        self._upper_command_mirror_port = upper_command_mirror_port
         self._right_state_publish_port = right_state_publish_port
         self._left_state_publish_port = left_state_publish_port
         self._right_endeff_publish_port = right_endeff_publish_port or right_state_publish_port
         self._left_endeff_publish_port = left_endeff_publish_port or left_state_publish_port
-        self._publisher_manager.register_topic(self.host, self._upper_command_mirror_port, FA_UPPER_COMMAND_TOPIC)
         self._publisher_manager.register_topic(self.host, self._right_state_publish_port, "fa_right")
         self._publisher_manager.register_topic(self.host, self._left_state_publish_port, "fa_left")
 
@@ -215,10 +288,11 @@ class FaRealControl(Component):
             self._pause_subscriber,
         ]
 
-        require_ros = self.control_backend in ("real", "real_with_mujoco") or (
-            self.control_backend == "mujoco" and self.config.publish_upper_command_topic_in_mujoco
+        require_ros = True
+        self._ros2 = FaRos2Bridge(
+            self.config.ros2,
+            require_ros=require_ros,
         )
-        self._ros2 = FaRos2Bridge(self.config.ros2, require_ros=require_ros)
         self._dry_joint_cache = FaJointStateCache(self.config.ros2.joint_state_timeout_s)
         self._dry_joint_cache.update(
             np.zeros(FA_ARM_JOINT_COUNT),
@@ -233,18 +307,24 @@ class FaRealControl(Component):
         self._ik_client = ik_client or self._make_default_ik_client()
         self._builder = FaUpperPositionCommandBuilder(self.config.upper)
         self._limiter = FaCommandLimiter(self.config.upper)
-        self._left_arm_smoother = self._make_arm_smoother(robots.LEFT)
-        self._right_arm_smoother = self._make_arm_smoother(robots.RIGHT)
 
         self._teleop_active = True
         self._needs_reset = True
         self._real_reset_ready = self.control_backend == "mujoco"
         self._latest_targets: Dict[str, Optional[CartesianTarget]] = {robots.LEFT: None, robots.RIGHT: None}
+        self._latest_target_keys: Dict[str, Optional[tuple]] = {robots.LEFT: None, robots.RIGHT: None}
+        self._active_arm_goals: Dict[str, Optional[np.ndarray]] = {robots.LEFT: None, robots.RIGHT: None}
+        self._arm_goal_dirty: Dict[str, bool] = {robots.LEFT: False, robots.RIGHT: False}
         self._last_safe_arm_targets: Dict[str, Optional[np.ndarray]] = {robots.LEFT: None, robots.RIGHT: None}
+        self._last_ik_cartesian_targets: Dict[str, Optional[CartesianTarget]] = {robots.LEFT: None, robots.RIGHT: None}
         self._pause_hold_command: Optional[FaUpperPositionCommand] = None
         self._last_pause_hold_publish_time = 0.0
         self._next_state_publish_time_s = 0.0
         self._last_published_upper_command: Optional[FaUpperPositionCommand] = None
+        self._last_min_snap_target_command: Optional[FaUpperPositionCommand] = None
+        self._last_min_snap_target_publish_time_s = 0.0
+        self._initial_pose_started_at_s: Optional[float] = None
+        self._initial_pose_done = not self.config.initial_pose_enabled
         self._last_safety_log_time: Dict[str, float] = {}
 
     def _make_default_ik_client(self) -> FaArmIkClientBase:
@@ -254,44 +334,6 @@ class FaRealControl(Component):
         if self.control_backend not in ("real", "mujoco", "real_with_mujoco"):
             raise ValueError(f"control_backend must be one of: real, mujoco, real_with_mujoco; got {self.control_backend}")
 
-    def _make_arm_smoother(self, hand_side: str):
-        if self.config.arm_trajectory_smoother == "min_snap":
-            return FaArmTrajectorySmoother(
-                self._make_arm_trajectory_config(hand_side, enabled=True),
-                name=f"fa_{hand_side}",
-            )
-        enabled = self.config.arm_trajectory_smoother == "jerk_limited_servo"
-        offset = 0 if hand_side == robots.LEFT else 7
-        return FaJerkLimitedServoSmoother(
-            FaJerkLimitedServoConfig(
-                enabled=enabled,
-                max_joint_velocity_rad_s=tuple([self.config.arm_servo_max_velocity_rad_s] * 7),
-                max_joint_acceleration_rad_s2=tuple([self.config.arm_servo_max_acceleration_rad_s2] * 7),
-                max_joint_jerk_rad_s3=tuple([self.config.arm_servo_max_jerk_rad_s3] * 7),
-                omega=self.config.arm_servo_omega,
-                damping_ratio=self.config.arm_servo_damping_ratio,
-                target_deadband_rad=self.config.arm_servo_target_deadband_rad,
-                max_dt_s=self.config.arm_servo_max_dt_s,
-                joint_lower_limits_rad=self.config.upper.joint_lower_limits_rad[offset : offset + 7],
-                joint_upper_limits_rad=self.config.upper.joint_upper_limits_rad[offset : offset + 7],
-            ),
-            name=f"fa_{hand_side}",
-        )
-
-    def _make_arm_trajectory_config(self, hand_side: str, enabled: bool) -> FaArmTrajectoryConfig:
-        offset = 0 if hand_side == robots.LEFT else 7
-        return FaArmTrajectoryConfig(
-            joint_count=7,
-            enabled=enabled,
-            segment_time_s=self.config.arm_trajectory_segment_time_s,
-            min_duration_s=self.config.arm_trajectory_min_duration_s,
-            replan_threshold_rad=self.config.arm_trajectory_replan_threshold_rad,
-            max_joint_velocity_rad_s=tuple([self.config.arm_servo_max_velocity_rad_s] * 7),
-            max_joint_acceleration_rad_s2=tuple([self.config.arm_trajectory_max_acceleration_rad_s2] * 7),
-            joint_lower_limits_rad=self.config.upper.joint_lower_limits_rad[offset : offset + 7],
-            joint_upper_limits_rad=self.config.upper.joint_upper_limits_rad[offset : offset + 7],
-        )
-
     def stream(self):
         logger.info("Starting FA real-control backend=%s", self.control_backend)
         while True:
@@ -299,11 +341,18 @@ class FaRealControl(Component):
             self._ros2.spin_once()
             self._handle_session_command()
             self._publish_pause_hold_if_needed()
+            self._publish_initial_pose_if_needed()
             self._handle_reset_requests()
+            if not self._initial_pose_ready():
+                self._publish_lerobot_joint_states()
+                command_period_s = 1.0 / max(1.0, float(self.config.command_publish_hz))
+                time.sleep(max(0.0, command_period_s - (time.time() - start)))
+                continue
             self._receive_cartesian_targets()
             self._publish_lerobot_joint_states()
             self._publish_upper_command_if_safe()
-            time.sleep(max(0.0, (1.0 / robots.VR_FREQ) - (time.time() - start)))
+            command_period_s = 1.0 / max(1.0, float(self.config.command_publish_hz))
+            time.sleep(max(0.0, command_period_s - (time.time() - start)))
 
     def _handle_session_command(self) -> None:
         msg = self._pause_subscriber.recv_keypoints()
@@ -319,18 +368,74 @@ class FaRealControl(Component):
             self._needs_reset = True
             self._real_reset_ready = self.control_backend == "mujoco"
             self._latest_targets = {robots.LEFT: None, robots.RIGHT: None}
+            self._latest_target_keys = {robots.LEFT: None, robots.RIGHT: None}
+            self._active_arm_goals = {robots.LEFT: None, robots.RIGHT: None}
+            self._arm_goal_dirty = {robots.LEFT: False, robots.RIGHT: False}
             self._pause_hold_command = None
+
+    def _initial_pose_ready(self, now_s: Optional[float] = None) -> bool:
+        if self._initial_pose_done:
+            return True
+        if self._initial_pose_started_at_s is None:
+            return False
+        now = time.time() if now_s is None else float(now_s)
+        if now - self._initial_pose_started_at_s < self.config.initial_pose_duration_s:
+            return False
+        self._initial_pose_done = True
+        return True
+
+    def _publish_initial_pose_if_needed(self) -> None:
+        if self._initial_pose_done or self._initial_pose_started_at_s is not None:
+            return
+        if not self.config.initial_pose_enabled:
+            self._initial_pose_done = True
+            return
+        if self.control_backend in ("real", "real_with_mujoco") and not self._real_joint_state_fresh():
+            self._warn_safety("initial_pose_joint_state_stale", "FA initial pose held until fresh /joint_states")
+            return
+        snapshot = self._current_joint_snapshot()
+        if snapshot is None:
+            self._warn_safety("initial_pose_joint_state_missing", "FA initial pose held: missing joint state")
+            return
+        left = np.asarray(self.config.initial_left_arm_positions_rad, dtype=np.float64)
+        right = np.asarray(self.config.initial_right_arm_positions_rad, dtype=np.float64)
+        command = self._builder.build(left, right, snapshot.neck, timestamp_s=time.time())
+        if not self._ros2.publish_min_snap_target(
+            command,
+            self.config.initial_pose_duration_s,
+            self.config.initial_pose_max_velocity_rad_s,
+            self.config.initial_pose_max_acceleration_rad_s2,
+        ):
+            self._warn_safety("initial_pose_min_snap_unavailable", "FA initial pose publisher unavailable")
+            return
+        self._initial_pose_started_at_s = time.time()
+        self._last_min_snap_target_command = command
+        self._last_min_snap_target_publish_time_s = self._initial_pose_started_at_s
+        self._last_published_upper_command = command
+        self._active_arm_goals = {robots.LEFT: left.copy(), robots.RIGHT: right.copy()}
+        self._arm_goal_dirty = {robots.LEFT: False, robots.RIGHT: False}
+        self._last_safe_arm_targets = {robots.LEFT: left.copy(), robots.RIGHT: right.copy()}
+        self._latest_targets = {robots.LEFT: None, robots.RIGHT: None}
+        self._latest_target_keys = {robots.LEFT: None, robots.RIGHT: None}
+        self._limiter.reset(command.values)
+        logger.info(
+            "FA initial teleop pose target published: duration=%.2fs max_vel=%.2f max_acc=%.2f",
+            self.config.initial_pose_duration_s,
+            self.config.initial_pose_max_velocity_rad_s,
+            self.config.initial_pose_max_acceleration_rad_s2,
+        )
 
     def _enter_pause(self, reason: str) -> None:
         self._teleop_active = False
         self._needs_reset = True
         self._real_reset_ready = self.control_backend == "mujoco"
         self._latest_targets = {robots.LEFT: None, robots.RIGHT: None}
+        self._latest_target_keys = {robots.LEFT: None, robots.RIGHT: None}
+        self._active_arm_goals = {robots.LEFT: None, robots.RIGHT: None}
+        self._arm_goal_dirty = {robots.LEFT: False, robots.RIGHT: False}
         snapshot = self._pause_hold_snapshot()
         if snapshot is not None:
             self._limiter.reset(snapshot.upper_joints)
-            self._left_arm_smoother.reset(snapshot.left_arm)
-            self._right_arm_smoother.reset(snapshot.right_arm)
             if self.config.safety_hold_arm_on_pause:
                 self._pause_hold_command = self._builder.build(snapshot.left_arm, snapshot.right_arm, snapshot.neck)
                 self._publish_pause_hold_if_needed(force=True, reason=reason)
@@ -384,8 +489,11 @@ class FaRealControl(Component):
         self._needs_reset = False
         self._real_reset_ready = real_fresh or self.control_backend == "mujoco"
         self._limiter.reset(snapshot.upper_joints)
-        self._left_arm_smoother.reset(snapshot.left_arm)
-        self._right_arm_smoother.reset(snapshot.right_arm)
+        self._active_arm_goals = {
+            robots.LEFT: np.asarray(snapshot.left_arm, dtype=np.float64),
+            robots.RIGHT: np.asarray(snapshot.right_arm, dtype=np.float64),
+        }
+        self._arm_goal_dirty = {robots.LEFT: False, robots.RIGHT: False}
 
     def _receive_cartesian_targets(self) -> None:
         for hand_side, subscriber in ((robots.LEFT, self._left_target_subscriber), (robots.RIGHT, self._right_target_subscriber)):
@@ -441,12 +549,60 @@ class FaRealControl(Component):
         if snapshot is None:
             self._warn_safety("joint_state_missing", "FA command rejected: missing joint state")
             return
-        desired_left = np.asarray(snapshot.left_arm, dtype=np.float64)
-        desired_right = np.asarray(snapshot.right_arm, dtype=np.float64)
-        any_target = False
+        self._update_active_arm_goals(snapshot)
+        if not any(getattr(self, "_arm_goal_dirty", {}).values()):
+            return
+        active_goals = getattr(self, "_active_arm_goals", {robots.LEFT: None, robots.RIGHT: None})
+        if active_goals.get(robots.LEFT) is None and active_goals.get(robots.RIGHT) is None:
+            return
+        now = time.time()
+        desired_left = (
+            np.asarray(active_goals[robots.LEFT], dtype=np.float64)
+            if active_goals.get(robots.LEFT) is not None
+            else np.asarray(snapshot.left_arm, dtype=np.float64)
+        )
+        desired_right = (
+            np.asarray(active_goals[robots.RIGHT], dtype=np.float64)
+            if active_goals.get(robots.RIGHT) is not None
+            else np.asarray(snapshot.right_arm, dtype=np.float64)
+        )
+        try:
+            command = self._builder.build(desired_left, desired_right, snapshot.neck, timestamp_s=now)
+            limited, reason = self._limiter.limit(command, now_s=command.timestamp_s)
+        except Exception as exc:
+            self._warn_safety("command_build_fail", f"FA command build failed: {exc}")
+            return
+        if limited is None:
+            self._warn_safety("command_limited_reject", f"FA command rejected: {reason}")
+            return
+        published = self._publish_upper_command_outputs(limited, require_real_reset=True)
+        if published and self._last_min_snap_target_command is limited:
+            self._arm_goal_dirty = {robots.LEFT: False, robots.RIGHT: False}
+
+    def _update_active_arm_goals(self, snapshot: FaJointStateSnapshot) -> None:
+        if not hasattr(self, "_latest_target_keys"):
+            self._latest_target_keys = {robots.LEFT: None, robots.RIGHT: None}
+        if not hasattr(self, "_active_arm_goals"):
+            self._active_arm_goals = {robots.LEFT: None, robots.RIGHT: None}
+        if not hasattr(self, "_arm_goal_dirty"):
+            self._arm_goal_dirty = {robots.LEFT: False, robots.RIGHT: False}
+        if not hasattr(self, "_last_ik_cartesian_targets"):
+            self._last_ik_cartesian_targets = {robots.LEFT: None, robots.RIGHT: None}
         for hand_side in (robots.LEFT, robots.RIGHT):
             target = self._latest_targets[hand_side]
             if target is None:
+                continue
+            target_key = self._cartesian_target_key(target)
+            if target_key == self._latest_target_keys.get(hand_side):
+                continue
+            last_safe = self._last_safe_arm_targets[hand_side]
+            last_ik_target = self._last_ik_cartesian_targets[hand_side]
+            if last_safe is not None and last_ik_target is not None and self._cartesian_target_within_ik_deadband(
+                target, last_ik_target
+            ):
+                self._active_arm_goals[hand_side] = last_safe.copy()
+                self._arm_goal_dirty[hand_side] = False
+                self._latest_target_keys[hand_side] = target_key
                 continue
             current_arm = snapshot.left_arm if hand_side == robots.LEFT else snapshot.right_arm
             ik = self._ik_client.solve(hand_side, target, current_arm)
@@ -456,40 +612,88 @@ class FaRealControl(Component):
                 if last is None:
                     continue
                 solved = last
+                solution_limited = False
             else:
                 solved = np.asarray(ik.q_target, dtype=np.float64)
                 reference = self._last_safe_arm_targets[hand_side]
                 if reference is None:
                     reference = np.asarray(current_arm, dtype=np.float64)
+                if self._ik_error_exceeds_quality_limit(ik):
+                    self._active_arm_goals[hand_side] = np.asarray(reference, dtype=np.float64)
+                    self._arm_goal_dirty[hand_side] = False
+                    self._latest_target_keys[hand_side] = target_key
+                    self._warn_safety(
+                        f"{hand_side}_ik_quality_hold",
+                        (
+                            f"{hand_side} IK solution held: position_error={ik.position_error:.3f}m "
+                            f"orientation_error={ik.orientation_error:.3f}rad"
+                        ),
+                    )
+                    continue
                 max_jump = float(np.max(np.abs(solved - reference)))
+                solution_limited = False
                 if self.config.max_ik_solution_jump_rad > 0.0 and max_jump > self.config.max_ik_solution_jump_rad:
+                    jump_limit = float(getattr(self.config, "ik_solution_jump_clip_rad", self.config.max_ik_solution_jump_rad))
+                    if jump_limit <= 0.0:
+                        jump_limit = float(self.config.max_ik_solution_jump_rad)
+                    solved = np.asarray(reference, dtype=np.float64) + np.clip(
+                        solved - np.asarray(reference, dtype=np.float64),
+                        -jump_limit,
+                        jump_limit,
+                    )
+                    solution_limited = True
                     self._warn_safety(
                         f"{hand_side}_ik_solution_jump",
-                        f"{hand_side} IK solution jump held: {max_jump:.3f} rad",
+                        f"{hand_side} IK solution jump clipped: {max_jump:.3f} rad to {jump_limit:.3f} rad",
                     )
-                    last = self._last_safe_arm_targets[hand_side]
-                    if last is None:
-                        continue
-                    solved = last
-                else:
-                    self._last_safe_arm_targets[hand_side] = solved.copy()
-            if hand_side == robots.LEFT:
-                desired_left = self._left_arm_smoother.sample(solved, snapshot.left_arm, now_s=time.time())
-            else:
-                desired_right = self._right_arm_smoother.sample(solved, snapshot.right_arm, now_s=time.time())
-            any_target = True
-        if not any_target:
-            return
-        try:
-            command = self._builder.build(desired_left, desired_right, snapshot.neck, timestamp_s=time.time())
-            limited, reason = self._limiter.limit(command, now_s=command.timestamp_s)
-        except Exception as exc:
-            self._warn_safety("command_build_fail", f"FA command build failed: {exc}")
-            return
-        if limited is None:
-            self._warn_safety("command_limited_reject", f"FA command rejected: {reason}")
-            return
-        self._publish_upper_command_outputs(limited, require_real_reset=True)
+                self._last_safe_arm_targets[hand_side] = solved.copy()
+                if not solution_limited:
+                    self._last_ik_cartesian_targets[hand_side] = target
+                self._arm_goal_dirty[hand_side] = True
+            self._active_arm_goals[hand_side] = np.asarray(solved, dtype=np.float64)
+            self._latest_target_keys[hand_side] = target_key
+
+    def _ik_error_exceeds_quality_limit(self, ik: FaArmIkResult) -> bool:
+        return (
+            self.config.ik_max_position_error_m > 0.0
+            and float(ik.position_error) > self.config.ik_max_position_error_m
+        ) or (
+            self.config.ik_max_orientation_error_rad > 0.0
+            and float(ik.orientation_error) > self.config.ik_max_orientation_error_rad
+        )
+
+    def _cartesian_target_within_ik_deadband(self, current: CartesianTarget, previous: CartesianTarget) -> bool:
+        position_delta = np.asarray(current.position_m, dtype=np.float64) - np.asarray(
+            previous.position_m, dtype=np.float64
+        )
+        position_delta_m = float(np.linalg.norm(position_delta))
+        orientation_delta_rad = self._quaternion_angle_delta_rad(
+            current.orientation_xyzw, previous.orientation_xyzw
+        )
+        return (
+            position_delta_m < self.config.ik_cartesian_position_deadband_m and
+            orientation_delta_rad < self.config.ik_cartesian_orientation_deadband_rad
+        )
+
+    @staticmethod
+    def _quaternion_angle_delta_rad(current_xyzw: Sequence[float], previous_xyzw: Sequence[float]) -> float:
+        current = np.asarray(current_xyzw, dtype=np.float64)
+        previous = np.asarray(previous_xyzw, dtype=np.float64)
+        current_norm = float(np.linalg.norm(current))
+        previous_norm = float(np.linalg.norm(previous))
+        if current_norm <= 0.0 or previous_norm <= 0.0:
+            return float("inf")
+        current = current / current_norm
+        previous = previous / previous_norm
+        dot = abs(float(np.dot(current, previous)))
+        dot = min(1.0, max(-1.0, dot))
+        return 2.0 * float(np.arccos(dot))
+
+    def _cartesian_target_key(self, target: CartesianTarget) -> tuple:
+        timestamp_s = float(getattr(target, "timestamp_s", 0.0) or 0.0)
+        if timestamp_s > 0.0:
+            return ("timestamp", timestamp_s)
+        return ("object", id(target))
 
     def _publish_upper_command_outputs(
         self,
@@ -499,23 +703,39 @@ class FaRealControl(Component):
     ) -> bool:
         if len(command.values) != FA_UPPER_COMMAND_LENGTH:
             raise ValueError("Refusing to publish non-16D FA command")
-        if self.control_backend == "mujoco" and self.config.publish_upper_command_topic_in_mujoco:
-            if not self._ros2.publish_upper_command(command):
-                self._warn_safety("ros_upper_unavailable", "ROS2 FA upper publisher unavailable")
-                return False
         if self.control_backend in ("real", "real_with_mujoco"):
             state_ready = self._real_joint_state_fresh() or allow_stale_real_hold
             reset_ready = self._real_reset_ready or not require_real_reset
             if not state_ready or not reset_ready:
                 self._warn_safety("real_reset_required", "FA real command held until fresh /joint_states and reset")
                 return False
-            if not self._ros2.publish_upper_command(command):
-                self._warn_safety("ros_upper_unavailable", "ROS2 FA upper publisher unavailable")
-                return False
-        if self.control_backend in ("mujoco", "real_with_mujoco"):
-            self._publisher_manager.publish(self.host, self._upper_command_mirror_port, FA_UPPER_COMMAND_TOPIC, command)
-            self._dry_joint_cache.update(command.left_arm, command.right_arm, command.neck, now_s=command.timestamp_s)
+        if not self._should_publish_min_snap_target(command):
+            return True
+        if not self._ros2.publish_min_snap_target(
+            command,
+            self.config.min_snap_expected_duration_s,
+            self.config.min_snap_max_velocity_rad_s,
+            self.config.min_snap_max_acceleration_rad_s2,
+        ):
+            self._warn_safety("min_snap_unavailable", "FA min_snap target publisher unavailable")
+            return False
+        self._last_min_snap_target_command = command
+        self._last_min_snap_target_publish_time_s = time.time()
         self._last_published_upper_command = command
+        return True
+
+    def _should_publish_min_snap_target(self, command: FaUpperPositionCommand) -> bool:
+        last = self._last_min_snap_target_command
+        if last is None:
+            return True
+        current = np.asarray(command.values[:14], dtype=np.float64)
+        previous = np.asarray(last.values[:14], dtype=np.float64)
+        max_delta = float(np.max(np.abs(current - previous)))
+        if max_delta < self.config.min_snap_target_epsilon_rad:
+            return False
+        min_period_s = 1.0 / self.config.min_snap_target_publish_hz
+        if time.time() - self._last_min_snap_target_publish_time_s < min_period_s:
+            return False
         return True
 
     def _current_joint_snapshot(self) -> Optional[FaJointStateSnapshot]:

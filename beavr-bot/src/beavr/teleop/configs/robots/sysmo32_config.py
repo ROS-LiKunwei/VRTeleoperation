@@ -127,7 +127,6 @@ class Sysmo32RealControlCfg:
     teleoperation_state_port: int = ports.XARM_TELEOPERATION_STATE_PORT
     transformed_right_port: int = ports.KEYPOINT_TRANSFORM_PORT
     transformed_left_port: int = ports.LEFT_KEYPOINT_TRANSFORM_PORT
-    arm_command_mirror_port: int = ports.SYSMO32_ARM_COMMAND_MIRROR_PORT
     hand_action_mirror_port: int = ports.SYSMO32_HAND_ACTION_MIRROR_PORT
     # URDF 模型路径
     urdf_path: str = "robots/sysmo_description/urdf/sysmo32.urdf"
@@ -138,9 +137,11 @@ class Sysmo32RealControlCfg:
             ros2=Sysmo32Ros2Topics(
                 joint_state_topic="/joint_states",
                 arm_command_topic="/sysmo_left_arm_controller/commands",
+                min_snap_target_topic="/min_snap/target",
                 left_hand_topic="/left_topic_to_hand",
                 right_hand_topic="/right_topic_to_hand",
                 arm_command_queue_size=60,
+                min_snap_target_queue_size=10,
                 hand_command_queue_size=10,
                 joint_state_timeout_s=1.0,
             ),
@@ -171,7 +172,6 @@ class Sysmo32RealControlCfg:
             allow_placeholder_ik_for_mujoco=True,
             allow_mujoco_mirror_without_joint_state=True,
             mujoco_mirror_max_joint_velocity_rad_s=5.0,
-            publish_arm_command_topic_in_mujoco=False,
             ik_nullspace_gain=0.08,
             ik_nullspace_step_limit_rad=0.04,
             ik_orientation_weight=0.2,
@@ -180,24 +180,9 @@ class Sysmo32RealControlCfg:
             ik_pos_tol_m=1e-3,
             ik_ori_tol_rad=2e-2,
             ik_profile_log_period_s=1.0,
-            # Arm trajectory smoothing. Use "min_snap" to return to point-to-point
-            # seventh-order minimum-snap behavior.
-            arm_trajectory_smoother="jerk_limited_servo",
-            enable_arm_min_snap=True,
-            # minimum snap configuration
-            arm_min_snap_segment_time=0.18,
-            arm_min_snap_min_duration=0.06,
-            arm_min_snap_replan_threshold_rad=0.0005,
-            arm_min_snap_max_velocity_rad_s=3.0,
-            arm_min_snap_max_acceleration_rad_s2=10.0,
-            # jerk-limited online servo configuration
-            arm_servo_max_velocity_rad_s=3.0,
-            arm_servo_max_acceleration_rad_s2=10.0,
-            arm_servo_max_jerk_rad_s3=120.0,
-            arm_servo_omega=35.0,
-            arm_servo_damping_ratio=1.0,
-            arm_servo_target_deadband_rad=0.0005,
-            arm_servo_max_dt_s=0.05,
+            min_snap_expected_duration_s=0.5,
+            min_snap_max_velocity_rad_s=3.0,
+            min_snap_max_acceleration_rad_s2=10.0,
             # IK nullspace
             ik_nullspace_reference_joints_rad=(
                 0.0,
@@ -218,12 +203,6 @@ class Sysmo32RealControlCfg:
 
     def _apply_backend_overrides(self):
         self.config.control_backend = self.control_backend
-        if self.control_backend == "mujoco":
-            self.config.publish_arm_command_topic_in_mujoco = True
-            if self.config.arm_min_snap_segment_time == 0.18:
-                self.config.arm_min_snap_segment_time = 0.10
-            if self.config.arm_min_snap_min_duration == 0.06:
-                self.config.arm_min_snap_min_duration = 0.04
         if self.control_backend == "real_with_mujoco":
             self.config.allow_mujoco_mirror_without_joint_state = False
 
@@ -244,7 +223,6 @@ class Sysmo32RealControlCfg:
             teleoperation_state_port=self.teleoperation_state_port,
             transformed_right_port=self.transformed_right_port,
             transformed_left_port=self.transformed_left_port,
-            arm_command_mirror_port=self.arm_command_mirror_port,
             hand_action_mirror_port=self.hand_action_mirror_port,
             urdf_path=self.urdf_path,
             config=self.config,
@@ -350,6 +328,7 @@ class Sysmo32RealCameraStreamerCfg:
             port=self.port,
             camera_name=self.camera_name,
         )
+
 
 
 ROBOT_NAME_SYSMO32 = "sysmo32"
@@ -459,7 +438,6 @@ class Sysmo32Config:
                 teleoperation_state_port=ports.XARM_TELEOPERATION_STATE_PORT,
                 transformed_right_port=ports.KEYPOINT_TRANSFORM_PORT,
                 transformed_left_port=ports.LEFT_KEYPOINT_TRANSFORM_PORT,
-                arm_command_mirror_port=ports.SYSMO32_ARM_COMMAND_MIRROR_PORT,
                 hand_action_mirror_port=ports.SYSMO32_HAND_ACTION_MIRROR_PORT,
             )
         ]
@@ -518,10 +496,10 @@ class Sysmo32Config:
                 )
             )
 
-        # Environment配置：独立MuJoCo层接收真实接口格式的18维命令。
+        # Environment配置：MuJoCo backend 只保留仿真镜像；轨迹优化节点在外部板卡单独部署。
         self.environment = []
         if self.control_backend in ("mujoco", "real_with_mujoco"):
-            self.environment = [
+            self.environment.append(
                 Sysmo32MujocoCommandMirrorCfg(
                     host=network.HOST_ADDRESS,
                     arm_command_port=ports.SYSMO32_ARM_COMMAND_MIRROR_PORT,
@@ -538,7 +516,7 @@ class Sysmo32Config:
                     joint_state_publish_hz=50.0,
                     arm_command_interpolation_steps=5,
                 )
-            ]
+            )
 
     def build(self):
         return {

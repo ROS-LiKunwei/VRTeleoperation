@@ -130,6 +130,7 @@ class PICO4VRHandDetector(Component):
         self._last_no_socket_data_log_time = {}
         self._last_success_receive_time = {}
         self._last_pause_command_log_time = 0.0
+        self._last_pause_data: Optional[bytes] = None
         self._freq_calc_interval = 1.0  # 1秒计算一次频率
         self._frame_index = 0  # 帧索引，用于匹配三个环节的数据
         self.enable_receive_frequency_logging = True
@@ -156,6 +157,19 @@ class PICO4VRHandDetector(Component):
                 left_hand_port = network.LEFT_HAND_PICO4_PORT  # 8110
             self.hand_ports[robots.LEFT] = left_hand_port
 
+    def _pause_command_for_edge(self, pause_data: bytes) -> Optional[str]:
+        if pause_data == b"High":
+            command = robots.RESUME
+        elif pause_data == b"Low":
+            command = robots.PAUSE
+        else:
+            logger.debug("PICO4: ignoring unknown pause payload raw=%r", pause_data)
+            return None
+        if pause_data == self._last_pause_data:
+            return None
+        self._last_pause_data = pause_data
+        return command
+
     def _initialize_sockets(self):
         """
         根据手部配置初始化ZMQ sockets。
@@ -172,11 +186,27 @@ class PICO4VRHandDetector(Component):
         for hand_side, port in self.hand_ports.items():
             # 使用与PICO发送匹配的套接字名称
             socket_key = "RightHand" if hand_side == "right" else "LeftHand"
-            self.sockets[socket_key] = create_pull_socket(self.host, port)
+            self._bind_socket(socket_key, port)
 
         # 按钮和暂停的共享套接字（只需要一个实例）
-        self.sockets[robots.BUTTON] = create_pull_socket(self.host, self.button_port)
-        self.sockets[robots.PAUSE] = create_pull_socket(self.host, self.teleop_reset_port)
+        self._bind_socket(robots.BUTTON, self.button_port)
+        self._bind_socket(robots.PAUSE, self.teleop_reset_port)
+
+    def _bind_socket(self, socket_name, port):
+        if self.sockets is None:
+            self.sockets = {}
+        self.sockets[socket_name] = create_pull_socket(self.host, port)
+
+    def _port_for_socket(self, socket_name):
+        if socket_name == "RightHand":
+            return self.hand_ports.get(robots.RIGHT)
+        if socket_name == "LeftHand":
+            return self.hand_ports.get(robots.LEFT)
+        if socket_name == robots.BUTTON:
+            return self.button_port
+        if socket_name == robots.PAUSE:
+            return self.teleop_reset_port
+        return None
 
     def _process_keypoints(self, data):
         """
@@ -354,16 +384,7 @@ class PICO4VRHandDetector(Component):
             return
         self._last_no_socket_data_log_time[socket_name] = current_time
 
-        port = None
-        if socket_name == "RightHand":
-            port = self.hand_ports.get(robots.RIGHT)
-        elif socket_name == "LeftHand":
-            port = self.hand_ports.get(robots.LEFT)
-        elif socket_name == robots.BUTTON:
-            port = self.button_port
-        elif socket_name == robots.PAUSE:
-            port = self.teleop_reset_port
-
+        port = self._port_for_socket(socket_name)
         logger.debug(f"PICO4: 暂未收到Unity原始数据 socket={socket_name} host={self.host} port={port}")
 
     def _receive_data(self, socket_name):
@@ -682,27 +703,27 @@ class PICO4VRHandDetector(Component):
 
             # 处理并发布暂停状态（在手部之间共享）
             if pause_data := self._receive_data(robots.PAUSE):
-                pause_command = robots.RESUME if pause_data == b"High" else robots.PAUSE
-                now = time.time()
-                if now - self._last_pause_command_log_time >= 0.2:
-                    self._last_pause_command_log_time = now
-                    logger.info(
-                        "[Diag][PICO_PAUSE_RX] command=%s raw=%r port=%d",
-                        pause_command,
-                        pause_data,
-                        self.teleop_reset_port,
+                if pause_command := self._pause_command_for_edge(pause_data):
+                    now = time.time()
+                    if now - self._last_pause_command_log_time >= 0.2:
+                        self._last_pause_command_log_time = now
+                        logger.info(
+                            "[Diag][PICO_PAUSE_RX] command=%s raw=%r port=%d",
+                            pause_command,
+                            pause_data,
+                            self.teleop_reset_port,
+                        )
+                    command = SessionCommand(
+                        timestamp_s=time.time(),
+                        command=pause_command,
                     )
-                command = SessionCommand(
-                    timestamp_s=time.time(),
-                    command=pause_command,
-                )
-                for publish_port in sorted({self.pico4_pub_port, self.teleop_state_pub_port}):
-                    self.publisher_manager.publish(
-                        host=self.host,
-                        port=publish_port,
-                        topic=robots.PAUSE,
-                        data=command,
-                    )
+                    for publish_port in sorted({self.pico4_pub_port, self.teleop_state_pub_port}):
+                        self.publisher_manager.publish(
+                            host=self.host,
+                            port=publish_port,
+                            topic=robots.PAUSE,
+                            data=command,
+                        )
 
             self.timer.end_loop()
 
