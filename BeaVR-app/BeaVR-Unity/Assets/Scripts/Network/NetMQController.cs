@@ -760,6 +760,7 @@ public class NetworkSettings
     public string rightkeyptPortNum;
     public string leftkeyptPortNum;
     public string camPortNum;
+    public string cameraProjectionControlPortNum;
     public string graphPortNum;
     public string resolutionPortNum;
     public string PausePortNum;

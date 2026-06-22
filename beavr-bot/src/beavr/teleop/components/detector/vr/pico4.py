@@ -84,6 +84,7 @@ class PICO4VRHandDetector(Component):
         button_port: int,
         teleop_reset_port: int,
         teleop_state_pub_port: int = ports.XARM_TELEOPERATION_STATE_PORT,
+        camera_projection_control_port: int = ports.CAMERA_PROJECTION_CONTROL_PORT,
         hand_config: Union[str, str] = robots.RIGHT,
         right_hand_port: Optional[int] = None,
         left_hand_port: Optional[int] = None,
@@ -108,6 +109,7 @@ class PICO4VRHandDetector(Component):
         self.button_port = button_port
         self.teleop_reset_port = teleop_reset_port
         self.teleop_state_pub_port = teleop_state_pub_port
+        self.camera_projection_control_port = camera_projection_control_port
         self.hand_config = hand_config
 
         # 根据配置验证并设置手部端口
@@ -116,6 +118,7 @@ class PICO4VRHandDetector(Component):
         # 初始化发布器和计时器
         self.publisher_manager = ZMQPublisherManager.get_instance()
         self.timer = FrequencyTimer(robots.VR_FREQ)
+        self._camera_projection_socket = self._make_camera_projection_socket()
         self.last_received = {}
         self.sockets = None  # 延迟初始化套接字
 
@@ -131,12 +134,23 @@ class PICO4VRHandDetector(Component):
         self._last_success_receive_time = {}
         self._last_pause_command_log_time = 0.0
         self._last_pause_data: Optional[bytes] = None
+        self._last_camera_projection_command_time = 0.0
+        self._camera_projection_pinch_active = {robots.LEFT: False, robots.RIGHT: False}
         self._freq_calc_interval = 1.0  # 1秒计算一次频率
         self._frame_index = 0  # 帧索引，用于匹配三个环节的数据
         self.enable_receive_frequency_logging = True
         self.enable_receive_sample_logging = False
         self.enable_publish_debug_logging = False
         self._last_timing_log_time = {}
+
+    def _make_camera_projection_socket(self):
+        socket = zmq.Context.instance().socket(zmq.PUB)
+        socket.setsockopt(zmq.SNDHWM, 1)
+        socket.bind(f"tcp://*:{self.camera_projection_control_port}")
+        logger.info(
+            "PICO4 camera projection control PUB bound on port %s", self.camera_projection_control_port
+        )
+        return socket
 
     def _configure_hand_ports(self, right_hand_port: Optional[int], left_hand_port: Optional[int]):
         """
@@ -231,6 +245,7 @@ class PICO4VRHandDetector(Component):
             values = []
             send_timestamp = None
             hand_command = None
+            camera_projection_command = None
 
             # 新格式：时间戳包含冒号，格式为 HH:MM:SS.ffffff:type_marker:coords
             # 需要找到第三个冒号来分割时间戳和类型标记
@@ -263,12 +278,14 @@ class PICO4VRHandDetector(Component):
 
             if not coords_part:
                 logger.warning(f"_process_keypoints: 坐标部分为空: {data_str}")
-                return [], send_timestamp, hand_command
+                return [], send_timestamp, hand_command, camera_projection_command
 
             # Unity's SerializeVector3List terminates the payload with ":".
             # Strip that protocol marker before splitting, otherwise the final
             # z value becomes e.g. "0.4563943:" and fails float conversion.
-            coords_part, hand_command = self._split_coords_and_hand_command(coords_part)
+            coords_part, hand_command, camera_projection_command = self._split_coords_and_metadata(
+                coords_part
+            )
             coords_part = coords_part.strip().rstrip(":")
             coords = coords_part.split("|")
             skipped_coords = []
@@ -299,16 +316,17 @@ class PICO4VRHandDetector(Component):
                     f"原始坐标数={len(coords)}, send_timestamp={send_timestamp}"
                 )
 
-            return values, send_timestamp, hand_command
+            return values, send_timestamp, hand_command, camera_projection_command
         except Exception as e:
             logger.error(f"_process_keypoints: 处理数据时出错: {e}")
-            return [], None, None
+            return [], None, None, None
 
-    def _split_coords_and_hand_command(self, coords_part):
-        """Split optional Unity metadata appended as '<coords>:hand_command=1|2'."""
+    def _split_coords_and_metadata(self, coords_part):
+        """Split optional Unity metadata appended as '<coords>:key=value:...'."""
         parts = coords_part.strip().split(":")
         coords = parts[0]
         hand_command = None
+        camera_projection_command = None
         for meta in parts[1:]:
             meta = meta.strip()
             if not meta:
@@ -318,7 +336,58 @@ class PICO4VRHandDetector(Component):
                     hand_command = int(meta.split("=", 1)[1])
                 except ValueError:
                     logger.warning(f"_process_keypoints: hand_command 无法解析: {meta}")
-        return coords, hand_command
+            elif meta.startswith(("camera_projection=", "camera_command=")):
+                value = meta.split("=", 1)[1].strip().lower()
+                camera_projection_command = self._normalize_camera_projection_command(value)
+                if camera_projection_command is None:
+                    logger.warning(f"_process_keypoints: camera projection command 无法解析: {meta}")
+        return coords, hand_command, camera_projection_command
+
+    def _normalize_camera_projection_command(self, value: str) -> Optional[str]:
+        if value in ("toggle", "switch", "1"):
+            return robots.CAMERA_PROJECTION_TOGGLE
+        if value in ("on", "open", "enable", "true"):
+            return robots.CAMERA_PROJECTION_ON
+        if value in ("off", "close", "disable", "false", "0"):
+            return robots.CAMERA_PROJECTION_OFF
+        return None
+
+    def _detect_camera_projection_gesture(self, keypoints, hand_side: str) -> Optional[str]:
+        """Left thumb-pinky pinch toggles the projected camera stream."""
+        if hand_side != robots.LEFT:
+            return None
+        try:
+            arr = np.asarray(keypoints, dtype=np.float64).reshape(robots.OCULUS_NUM_KEYPOINTS, 3)
+        except Exception:
+            return None
+        thumb_tip = arr[robots.OCULUS_JOINTS["thumb"][-1]]
+        pinky_tip = arr[robots.OCULUS_JOINTS["pinky"][-1]]
+        distance = float(np.linalg.norm(thumb_tip - pinky_tip))
+        is_pinched = distance < 0.035
+        was_pinched = self._camera_projection_pinch_active.get(hand_side, False)
+        self._camera_projection_pinch_active[hand_side] = is_pinched
+        if is_pinched and not was_pinched:
+            return robots.CAMERA_PROJECTION_TOGGLE
+        return None
+
+    def _publish_camera_projection_command(self, command: Optional[str], reason: str) -> None:
+        if command is None:
+            return
+        now = time.time()
+        if (
+            command == robots.CAMERA_PROJECTION_TOGGLE
+            and now - self._last_camera_projection_command_time < 1.0
+        ):
+            return
+        self._last_camera_projection_command_time = now
+        self._camera_projection_socket.send_multipart(
+            [
+                robots.CAMERA_PROJECTION_TOGGLE.encode("utf-8"),
+                command.encode("utf-8"),
+            ],
+            zmq.NOBLOCK,
+        )
+        logger.info("PICO4: camera projection command=%s reason=%s", command, reason)
 
     def _is_relative_frame(self, data):
         """Return whether the incoming PICO4 frame is marked relative."""
@@ -574,7 +643,12 @@ class PICO4VRHandDetector(Component):
                     receive_time_s = time.time()
                     parse_start_s = time.perf_counter()
                     # 处理并发布此手的关键点（包含时间戳解析）
-                    keypoints, send_timestamp, hand_command = self._process_keypoints(keypoint_data)
+                    (
+                        keypoints,
+                        send_timestamp,
+                        hand_command,
+                        camera_projection_command,
+                    ) = self._process_keypoints(keypoint_data)
                     parse_ms = (time.perf_counter() - parse_start_s) * 1000.0
 
                     # 计算延迟
@@ -586,6 +660,12 @@ class PICO4VRHandDetector(Component):
                     if not is_valid:
                         self._warn_invalid_frame(hand_side, invalid_reason)
                         continue
+
+                    gesture_command = self._detect_camera_projection_gesture(keypoints, hand_side)
+                    self._publish_camera_projection_command(
+                        camera_projection_command or gesture_command,
+                        "metadata" if camera_projection_command is not None else "left_thumb_pinky_pinch",
+                    )
 
                     is_relative = self._is_relative_frame(keypoint_data)
                     # 发布InputFrame对象给下游的keypoint_transform.py
@@ -614,12 +694,9 @@ class PICO4VRHandDetector(Component):
 
                     self._receive_counts[socket_key] += 1
                     current_time = time.time()
-                    if (
-                        self.enable_receive_frequency_logging
-                        and (
-                            current_time - self._last_receive_freq_log_time[socket_key]
-                            >= self._freq_calc_interval
-                        )
+                    if self.enable_receive_frequency_logging and (
+                        current_time - self._last_receive_freq_log_time[socket_key]
+                        >= self._freq_calc_interval
                     ):
                         self._receive_frequencies[socket_key] = self._receive_counts[socket_key] / (
                             current_time - self._last_receive_freq_log_time[socket_key]
@@ -632,12 +709,8 @@ class PICO4VRHandDetector(Component):
                         )
 
                     # 定期打印手腕部数据（每3秒）
-                    if (
-                        self.enable_receive_sample_logging
-                        and (
-                            current_time - getattr(self, "_last_wrist_log_time", 0)
-                            >= 3.0
-                        )
+                    if self.enable_receive_sample_logging and (
+                        current_time - getattr(self, "_last_wrist_log_time", 0) >= 3.0
                     ):
                         self._last_wrist_log_time = current_time
                         wrist_data = self._parse_wrist_data(keypoint_data)
@@ -648,12 +721,8 @@ class PICO4VRHandDetector(Component):
                         self._frame_index += 1
 
                     # 定期打印26个坐标系数据（每5秒）
-                    if (
-                        self.enable_receive_sample_logging
-                        and (
-                            current_time - getattr(self, "_last_full_joint_log_time", 0)
-                            >= 5.0
-                        )
+                    if self.enable_receive_sample_logging and (
+                        current_time - getattr(self, "_last_full_joint_log_time", 0) >= 5.0
                     ):
                         self._last_full_joint_log_time = current_time
                         full_joint_data = self._parse_full_joint_data(keypoint_data)
@@ -663,12 +732,8 @@ class PICO4VRHandDetector(Component):
                         self._frame_index += 1
 
                     # 定期打印接收到的位姿信息
-                    if (
-                        self.enable_receive_sample_logging
-                        and (
-                            current_time - self._last_receive_time.get(socket_key, 0)
-                            >= 3.0
-                        )
+                    if self.enable_receive_sample_logging and (
+                        current_time - self._last_receive_time.get(socket_key, 0) >= 3.0
                     ):
                         self._last_receive_time[socket_key] = current_time
                         pose_sample = keypoints[:9] if len(keypoints) >= 9 else keypoints

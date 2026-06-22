@@ -25,8 +25,8 @@ from beavr.teleop.components.interface.robots.fa_real_control import (
     FaRealControlConfig,
     FaRos2Topics,
 )
-from beavr.teleop.components.operator.robots.fa_operator import FaOperator, H_R_V_FA
-from beavr.teleop.configs.constants import network, ports, robots
+from beavr.teleop.components.operator.robots.fa_operator import H_R_V_FA, FaOperator
+from beavr.teleop.configs.constants import cameras, network, ports, robots
 from beavr.teleop.configs.robots import TeleopRobotConfig
 from beavr.teleop.configs.robots.shared_components import SharedComponentRegistry
 from beavr.teleop.configs.robots.sysmo32_config import (
@@ -95,19 +95,49 @@ class FaRealControlCfg:
                 min_snap_target_topic="/min_snap/target",
                 upper_position_command_queue_size=60,
                 min_snap_target_queue_size=10,
+                left_hand_topic="/left_topic_to_hand",
+                right_hand_topic="/right_topic_to_hand",
+                upper_position_command_queue_size=60,
+                hand_command_queue_size=10,
                 joint_state_timeout_s=1.0,
             ),
             upper=FaUpperPositionSafetyConfig(
                 neck_default_positions_rad=(0.0, 0.0),
                 joint_lower_limits_rad=(
-                    -2.79, -0.33, -2.79, -1.40, -2.79, -0.52, -1.57,
-                    -2.79, -3.49, -2.79, -1.40, -2.79, -0.52, -1.57,
-                    -3.14, -3.14,
+                    -2.79,
+                    -0.33,
+                    -2.79,
+                    -1.40,
+                    -2.79,
+                    -0.52,
+                    -1.57,
+                    -2.79,
+                    -3.49,
+                    -2.79,
+                    -1.40,
+                    -2.79,
+                    -0.52,
+                    -1.57,
+                    -3.14,
+                    -3.14,
                 ),
                 joint_upper_limits_rad=(
-                    2.79, 3.49, 2.79, 0.26, 2.79, 0.52, 1.57,
-                    2.79, 0.33, 2.79, 0.26, 2.79, 0.52, 1.57,
-                    3.14, 3.14,
+                    2.79,
+                    3.49,
+                    2.79,
+                    0.26,
+                    2.79,
+                    0.52,
+                    1.57,
+                    2.79,
+                    0.33,
+                    2.79,
+                    0.26,
+                    2.79,
+                    0.52,
+                    1.57,
+                    3.14,
+                    3.14,
                 ),
                 max_joint_velocity_rad_s=tuple([1.2] * FA_UPPER_COMMAND_LENGTH),
                 max_joint_jump_rad=0.5,
@@ -177,6 +207,8 @@ class FaRealControlCfg:
             right_state_publish_port=self.right_state_publish_port,
             left_state_publish_port=self.left_state_publish_port,
             teleoperation_state_port=self.teleoperation_state_port,
+            upper_command_mirror_port=self.upper_command_mirror_port,
+            hand_action_mirror_port=self.hand_action_mirror_port,
             urdf_path=self.urdf_path,
             config=self.config,
         )
@@ -310,15 +342,37 @@ class FaConfig:
             self.camera_streamers = [
                 Sysmo32RealCameraStreamerCfg(
                     host=network.HOST_ADDRESS,
-                    port=ports.SIM_IMAGE_PORT,
+                    port=cameras.RECORD_CAMERA_FRONT_STREAM_PORT,
                     camera_name="front",
                     camera_type="opencv",
-                    camera_index=0,
+                    camera_index=cameras.RECORD_CAMERA_INDEX_FRONT,
                     fps=30,
                     width=640,
                     height=480,
                     rotation=180,
-                )
+                ),
+                Sysmo32RealCameraStreamerCfg(
+                    host=network.HOST_ADDRESS,
+                    port=cameras.RECORD_CAMERA_LEFT_WRIST_STREAM_PORT,
+                    camera_name="left_wrist",
+                    camera_type="opencv",
+                    camera_index=cameras.RECORD_CAMERA_INDEX_LEFT_WRIST,
+                    fps=30,
+                    width=640,
+                    height=480,
+                    rotation=180,
+                ),
+                Sysmo32RealCameraStreamerCfg(
+                    host=network.HOST_ADDRESS,
+                    port=cameras.RECORD_CAMERA_RIGHT_WRIST_STREAM_PORT,
+                    camera_name="right_wrist",
+                    camera_type="opencv",
+                    camera_index=cameras.RECORD_CAMERA_INDEX_RIGHT_WRIST,
+                    fps=30,
+                    width=640,
+                    height=480,
+                    rotation=180,
+                ),
             ]
 
         self.robots = [FaRealControlCfg(host=network.HOST_ADDRESS, control_backend=self.control_backend)]
@@ -331,7 +385,12 @@ class FaConfig:
                     endeff_publish_port=ports.XARM_ENDEFF_SUBSCRIBE_PORT + SYSMO32_RIGHT_PORT_OFFSET,
                     endeff_subscribe_port=ports.XARM_ENDEFF_PUBLISH_PORT + SYSMO32_RIGHT_PORT_OFFSET,
                     hand_side=robots.RIGHT,
-                    logging_config={"enabled": False, "log_dir": "logs", "log_poses": True, "log_prefix": "fa_right"},
+                    logging_config={
+                        "enabled": False,
+                        "log_dir": "logs",
+                        "log_poses": True,
+                        "log_prefix": "fa_right",
+                    },
                 )
             )
         if self.laterality in (Laterality.LEFT, Laterality.BIMANUAL):
@@ -341,7 +400,12 @@ class FaConfig:
                     endeff_publish_port=ports.XARM_ENDEFF_SUBSCRIBE_PORT + SYSMO32_LEFT_PORT_OFFSET,
                     endeff_subscribe_port=ports.XARM_ENDEFF_PUBLISH_PORT + SYSMO32_LEFT_PORT_OFFSET,
                     hand_side=robots.LEFT,
-                    logging_config={"enabled": False, "log_dir": "logs", "log_poses": True, "log_prefix": "fa_left"},
+                    logging_config={
+                        "enabled": False,
+                        "log_dir": "logs",
+                        "log_poses": True,
+                        "log_prefix": "fa_left",
+                    },
                 )
             )
 

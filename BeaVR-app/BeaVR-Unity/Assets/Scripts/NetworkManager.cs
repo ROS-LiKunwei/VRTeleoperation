@@ -16,6 +16,8 @@ public class NetworkConfiguration
     public string leftkeyptPortNum;
     /// <summary>摄像头数据端口</summary>
     public string camPortNum;
+    /// <summary>摄像头投影控制端口</summary>
+    public string cameraProjectionControlPortNum;
     /// <summary>图形反馈端口</summary>
     public string graphPortNum;
     /// <summary>分辨率控制端口</summary>
@@ -56,10 +58,10 @@ public class NetworkManager : MonoBehaviour
 
     // 强制断开连接标志
     private bool _forceDisconnect = false;
-    public bool ForceDisconnect 
+    public bool ForceDisconnect
     {
         get { return _forceDisconnect; }
-        set 
+        set
         {
             _forceDisconnect = value;
             if (value) {
@@ -103,6 +105,20 @@ public class NetworkManager : MonoBehaviour
             return "tcp://:";
         else
             return "tcp://" + netConfig.IPAddress + ":" + netConfig.camPortNum;
+    }
+
+    /// <summary>
+    /// 获取摄像头投影控制的ZMQ地址
+    /// </summary>
+    /// <returns>摄像头投影控制的ZMQ地址</returns>
+    public string getCameraProjectionControlAddress()
+    {
+        if (IPNotFound)
+            return "tcp://:";
+        string port = string.IsNullOrEmpty(netConfig.cameraProjectionControlPortNum)
+            ? "10006"
+            : netConfig.cameraProjectionControlPortNum;
+        return "tcp://" + netConfig.IPAddress + ":" + port;
     }
 
     /// <summary>
@@ -184,7 +200,7 @@ public class NetworkManager : MonoBehaviour
         if (!netConfig.isIPAllocated())
             IPNotFound = true;
         else
-            IPNotFound = false;        
+            IPNotFound = false;
     }
 
     /// <summary>
