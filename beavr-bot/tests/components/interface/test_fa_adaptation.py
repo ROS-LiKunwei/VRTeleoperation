@@ -53,24 +53,11 @@ def test_fa_config_routes_backends():
     assert robot_cfg.config.ros2.upper_position_command_topic == "/upper_position_controller/commands"
     assert mujoco_cfg.upper_position_command_topic == "/upper_position_controller/commands"
     assert mujoco_cfg.upper_position_command_size == 16
-    assert robot_cfg.config.command_publish_hz == pytest.approx(100.0)
+    assert robot_cfg.config.command_publish_hz == pytest.approx(1000.0)
     assert robot_cfg.config.upper.max_joint_velocity_rad_s == pytest.approx(tuple([1.2] * 16))
     assert robot_cfg.config.ik.module_name == "ik_7dof_pybind"
     assert robot_cfg.config.ik.max_iters == 200
-    assert robot_cfg.config.ik.max_joint_step_rad == pytest.approx(1.0)
-    assert robot_cfg.config.ik.eps == pytest.approx(0.01)
-    assert robot_cfg.config.max_ik_solution_jump_rad == pytest.approx(0.5)
-    assert robot_cfg.config.ik_solution_jump_clip_rad == pytest.approx(0.3)
-    assert robot_cfg.config.ik_max_position_error_m == pytest.approx(0.15)
-    assert robot_cfg.config.ik_max_orientation_error_rad == pytest.approx(1.2)
-    assert robot_cfg.config.initial_pose_enabled
-    assert robot_cfg.config.initial_pose_duration_s == pytest.approx(20.0)
-    assert robot_cfg.config.initial_left_arm_positions_rad == pytest.approx(
-        (-0.40, 0.38, -0.63, -1.05, -0.86, 0.17, -0.01)
-    )
-    assert robot_cfg.config.initial_right_arm_positions_rad == pytest.approx(
-        (-0.63, -0.28, 0.73, -0.84, 0.92, 0.23, 0.43)
-    )
+    assert robot_cfg.config.ik.eps == pytest.approx(1e-3)
     assert mujoco_cfg.environment[0].ros_arm_command_topic == "/upper_position_controller/commands"
     assert mujoco_cfg.environment[0].arm_command_source == "ros2"
     assert mujoco_cfg.environment[0].kinematics_type == "fa"
@@ -173,7 +160,6 @@ def test_fa_ik_result_requires_7d_and_pybind_client_calls_solver(monkeypatch, tm
             urdf_file="/home/likunwei/dataCollection/beavr-bot/robots/fa_description/urdf/fa_robot.urdf",
             module_name="fake_ik_7dof_pybind",
             max_iters=9,
-            max_joint_step_rad=0.0,
             eps=1e-4,
             log_dir=str(tmp_path),
         )
@@ -198,7 +184,6 @@ def test_fa_ik_result_requires_7d_and_pybind_client_calls_solver(monkeypatch, tm
     assert rows[0]["frame_id"] == "base"
     assert rows[0]["success"] == "1"
     assert rows[0]["has_solution"] == "1"
-    assert rows[0]["max_joint_step_rad"] == "0"
     assert rows[0]["position_error_m"] == "0.001"
     assert rows[0]["orientation_error_rad"] == "0.002"
     assert rows[0]["q_target6"] == "0.7"
@@ -227,7 +212,6 @@ def test_fa_ik_accepts_approximate_solution_when_position_and_orientation_within
         FaArmIkConfig(
             urdf_file="/tmp/fa.urdf",
             module_name="fake_approx_ik_7dof_pybind",
-            max_joint_step_rad=0.0,
             log_enabled=False,
         )
     )
@@ -277,7 +261,6 @@ def test_fa_ik_uses_best_approximation_when_position_or_orientation_exceeds_thre
         FaArmIkConfig(
             urdf_file="/tmp/fa.urdf",
             module_name="fake_reject_ik_7dof_pybind",
-            max_joint_step_rad=0.0,
             log_enabled=False,
         )
     )
@@ -438,79 +421,9 @@ def test_fa_real_control_ignores_duplicate_session_state_commands():
     assert entered_pause == []
 
 
-def test_fa_real_control_publishes_initial_teleop_pose_before_targets():
+def test_fa_real_control_holds_large_ik_solution_jump():
     controller = FaRealControl.__new__(FaRealControl)
-    left_initial = (-0.40, 0.38, -0.63, -1.05, -0.86, 0.17, -0.01)
-    right_initial = (-0.63, -0.28, 0.73, -0.84, 0.92, 0.23, 0.43)
-    controller.config = FaRealControlConfig(
-        initial_pose_enabled=True,
-        initial_left_arm_positions_rad=left_initial,
-        initial_right_arm_positions_rad=right_initial,
-        initial_pose_duration_s=4.0,
-        initial_pose_max_velocity_rad_s=0.5,
-        initial_pose_max_acceleration_rad_s2=2.0,
-    )
-    controller.control_backend = "real"
-    controller._initial_pose_started_at_s = None
-    controller._initial_pose_done = False
-    controller._last_min_snap_target_command = None
-    controller._last_min_snap_target_publish_time_s = 0.0
-    controller._last_published_upper_command = None
-    controller._active_arm_goals = {robots.LEFT: None, robots.RIGHT: None}
-    controller._arm_goal_dirty = {robots.LEFT: True, robots.RIGHT: True}
-    controller._last_safe_arm_targets = {robots.LEFT: None, robots.RIGHT: None}
-    controller._latest_targets = {robots.LEFT: object(), robots.RIGHT: object()}
-    controller._latest_target_keys = {robots.LEFT: object(), robots.RIGHT: object()}
-    controller._builder = FaUpperPositionCommandBuilder()
-
-    class ResetRecorder:
-        def __init__(self):
-            self.values = []
-
-        def reset(self, value):
-            self.values.append(tuple(value))
-
-    class FakeRos2:
-        def __init__(self):
-            self.calls = []
-
-        def publish_min_snap_target(self, command, duration, max_velocity, max_acceleration):
-            self.calls.append((command, duration, max_velocity, max_acceleration))
-            return True
-
-    snapshot = FaJointStateSnapshot(
-        timestamp_s=1.0,
-        left_arm=tuple([0.0] * 7),
-        right_arm=tuple([0.0] * 7),
-        neck=(0.11, -0.22),
-    )
-    controller._limiter = ResetRecorder()
-    controller._ros2 = FakeRos2()
-    controller._real_joint_state_fresh = lambda: True
-    controller._current_joint_snapshot = lambda: snapshot
-    controller._warn_safety = lambda key, message: (_ for _ in ()).throw(AssertionError(message))
-
-    controller._publish_initial_pose_if_needed()
-
-    assert len(controller._ros2.calls) == 1
-    command, duration, max_velocity, max_acceleration = controller._ros2.calls[0]
-    assert command.left_arm == pytest.approx(left_initial)
-    assert command.right_arm == pytest.approx(right_initial)
-    assert command.neck == pytest.approx((0.11, -0.22))
-    assert duration == pytest.approx(4.0)
-    assert max_velocity == pytest.approx(0.5)
-    assert max_acceleration == pytest.approx(2.0)
-    assert not controller._initial_pose_ready(now_s=controller._initial_pose_started_at_s + 3.9)
-    assert controller._initial_pose_ready(now_s=controller._initial_pose_started_at_s + 4.0)
-    assert controller._latest_targets == {robots.LEFT: None, robots.RIGHT: None}
-    assert controller._last_safe_arm_targets[robots.LEFT] == pytest.approx(np.asarray(left_initial))
-    assert controller._last_safe_arm_targets[robots.RIGHT] == pytest.approx(np.asarray(right_initial))
-    assert controller._limiter.values[-1] == pytest.approx(left_initial + right_initial + (0.11, -0.22))
-
-
-def test_fa_real_control_clips_large_ik_solution_jump():
-    controller = FaRealControl.__new__(FaRealControl)
-    controller.config = FaRealControlConfig(max_ik_solution_jump_rad=1.0, ik_solution_jump_clip_rad=0.3)
+    controller.config = FaRealControlConfig(max_ik_solution_jump_rad=1.0)
     controller._teleop_active = True
     controller.control_backend = "mujoco"
     controller._real_joint_state_fresh = lambda: False
@@ -538,71 +451,14 @@ def test_fa_real_control_clips_large_ik_solution_jump():
     published = []
     controller._builder = FaUpperPositionCommandBuilder()
     controller._limiter = SimpleNamespace(limit=lambda command, now_s=None: (command, ""))
-    controller._last_min_snap_target_command = None
-
-    def publish(command, require_real_reset):
-        published.append(command)
-        controller._last_min_snap_target_command = command
-        return True
-
-    controller._publish_upper_command_outputs = publish
-
-    controller._publish_upper_command_if_safe()
-
-    assert len(published) == 1
-    assert published[-1].right_arm == pytest.approx(tuple([0.4] * 7))
-    assert controller._active_arm_goals[robots.RIGHT] == pytest.approx(np.asarray([0.4] * 7))
-    assert controller._arm_goal_dirty[robots.RIGHT] is False
-    assert controller._last_safe_arm_targets[robots.RIGHT] == pytest.approx(np.asarray([0.4] * 7))
-    assert controller._warn_safety_messages[0][0] == "right_ik_solution_jump"
-    assert "clipped" in controller._warn_safety_messages[0][1]
-
-
-def test_fa_real_control_holds_low_quality_ik_solution():
-    controller = FaRealControl.__new__(FaRealControl)
-    controller.config = FaRealControlConfig(
-        ik_max_position_error_m=0.15,
-        ik_max_orientation_error_rad=1.2,
-    )
-    controller._teleop_active = True
-    controller.control_backend = "mujoco"
-    controller._real_joint_state_fresh = lambda: False
-    controller._warn_safety_messages = []
-    controller._warn_safety = lambda key, message: controller._warn_safety_messages.append((key, message))
-    snapshot = FaJointStateSnapshot(
-        timestamp_s=1.0,
-        left_arm=tuple([0.0] * 7),
-        right_arm=tuple([0.0] * 7),
-        neck=(0.0, 0.0),
-    )
-    controller._current_joint_snapshot = lambda: snapshot
-    controller._latest_targets = {robots.LEFT: None, robots.RIGHT: object()}
-    controller._last_safe_arm_targets = {
-        robots.LEFT: None,
-        robots.RIGHT: np.asarray([0.1] * 7, dtype=np.float64),
-    }
-    controller._ik_client = SimpleNamespace(
-        solve=lambda hand_side, target, current_arm: FaArmIkResult(
-            success=True,
-            q_target=tuple([0.2] * 7),
-            has_solution=True,
-            position_error=0.20,
-            orientation_error=0.5,
-        )
-    )
-    published = []
-    controller._builder = FaUpperPositionCommandBuilder()
-    controller._limiter = SimpleNamespace(limit=lambda command, now_s=None: (command, ""))
-    controller._last_min_snap_target_command = None
     controller._publish_upper_command_outputs = lambda command, require_real_reset: published.append(command) or True
 
     controller._publish_upper_command_if_safe()
 
-    assert published == []
-    assert controller._active_arm_goals[robots.RIGHT] == pytest.approx(np.asarray([0.1] * 7))
-    assert controller._arm_goal_dirty[robots.RIGHT] is False
+    assert published
+    assert published[0].right_arm == pytest.approx(tuple([0.1] * 7))
     assert controller._last_safe_arm_targets[robots.RIGHT] == pytest.approx(np.asarray([0.1] * 7))
-    assert controller._warn_safety_messages[0][0] == "right_ik_quality_hold"
+    assert controller._warn_safety_messages[0][0] == "right_ik_solution_jump"
 
 
 def test_fa_command_publish_reuses_active_goal_without_repeating_ik_for_same_target():
@@ -633,7 +489,6 @@ def test_fa_command_publish_reuses_active_goal_without_repeating_ik_for_same_tar
     controller._ik_client = SimpleNamespace(solve=solve)
     controller._builder = FaUpperPositionCommandBuilder()
     controller._limiter = SimpleNamespace(limit=lambda command, now_s=None: (command, ""))
-    controller._last_min_snap_target_command = None
     published = []
     controller._publish_upper_command_outputs = lambda command, require_real_reset: published.append(command) or True
 

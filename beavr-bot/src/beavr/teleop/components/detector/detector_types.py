@@ -32,20 +32,11 @@ class ButtonEvent:
 class SessionCommand:
     """Session-level commands emitted by the detector.
 
-    Common commands: "pause", "resume", "reset", "home",
-    "camera_projection_on", "camera_projection_off", "camera_projection_toggle".
+    Common commands: "pause", "resume", "reset", "home".
     """
 
     timestamp_s: float
-    command: Literal[
-        "pause",
-        "resume",
-        "reset",
-        "home",
-        "camera_projection_on",
-        "camera_projection_off",
-        "camera_projection_toggle",
-    ]
+    command: Literal["pause", "resume", "reset", "home"]
 
 
 @dataclass(frozen=True)

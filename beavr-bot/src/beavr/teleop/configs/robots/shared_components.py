@@ -338,7 +338,6 @@ class UnifiedPICO4VRHandDetectorCfg:
     button_port: int = ports.RESOLUTION_BUTTON_PORT
     teleop_reset_port: int = ports.TELEOP_RESET_PORT
     teleop_state_pub_port: int = ports.XARM_TELEOPERATION_STATE_PORT
-    camera_projection_control_port: int = ports.CAMERA_PROJECTION_CONTROL_PORT
     hand_config: str = robots.RIGHT
     hand_side: str = robots.RIGHT  # 用于标识目的
 
@@ -349,7 +348,6 @@ class UnifiedPICO4VRHandDetectorCfg:
             self.button_port,
             self.teleop_reset_port,
             self.teleop_state_pub_port,
-            self.camera_projection_control_port,
         ]
         if len(set(all_ports)) != len(all_ports):
             logger.error("Duplicate ports found in UnifiedPICO4VRHandDetector configuration!")
@@ -361,7 +359,6 @@ class UnifiedPICO4VRHandDetectorCfg:
             ("button_port", self.button_port),
             ("teleop_reset_port", self.teleop_reset_port),
             ("teleop_state_pub_port", self.teleop_state_pub_port),
-            ("camera_projection_control_port", self.camera_projection_control_port),
         ]:
             if not (1 <= port_value <= 65535):
                 raise ValueError(f"{port_name} out of valid range (1-65535): {port_value}")
@@ -374,7 +371,6 @@ class UnifiedPICO4VRHandDetectorCfg:
             "button_port": self.button_port,
             "teleop_reset_port": self.teleop_reset_port,
             "teleop_state_pub_port": self.teleop_state_pub_port,
-            "camera_projection_control_port": self.camera_projection_control_port,
             "hand_config": self.hand_config,
         }
 

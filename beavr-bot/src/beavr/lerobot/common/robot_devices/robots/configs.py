@@ -28,34 +28,7 @@ from beavr.lerobot.common.robot_devices.motors.configs import (
     FeetechMotorsBusConfig,
     MotorsBusConfig,
 )
-from beavr.teleop.configs.constants import cameras, network, ports, robots
-
-
-def _opencv_camera_triplet() -> dict[str, CameraConfig]:
-    """Build the standard three-camera recording layout."""
-    return {
-        "front": OpenCVCameraConfig(
-            camera_index=cameras.RECORD_CAMERA_INDEX_FRONT,
-            fps=30,
-            width=640,
-            height=480,
-            rotation=180,
-        ),
-        "left_wrist": OpenCVCameraConfig(
-            camera_index=cameras.RECORD_CAMERA_INDEX_LEFT_WRIST,
-            fps=30,
-            width=640,
-            height=480,
-            rotation=180,
-        ),
-        "right_wrist": OpenCVCameraConfig(
-            camera_index=cameras.RECORD_CAMERA_INDEX_RIGHT_WRIST,
-            fps=30,
-            width=640,
-            height=480,
-            rotation=180,
-        ),
-    }
+from beavr.teleop.configs.constants import network, ports, robots
 
 
 @dataclass
@@ -854,7 +827,17 @@ class Sysmo32AdapterConfig(BeavrBotConfig):
     teleop robot interfaces. It does not sit in the command path while recording.
     """
 
-    cameras: dict[str, CameraConfig] = field(default_factory=_opencv_camera_triplet)
+    cameras: dict[str, CameraConfig] = field(
+        default_factory=lambda: {
+            "front": OpenCVCameraConfig(
+                camera_index=6,
+                fps=30,
+                width=640,
+                height=480,
+                rotation=180.0,
+            ),
+        }
+    )
     robot_type: str = "sysmo32"
     record_actions: bool = True
     record_next_joint_state_action: bool = True
@@ -907,7 +890,6 @@ class Sysmo32AdapterConfig(BeavrBotConfig):
 class FaAdapterConfig(Sysmo32AdapterConfig):
     """FA adapter for LeRobot recording while FA uses the 18D compatibility ABI."""
 
-    cameras: dict[str, CameraConfig] = field(default_factory=_opencv_camera_triplet)
     robot_type: str = "fa"
 
     def __post_init__(self):

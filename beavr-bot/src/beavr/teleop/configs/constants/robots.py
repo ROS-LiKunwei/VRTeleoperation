@@ -34,7 +34,7 @@ OCULUS_JOINTS = {
     # Middle: 11 Metacarpal, 12 Proximal, 13 Intermediate, 14 Distal, 15 Tip
     # Ring: 16 Metacarpal, 17 Proximal, 18 Intermediate, 19 Distal, 20 Tip
     # Little: 21 Metacarpal, 22 Proximal, 23 Intermediate, 24 Distal, 25 Tip
-    "metacarpals": [2, 6, 11, 16, 21],  # 掌骨:连接手腕和手指根部的那根骨头
+    "metacarpals": [2, 6, 11, 16, 21], # 掌骨:连接手腕和手指根部的那根骨头
     # Knuckles = first finger joints at the hand (proximal joints for non-thumb)
     "knuckles": [7, 12, 17, 22],  # 指关节 index, middle, ring, little
     # Per-finger chains (4 joints) used with wrist stacked in code -> 5 points total
@@ -107,9 +107,6 @@ KEYPOINTS = "keypoints"
 BUTTON = "button"
 PAUSE = "pause"
 RESUME = "resume"
-CAMERA_PROJECTION_ON = "camera_projection_on"
-CAMERA_PROJECTION_OFF = "camera_projection_off"
-CAMERA_PROJECTION_TOGGLE = "camera_projection_toggle"
 RIGHT = "right"
 LEFT = "left"
 BIMANUAL = "bimanual"

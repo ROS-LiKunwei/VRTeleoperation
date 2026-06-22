@@ -114,14 +114,9 @@ def test_invalid_all_zero_keypoints_are_rejected():
 def test_pause_command_is_edge_triggered():
     detector = _detector()
 
-    assert detector._pause_command_for_edge(b"DIAGNOSTIC_TEST_Pause_19:15:14.085") is None
     assert detector._pause_command_for_edge(b"Low") == robots.PAUSE
     assert detector._pause_command_for_edge(b"Low") is None
-    assert detector._pause_command_for_edge(b"DIAGNOSTIC_TEST_Pause_19:15:16.138") is None
-    assert detector._pause_command_for_edge(b"Low") is None
     assert detector._pause_command_for_edge(b"High") == robots.RESUME
-    assert detector._pause_command_for_edge(b"High") is None
-    assert detector._pause_command_for_edge(b"unexpected") is None
     assert detector._pause_command_for_edge(b"High") is None
     assert detector._pause_command_for_edge(b"Low") == robots.PAUSE
 

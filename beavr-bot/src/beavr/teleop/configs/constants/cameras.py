@@ -66,12 +66,6 @@ STREAM_CONFIGS_PORT = "10005"
 # -----------------------------------------------------------------------------
 CAMERA_INDEX_FRONT = "/dev/video0"
 CAMERA_INDEX_WRIST = "/dev/video2"
-RECORD_CAMERA_INDEX_FRONT = 2
-RECORD_CAMERA_INDEX_LEFT_WRIST = 4
-RECORD_CAMERA_INDEX_RIGHT_WRIST = 6
-RECORD_CAMERA_FRONT_STREAM_PORT = CAMERA_PORT
-RECORD_CAMERA_LEFT_WRIST_STREAM_PORT = CAMERA_PORT + 6
-RECORD_CAMERA_RIGHT_WRIST_STREAM_PORT = CAMERA_PORT + 7
 
 # -----------------------------------------------------------------------------
 # Camera rotation settings
