@@ -708,6 +708,7 @@ class BeavrBotConfig(RobotConfig):
     robot_type: str = "multi_robot"
     record_actions: bool = True
     record_next_joint_state_action: bool = False
+    record_bimanual_gripper_state: bool = False
 
     mock: bool = False
 
@@ -902,6 +903,7 @@ class FaAdapterConfig(Sysmo32AdapterConfig):
         }
     )
     robot_type: str = "fa"
+    record_bimanual_gripper_state: bool = True
 
     def __post_init__(self):
         super().__post_init__()

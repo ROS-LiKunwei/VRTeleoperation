@@ -25,6 +25,18 @@ def test_sysmo32_adapter_defaults_record_images_and_action():
     assert "action" in robot.features
 
 
+def test_fa_adapter_records_16d_state_with_o6_switches():
+    cfg = FaAdapterConfig(cameras={})
+    robot = make_robot_from_config(cfg)
+
+    assert robot.features["observation.state"]["shape"] == (16,)
+    assert robot.features["observation.state"]["names"][-2:] == [
+        "left_hand_gripper_state",
+        "right_hand_gripper_state",
+    ]
+    assert robot.features["action"]["shape"] == (16,)
+
+
 def test_fa_adapter_default_camera_name_matches_existing_dataset_info():
     cfg = FaAdapterConfig()
     robot = make_robot_from_config(cfg)
@@ -122,6 +134,45 @@ def test_sysmo32_adapter_receives_and_builds_bimanual_action(monkeypatch, bus):
     assert observation["observation.state"].tolist() == left_state_0 + right_state_0
     assert action is not None
     assert action["action"].tolist() == pytest.approx(left_state_1 + right_state_1)
+
+
+def test_fa_adapter_records_bimanual_o6_gripper_state(monkeypatch, bus):
+    from tests.conftest import FakeZMQSubscriber
+
+    monkeypatch.setattr(
+        "beavr.lerobot.common.robot_devices.robots.beavrbot.ZMQSubscriber",
+        FakeZMQSubscriber,
+    )
+    cfg = FaAdapterConfig(cameras={}, record_actions=False)
+    robot = make_robot_from_config(cfg)
+    robot.connect()
+
+    bus.publish(
+        "127.0.0.1",
+        ports.XARM_STATE_PUBLISH_PORT + 4,
+        "fa_left",
+        {
+            "joint_states": {"joint_position": [0, 0, 0, 0, 0, 0, 0]},
+            "hand_command": 2,
+        },
+    )
+    bus.publish(
+        "127.0.0.1",
+        ports.XARM_STATE_PUBLISH_PORT + 2,
+        "fa_right",
+        {
+            "joint_states": {"joint_position": [0, 0, 0, 0, 0, 0, 0]},
+            "hand_command": 1,
+        },
+    )
+
+    observation = robot.capture_observation()
+
+    assert robot.features["observation.state"]["names"][-2:] == [
+        "left_hand_gripper_state",
+        "right_hand_gripper_state",
+    ]
+    assert observation["observation.state"].tolist()[-2:] == [1.0, 0.0]
 
 
 def test_control_loop_records_observation_only_dataset(monkeypatch):

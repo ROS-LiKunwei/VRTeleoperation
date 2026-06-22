@@ -40,6 +40,7 @@ class BeavrBot(Robot):
         handshake_host: str = "127.0.0.1",
         record_actions: bool = True,
         record_next_joint_state_action: bool = False,
+        record_bimanual_gripper_state: bool = False,
     ):
         """Initialize the multi-robot adapter.
 
@@ -61,6 +62,7 @@ class BeavrBot(Robot):
         self.robot_configs = robot_configs
         self.record_actions = record_actions
         self.record_next_joint_state_action = record_next_joint_state_action
+        self.record_bimanual_gripper_state = record_bimanual_gripper_state
         self.manage_teleop_state = True
 
         # Create ZMQ subscribers for each robot
@@ -195,11 +197,15 @@ class BeavrBot(Robot):
         sorted_configs = arm_configs + hand_configs
 
         total_obs_dim = sum(c["joint_count"] for c in sorted_configs)
+        if self.record_bimanual_gripper_state:
+            total_obs_dim += 2
 
         # Build combined observation feature
         obs_names = []
         for config in sorted_configs:
             obs_names.extend([f"{config['name']}_joint_{i}" for i in range(config["joint_count"])])
+        if self.record_bimanual_gripper_state:
+            obs_names.extend(["left_hand_gripper_state", "right_hand_gripper_state"])
 
         features["observation.state"] = {
             "shape": (total_obs_dim,),
@@ -220,6 +226,8 @@ class BeavrBot(Robot):
                     )
                 else:
                     action_names.extend([f"{config['name']}_cmd_{i}" for i in range(config["joint_count"])])
+            if self.record_next_joint_state_action and self.record_bimanual_gripper_state:
+                action_names.extend(["left_hand_next_gripper_state", "right_hand_next_gripper_state"])
 
             features["action"] = {
                 "shape": (len(action_names),),
@@ -309,6 +317,53 @@ class BeavrBot(Robot):
                 return None
         return current
 
+    @staticmethod
+    def _hand_command_to_gripper_state(command) -> float | None:
+        try:
+            command = int(command)
+        except (TypeError, ValueError):
+            return None
+        if command == 2:
+            return 1.0
+        if command == 1:
+            return 0.0
+        return None
+
+    def _side_from_config_name(self, config: dict) -> str | None:
+        explicit_side = config.get("hand_side")
+        if explicit_side in (robots.LEFT, robots.RIGHT):
+            return explicit_side
+        name = str(config.get("name", "")).lower()
+        if "left" in name:
+            return robots.LEFT
+        if "right" in name:
+            return robots.RIGHT
+        return None
+
+    def _extract_bimanual_gripper_state(self, robot_states: dict) -> list[float]:
+        states = {robots.LEFT: 0.0, robots.RIGHT: 0.0}
+        for config in self.robot_configs:
+            side = self._side_from_config_name(config)
+            if side is None:
+                continue
+            robot_data = robot_states.get(config["name"])
+            if not isinstance(robot_data, dict):
+                continue
+            if "hand_gripper_state" in robot_data:
+                try:
+                    states[side] = 1.0 if int(robot_data["hand_gripper_state"]) else 0.0
+                except (TypeError, ValueError):
+                    logging.warning(
+                        "Invalid hand_gripper_state for robot '%s': %s",
+                        config["name"],
+                        robot_data["hand_gripper_state"],
+                    )
+                continue
+            command_state = self._hand_command_to_gripper_state(robot_data.get("hand_command"))
+            if command_state is not None:
+                states[side] = command_state
+        return [states[robots.LEFT], states[robots.RIGHT]]
+
     def _fetch_robot_states(self) -> dict:
         """Fetch latest state from all configured robots."""
         states = {}
@@ -390,6 +445,9 @@ class BeavrBot(Robot):
             else:
                 fallback_state = np.zeros(config["joint_count"], dtype=np.float32)
             combined_state.extend(fallback_state)
+
+        if self.record_bimanual_gripper_state:
+            combined_state.extend(self._extract_bimanual_gripper_state(robot_states))
 
         # Attach error flags if any
         if missing_robots:

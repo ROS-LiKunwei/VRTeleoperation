@@ -43,6 +43,8 @@ from beavr.teleop.configs.constants import ports, robots
 logger = logging.getLogger(__name__)
 
 FA_UPPER_COMMAND_TOPIC = "fa_upper_position_command"
+FA_HAND_OPEN_COMMAND = 1
+FA_HAND_GRASP_COMMAND = 2
 
 
 def _default_beavr_bot_root() -> Path:
@@ -75,7 +77,10 @@ class FaRos2Topics:
     joint_state_topic: str = "/joint_states"
     upper_position_command_topic: str = "/upper_position_controller/commands"
     min_snap_target_topic: str = "/min_snap/target"
+    left_hand_topic: str = "/left_topic_to_hand"
+    right_hand_topic: str = "/right_topic_to_hand"
     upper_position_command_queue_size: int = 60
+    hand_command_queue_size: int = 10
     min_snap_target_queue_size: int = 1
     joint_state_timeout_s: float = 1.0
 
@@ -170,6 +175,9 @@ class FaRos2Bridge:
         self._rclpy = None
         self._node = None
         self._min_snap_target_publisher = None
+        self._left_hand_pub = None
+        self._right_hand_pub = None
+        self._hand_msg_type = None
         if require_ros:
             self._init_ros2(node_name)
 
@@ -178,16 +186,24 @@ class FaRos2Bridge:
             import rclpy
             from min_snap.msg import MinSnapTarget
             from sensor_msgs.msg import JointState
+            from std_msgs.msg import Int32
 
             self._rclpy = rclpy
             if not rclpy.ok():
                 rclpy.init(args=None)
             self._node = rclpy.create_node(node_name)
+            self._hand_msg_type = Int32
             self._min_snap_target_publisher = MinSnapTargetPublisher(
                 ros_node=self._node,
                 msg_type=MinSnapTarget,
                 topic=self.topics.min_snap_target_topic,
                 queue_size=self.topics.min_snap_target_queue_size,
+            )
+            self._left_hand_pub = self._node.create_publisher(
+                Int32, self.topics.left_hand_topic, self.topics.hand_command_queue_size
+            )
+            self._right_hand_pub = self._node.create_publisher(
+                Int32, self.topics.right_hand_topic, self.topics.hand_command_queue_size
             )
             self._node.create_subscription(JointState, self.topics.joint_state_topic, self._on_joint_state, 10)
             self.available = True
@@ -210,6 +226,19 @@ class FaRos2Bridge:
     def spin_once(self) -> None:
         if self.available and self._rclpy is not None and self._node is not None:
             self._rclpy.spin_once(self._node, timeout_sec=0.0)
+
+    def publish_hand_command(self, hand_side: str, gripper_state: int) -> bool:
+        if gripper_state not in (0, 1):
+            raise ValueError(f"Invalid FA/O6 gripper state: {gripper_state}")
+        if not self.available or self._hand_msg_type is None:
+            return False
+        msg = self._hand_msg_type()
+        msg.data = int(gripper_state)
+        if hand_side == robots.LEFT:
+            self._left_hand_pub.publish(msg)
+        else:
+            self._right_hand_pub.publish(msg)
+        return True
 
     def publish_min_snap_target(
         self,
@@ -323,6 +352,8 @@ class FaRealControl(Component):
         self._last_pause_hold_publish_time = 0.0
         self._next_state_publish_time_s = 0.0
         self._last_published_upper_command: Optional[FaUpperPositionCommand] = None
+        self._last_hand_commands: Dict[str, Optional[int]] = {robots.LEFT: None, robots.RIGHT: None}
+        self._hand_gripper_states: Dict[str, int] = {robots.LEFT: 0, robots.RIGHT: 0}
         self._last_min_snap_target_command: Optional[FaUpperPositionCommand] = None
         self._last_min_snap_target_publish_time_s = 0.0
         self._startup_initial_pose_armed = self.config.initial_pose_enabled
@@ -516,6 +547,32 @@ class FaRealControl(Component):
                 self._warn_safety(f"{hand_side}_wrong_target_side", f"wrong target side: {msg.hand_side}")
                 continue
             self._latest_targets[hand_side] = msg
+            self._publish_hand_command_on_edge(hand_side, msg.hand_command)
+
+    def _publish_hand_command_on_edge(self, hand_side: str, hand_command) -> None:
+        if hand_command is None:
+            return
+        try:
+            command = int(hand_command)
+        except (TypeError, ValueError):
+            logger.warning("忽略无法解析的FA/O6手部命令: %s", hand_command)
+            return
+        if command == FA_HAND_GRASP_COMMAND:
+            gripper_state = 1
+        elif command == FA_HAND_OPEN_COMMAND:
+            gripper_state = 0
+        else:
+            logger.warning("忽略未知FA/O6手部命令: %s", command)
+            return
+        if command == self._last_hand_commands[hand_side]:
+            return
+        if self.control_backend in ("real", "real_with_mujoco"):
+            published = self._ros2.publish_hand_command(hand_side, gripper_state)
+            if not published and self.control_backend == "real":
+                self._warn_safety("ros_hand_unavailable", f"FA/O6 hand publisher unavailable for {hand_side}")
+        self._last_hand_commands[hand_side] = command
+        self._hand_gripper_states[hand_side] = gripper_state
+        logger.info("FA/O6 hand command: %s command=%d state=%d", hand_side, command, gripper_state)
 
     def _publish_lerobot_joint_states(self) -> None:
         if self.config.state_publish_fps <= 0.0:
@@ -531,9 +588,15 @@ class FaRealControl(Component):
         self._publish_lerobot_arm_state(robots.LEFT, snapshot.left_arm, self._left_state_publish_port, now)
 
     def _publish_lerobot_arm_state(self, hand_side: str, joints: Sequence[float], port: int, now: float) -> None:
+        hand_command = self._last_hand_commands.get(hand_side)
+        if hand_command is None:
+            hand_command = FA_HAND_OPEN_COMMAND
+        hand_gripper_state = int(self._hand_gripper_states.get(hand_side, 0))
         state = {
             "joint_states": {"joint_position": [float(v) for v in joints], "timestamp": now},
             "joint_angles_rad": [float(v) for v in joints],
+            "hand_command": int(hand_command),
+            "hand_gripper_state": hand_gripper_state,
             "timestamp": now,
         }
         if self._last_published_upper_command is not None:
