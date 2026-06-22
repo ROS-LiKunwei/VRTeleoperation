@@ -890,6 +890,17 @@ class Sysmo32AdapterConfig(BeavrBotConfig):
 class FaAdapterConfig(Sysmo32AdapterConfig):
     """FA adapter for LeRobot recording while FA uses the 18D compatibility ABI."""
 
+    cameras: dict[str, CameraConfig] = field(
+        default_factory=lambda: {
+            "front": OpenCVCameraConfig(
+                camera_index=0,
+                fps=30,
+                width=640,
+                height=480,
+                rotation=180,
+            ),
+        }
+    )
     robot_type: str = "fa"
 
     def __post_init__(self):

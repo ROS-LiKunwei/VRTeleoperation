@@ -17,7 +17,12 @@ env/
 
 # 构建产物
 build/
+install/
+log/
 dist/
+beavr-bot/build/*
+beavr-bot/install/*
+beavr-bot/log/*
 BeaVR-app/BeaVR-Unity/.utmp/
 BeaVR-app/BeaVR_BurstDebugInformation_DoNotShip/
 
@@ -37,3 +42,4 @@ __pycache__/
 *.pyc
 
 *.zip
+*.csv

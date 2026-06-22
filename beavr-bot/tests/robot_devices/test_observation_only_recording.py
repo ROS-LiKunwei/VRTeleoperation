@@ -2,7 +2,8 @@ import pytest
 import torch
 
 from beavr.lerobot.common.robot_devices.control_utils import control_loop
-from beavr.lerobot.common.robot_devices.robots.configs import Sysmo32AdapterConfig
+from beavr.lerobot.common.robot_devices.cameras.configs import IntelRealSenseCameraConfig, OpenCVCameraConfig
+from beavr.lerobot.common.robot_devices.robots.configs import FaAdapterConfig, Sysmo32AdapterConfig
 from beavr.lerobot.common.robot_devices.robots.utils import make_robot_from_config
 from beavr.teleop.configs.constants import ports
 
@@ -22,6 +23,42 @@ def test_sysmo32_adapter_defaults_record_images_and_action():
     assert "observation.state" in robot.features
     assert "observation.images.front" in robot.features
     assert "action" in robot.features
+
+
+def test_fa_adapter_default_camera_name_matches_existing_dataset_info():
+    cfg = FaAdapterConfig()
+    robot = make_robot_from_config(cfg)
+
+    assert list(robot.camera_features) == ["observation.images.front"]
+
+
+def test_fa_adapter_accepts_up_to_three_recording_cameras():
+    cfg = FaAdapterConfig(
+        cameras={
+            "front": OpenCVCameraConfig(camera_index=0, fps=30, width=640, height=480),
+            "left_wrist": OpenCVCameraConfig(camera_index=1, fps=30, width=640, height=480),
+            "right_left": IntelRealSenseCameraConfig(serial_number=123456, fps=30, width=640, height=480),
+        }
+    )
+    robot = make_robot_from_config(cfg)
+
+    assert list(robot.camera_features) == [
+        "observation.images.front",
+        "observation.images.left_wrist",
+        "observation.images.right_left",
+    ]
+
+
+def test_fa_adapter_rejects_more_than_three_recording_cameras():
+    cfg = FaAdapterConfig(
+        cameras={
+            f"cam_{idx}": OpenCVCameraConfig(camera_index=idx, fps=30, width=640, height=480)
+            for idx in range(4)
+        }
+    )
+
+    with pytest.raises(ValueError, match="at most 3 cameras"):
+        make_robot_from_config(cfg)
 
 
 def test_sysmo32_adapter_receives_and_builds_bimanual_action(monkeypatch, bus):

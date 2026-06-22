@@ -8,9 +8,8 @@ import torch
 from beavr.lerobot.common.datasets.utils import Frame
 from beavr.lerobot.common.robot_devices.cameras.configs import (
     CameraConfig,
-    OpenCVCameraConfig,
 )
-from beavr.lerobot.common.robot_devices.cameras.opencv import OpenCVCamera
+from beavr.lerobot.common.robot_devices.cameras.utils import make_cameras_from_configs
 from beavr.lerobot.common.robot_devices.robots.utils import Robot
 from beavr.teleop.common.network.handshake import (
     HandshakeCoordinator,
@@ -20,6 +19,9 @@ from beavr.teleop.common.network.publisher import ZMQPublisherManager
 from beavr.teleop.common.network.subscriber import ZMQSubscriber
 from beavr.teleop.components.detector.detector_types import SessionCommand
 from beavr.teleop.configs.constants import robots
+
+
+MAX_RECORDING_CAMERAS = 3
 
 
 class BeavrBot(Robot):
@@ -77,13 +79,13 @@ class BeavrBot(Robot):
             self.robot_state_caches[name] = None
             self.robot_command_caches[name] = None
 
-        # Setup cameras
-        self.cameras = {}
-        for name, camera_config in cameras.items():
-            if isinstance(camera_config, OpenCVCameraConfig):
-                self.cameras[name] = OpenCVCamera(camera_config)
-            else:
-                raise ValueError(f"Unsupported camera config type: {type(camera_config)}")
+        if len(cameras) > MAX_RECORDING_CAMERAS:
+            raise ValueError(
+                f"BeavrBot recorder supports at most {MAX_RECORDING_CAMERAS} cameras, "
+                f"but {len(cameras)} were configured: {list(cameras)}"
+            )
+
+        self.cameras = make_cameras_from_configs(cameras)
 
         # Build features dynamically based on robot configs
         self.features = self._build_features()
