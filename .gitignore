@@ -35,3 +35,5 @@ beavr-bot/src/beavr/teleop/configs/constants/network.py
 # 缓存文件
 __pycache__/
 *.pyc
+
+*.zip
