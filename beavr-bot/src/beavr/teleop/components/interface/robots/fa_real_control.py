@@ -119,6 +119,9 @@ class FaRealControlConfig:
     initial_pose_duration_s: float = 4.0
     initial_pose_max_velocity_rad_s: float = 0.5
     initial_pose_max_acceleration_rad_s2: float = 2.0
+    hand_open_ros_action: int = 21
+    hand_grasp_ros_action: int = 20
+    initial_hand_ros_action: Optional[int] = 21
 
     def __post_init__(self):
         self.max_ik_solution_jump_rad = max(0.0, float(self.max_ik_solution_jump_rad))
@@ -227,13 +230,11 @@ class FaRos2Bridge:
         if self.available and self._rclpy is not None and self._node is not None:
             self._rclpy.spin_once(self._node, timeout_sec=0.0)
 
-    def publish_hand_command(self, hand_side: str, gripper_state: int) -> bool:
-        if gripper_state not in (0, 1):
-            raise ValueError(f"Invalid FA/O6 gripper state: {gripper_state}")
+    def publish_hand_command(self, hand_side: str, action_id: int) -> bool:
         if not self.available or self._hand_msg_type is None:
             return False
         msg = self._hand_msg_type()
-        msg.data = int(gripper_state)
+        msg.data = int(action_id)
         if hand_side == robots.LEFT:
             self._left_hand_pub.publish(msg)
         else:
@@ -357,6 +358,7 @@ class FaRealControl(Component):
         self._last_min_snap_target_command: Optional[FaUpperPositionCommand] = None
         self._last_min_snap_target_publish_time_s = 0.0
         self._startup_initial_pose_armed = self.config.initial_pose_enabled
+        self._startup_initial_hand_armed = self.config.initial_hand_ros_action is not None
         self._initial_pose_started_at_s: Optional[float] = None
         self._initial_pose_done = not self.config.initial_pose_enabled
         self._last_safety_log_time: Dict[str, float] = {}
@@ -381,6 +383,7 @@ class FaRealControl(Component):
                 command_period_s = 1.0 / max(1.0, float(self.config.command_publish_hz))
                 time.sleep(max(0.0, command_period_s - (time.time() - start)))
                 continue
+            self._publish_initial_hand_pose_if_needed()
             self._handle_reset_requests()
             self._receive_cartesian_targets()
             self._publish_lerobot_joint_states()
@@ -417,6 +420,23 @@ class FaRealControl(Component):
             return False
         self._initial_pose_done = True
         return True
+
+    def _publish_initial_hand_pose_if_needed(self) -> None:
+        if not self._startup_initial_hand_armed:
+            return
+        if not self._initial_pose_done:
+            return
+        action = self.config.initial_hand_ros_action
+        if action is None or self.control_backend not in ("real", "real_with_mujoco"):
+            self._startup_initial_hand_armed = False
+            return
+        left_published = self._ros2.publish_hand_command(robots.LEFT, int(action))
+        right_published = self._ros2.publish_hand_command(robots.RIGHT, int(action))
+        if not left_published or not right_published:
+            self._warn_safety("initial_hand_unavailable", "FA initial hand publisher unavailable")
+            return
+        self._startup_initial_hand_armed = False
+        logger.info("FA initial hand command published: left=%d right=%d", action, action)
 
     def _publish_initial_pose_if_needed(self) -> None:
         initial_pose_armed = getattr(self, "_startup_initial_pose_armed", self.config.initial_pose_enabled)
@@ -559,20 +579,28 @@ class FaRealControl(Component):
             return
         if command == FA_HAND_GRASP_COMMAND:
             gripper_state = 1
+            ros_action = self.config.hand_grasp_ros_action
         elif command == FA_HAND_OPEN_COMMAND:
             gripper_state = 0
+            ros_action = self.config.hand_open_ros_action
         else:
             logger.warning("忽略未知FA/O6手部命令: %s", command)
             return
         if command == self._last_hand_commands[hand_side]:
             return
         if self.control_backend in ("real", "real_with_mujoco"):
-            published = self._ros2.publish_hand_command(hand_side, gripper_state)
+            published = self._ros2.publish_hand_command(hand_side, ros_action)
             if not published and self.control_backend == "real":
                 self._warn_safety("ros_hand_unavailable", f"FA/O6 hand publisher unavailable for {hand_side}")
         self._last_hand_commands[hand_side] = command
         self._hand_gripper_states[hand_side] = gripper_state
-        logger.info("FA/O6 hand command: %s command=%d state=%d", hand_side, command, gripper_state)
+        logger.info(
+            "FA/O6 hand command: %s command=%d state=%d ros_data=%d",
+            hand_side,
+            command,
+            gripper_state,
+            ros_action,
+        )
 
     def _publish_lerobot_joint_states(self) -> None:
         if self.config.state_publish_fps <= 0.0:

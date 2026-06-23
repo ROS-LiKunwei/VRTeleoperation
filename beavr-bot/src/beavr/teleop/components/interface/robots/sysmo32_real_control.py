@@ -66,6 +66,13 @@ class Sysmo32Ros2Topics:
 class Sysmo32HandConfig:
     default_action: int = SYSMO32_HAND_ACTION_RELEASE  # 默认动作：手释放
     grasp_action: int = SYSMO32_HAND_ACTION_GRASP  # 抓取动作：手抓取
+    left_release_ros_action: Optional[int] = None
+    left_grasp_ros_action: Optional[int] = None
+    right_release_ros_action: Optional[int] = None
+    right_grasp_ros_action: Optional[int] = None
+    use_vr_hand_command_actions: bool = False
+    vr_release_command: int = SYSMO32_HAND_ACTION_RELEASE
+    vr_grasp_command: int = SYSMO32_HAND_ACTION_GRASP
     publish_on_change_only: bool = True  # 仅在动作变化时发布，避免重复发布
     heartbeat_hz: float = 3.0  # 心跳频率：3Hz
     grasp_enter_threshold_m: float = 0.035  # 抓取进入阈值：0.035m
@@ -211,8 +218,6 @@ class Sysmo32Ros2Bridge:
         )
 
     def publish_hand_action(self, hand_side: str, action_id: int) -> bool:
-        if action_id not in (SYSMO32_HAND_ACTION_RELEASE, SYSMO32_HAND_ACTION_GRASP):
-            raise ValueError(f"Invalid SYSMO-32 hand action: {action_id}")
         if not self.available:
             return False
         msg = self._hand_msg_type()
@@ -351,6 +356,7 @@ class Sysmo32RealControl(Component):
             robots.LEFT: self.config.hand.default_action,
             robots.RIGHT: self.config.hand.default_action,
         }
+        self._last_vr_hand_commands: Dict[str, Optional[int]] = {robots.LEFT: None, robots.RIGHT: None}
         self._hand_frame_started = {robots.LEFT: False, robots.RIGHT: False}
         self._last_hand_publish_time = {robots.LEFT: 0.0, robots.RIGHT: 0.0}
         self._last_safety_log_time: Dict[str, float] = {}
@@ -541,6 +547,8 @@ class Sysmo32RealControl(Component):
             try:
                 self._hand_mapper.update_from_keypoints(hand_side, frame.keypoints, now_s=time.time())
                 self._hand_frame_started[hand_side] = True
+                if self.config.hand.use_vr_hand_command_actions:
+                    self._publish_vr_hand_command_on_edge(hand_side, frame.hand_command)
             except Exception as exc:
                 self._warn_safety(f"{hand_side}_hand_invalid", f"{hand_side} hand invalid: {exc}")
                 self._hand_mapper.force_release(hand_side)
@@ -558,22 +566,58 @@ class Sysmo32RealControl(Component):
                     continue
                 action = self._hand_mapper.force_release(hand_side)
                 reason = "hand frame timeout"
+            elif self.config.hand.use_vr_hand_command_actions:
+                continue
             else:
                 action = self._hand_mapper.action_for(hand_side, now_s=now)
                 reason = "gesture"
             self._publish_hand_action(hand_side, action, reason)
 
+    def _publish_vr_hand_command_on_edge(self, hand_side: str, hand_command) -> None:
+        if hand_command is None:
+            return
+        try:
+            command = int(hand_command)
+        except (TypeError, ValueError):
+            logger.warning("忽略无法解析的SYSMO-32/O6手部命令: %s", hand_command)
+            return
+        if command == self.config.hand.vr_grasp_command:
+            action_id = self.config.hand.grasp_action
+        elif command == self.config.hand.vr_release_command:
+            action_id = self.config.hand.default_action
+        else:
+            logger.warning("忽略未知SYSMO-32/O6手部命令: %s", command)
+            return
+        if command == self._last_vr_hand_commands[hand_side]:
+            return
+        self._publish_hand_action(hand_side, action_id, "vr hand command", force=True)
+        self._last_vr_hand_commands[hand_side] = command
+
+    def _ros_hand_action_id(self, hand_side: str, action_id: int) -> int:
+        if hand_side == robots.LEFT:
+            if action_id == self.config.hand.grasp_action and self.config.hand.left_grasp_ros_action is not None:
+                return int(self.config.hand.left_grasp_ros_action)
+            if action_id == self.config.hand.default_action and self.config.hand.left_release_ros_action is not None:
+                return int(self.config.hand.left_release_ros_action)
+        else:
+            if action_id == self.config.hand.grasp_action and self.config.hand.right_grasp_ros_action is not None:
+                return int(self.config.hand.right_grasp_ros_action)
+            if action_id == self.config.hand.default_action and self.config.hand.right_release_ros_action is not None:
+                return int(self.config.hand.right_release_ros_action)
+        return int(action_id)
+
     def _publish_hand_action(self, hand_side: str, action_id: int, reason: str, force: bool = False) -> None:
         now = time.time()
+        ros_action_id = self._ros_hand_action_id(hand_side, int(action_id))
         heartbeat_period = 1.0 / max(0.1, self.config.hand.heartbeat_hz)
-        changed = action_id != self._last_hand_actions[hand_side]
+        changed = ros_action_id != self._last_hand_actions[hand_side]
         heartbeat_due = now - self._last_hand_publish_time[hand_side] >= heartbeat_period
         if not force and self.config.hand.publish_on_change_only and not changed and not heartbeat_due:
             return
 
         action = Sysmo32HandAction(now, hand_side, int(action_id), reason=reason)
         if self.control_backend in ("real", "real_with_mujoco"):
-            published = self._ros2.publish_hand_action(hand_side, action.action_id)
+            published = self._ros2.publish_hand_action(hand_side, ros_action_id)
             if not published and self.control_backend == "real":
                 self._warn_safety("ros_hand_unavailable", f"ROS2 hand publisher unavailable for {hand_side}")
 
@@ -585,9 +629,15 @@ class Sysmo32RealControl(Component):
             )
             self._publisher_manager.publish(self.host, self._hand_action_mirror_port, topic, action)
 
-        self._last_hand_actions[hand_side] = action.action_id
+        self._last_hand_actions[hand_side] = ros_action_id
         self._last_hand_publish_time[hand_side] = now
-        logger.info("SYSMO-32 hand action: %s action=%d reason=%s", hand_side, action.action_id, reason)
+        logger.info(
+            "SYSMO-32 hand action: %s action=%d ros_action=%d reason=%s",
+            hand_side,
+            action.action_id,
+            ros_action_id,
+            reason,
+        )
 
     def _handle_reset_requests(self) -> None:
         for hand_side, subscriber, publish_port in (

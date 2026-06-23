@@ -59,6 +59,11 @@ from beavr.teleop.configs.constants import robots
 logger = logging.getLogger(__name__)
 
 UNITY_LEFT_TO_INTERNAL_RIGHT = np.array([1.0, 1.0, -1.0], dtype=np.float64)
+HAND_COMMAND_RELEASE = 1
+HAND_COMMAND_GRASP = 2
+PINCH_GRASP_ENTER_THRESHOLD_M = 0.035
+PINCH_GRASP_EXIT_THRESHOLD_M = 0.055
+PINCH_GRASP_CONFIRM_FRAMES = 2
 
 
 def _safe_normalize(vector, min_norm=1e-6):
@@ -202,12 +207,16 @@ class TransformHandPositionCoords(Component):
         self._last_receive_raw_input_log_time = 0.0
         self._last_publish_frame_log_time = 0.0
         self._last_timing_log_time = 0.0
+        self._pinch_hand_command = HAND_COMMAND_RELEASE
+        self._pinch_confirm_count = 0
 
     def _clear_smoothing_state(self):
         self.coord_moving_average_queue.clear()
         self.frame_moving_average_queue.clear()
         self.averaged_keypoints = None
         self.averaged_coordinate_frame = None
+        self._pinch_hand_command = HAND_COMMAND_RELEASE
+        self._pinch_confirm_count = 0
 
     def _get_arm_teleop_state(self):
         data = self.pause_subscriber.recv_keypoints()
@@ -277,6 +286,27 @@ class TransformHandPositionCoords(Component):
                 f"topic={self.frame_topic} port={self.keypoint_transform_pub_port} "
                 f"origin={origin} hand_command={hand_command}"
             )
+
+    def _infer_hand_command_from_thumb_index_distance(self, keypoints) -> int:
+        arr = np.asarray(keypoints, dtype=np.float64).reshape(-1, 3)
+        thumb_tip = arr[robots.OCULUS_JOINTS["thumb"][-1]]
+        index_tip = arr[robots.OCULUS_JOINTS["index"][-1]]
+        distance = float(np.linalg.norm(thumb_tip - index_tip))
+
+        if self._pinch_hand_command == HAND_COMMAND_GRASP:
+            if distance > PINCH_GRASP_EXIT_THRESHOLD_M:
+                self._pinch_hand_command = HAND_COMMAND_RELEASE
+                self._pinch_confirm_count = 0
+            return self._pinch_hand_command
+
+        if distance < PINCH_GRASP_ENTER_THRESHOLD_M:
+            self._pinch_confirm_count += 1
+            if self._pinch_confirm_count >= PINCH_GRASP_CONFIRM_FRAMES:
+                self._pinch_hand_command = HAND_COMMAND_GRASP
+        else:
+            self._pinch_confirm_count = 0
+            self._pinch_hand_command = HAND_COMMAND_RELEASE
+        return self._pinch_hand_command
 
     def _validate_hand_coords(self, hand_coords):
         if hand_coords is None or hand_coords.shape != (robots.OCULUS_NUM_KEYPOINTS, 3):
@@ -595,6 +625,8 @@ class TransformHandPositionCoords(Component):
                 self._resume_settle_frames_remaining -= 1
                 self.timer.end_loop()
                 continue
+
+            hand_command = self._infer_hand_command_from_thumb_index_distance(self.averaged_keypoints)
 
             # 6. 封装为InputFrame对象
             data = InputFrame(

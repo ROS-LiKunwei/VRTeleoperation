@@ -157,6 +157,11 @@ class Sysmo32RealControlCfg:
             hand=Sysmo32HandConfig(
                 default_action=1,
                 grasp_action=2,
+                left_grasp_ros_action=20,
+                left_release_ros_action=21,
+                right_grasp_ros_action=20,
+                right_release_ros_action=21,
+                use_vr_hand_command_actions=True,
                 publish_on_change_only=True,
                 heartbeat_hz=3.0,
                 grasp_enter_threshold_m=0.035,
