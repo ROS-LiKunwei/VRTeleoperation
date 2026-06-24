@@ -127,12 +127,17 @@ python beavr/scripts/control_robot.py \
 ```
 """
 
+import json
 import logging
 import multiprocessing  # Needed for process types (用于启动独立进程来处理遥操作等，避免阻塞主进程)
 import os
+import sys
 import time
 from dataclasses import asdict
+from pathlib import Path
 from pprint import pformat
+
+import numpy as np
 
 # from safetensors.torch import load_file, save_file
 from beavr.lerobot.common.datasets.lerobot_dataset import LeRobotDataset
@@ -168,6 +173,185 @@ from beavr.lerobot.configs import parser
 
 # 用于存储遥操作相关的多进程列表，在运行时会被填充
 _teleop_processes: list[multiprocessing.Process] | None = None  # Populated at runtime
+
+
+class _FaDatasetReplayPublisher:
+    """Publish FA dataset replay actions recorded as 7+7+2 joint/state vectors.
+
+    FA 录制时的 action 不是通用 BeavrBot 的笛卡尔命令格式，而是：
+    left_arm_7d_joint + right_arm_7d_joint + left/right gripper_state。
+    因此回放时需要绕过 BeavrBot.send_action() 的笛卡尔拆包逻辑，直接发布
+    FA 双臂 joint target 和 O6/手部 open/grasp 命令。
+    """
+
+    def __init__(self, fps: int | None):
+        _extend_sys_path_from_ament_prefix()
+        # 延迟导入 ROS2 依赖，避免普通录制/非 FA 回放在无 ROS 环境中导入失败。
+        try:
+            import rclpy
+            from min_snap.msg import MinSnapTarget
+            from std_msgs.msg import Int32
+        except Exception as exc:
+            raise RuntimeError(
+                "FA dataset replay requires a sourced ROS2 environment with min_snap.msg.MinSnapTarget "
+                "and std_msgs.msg.Int32 available. Run replay from a shell that has sourced both:\n"
+                "  source /opt/ros/humble/setup.bash\n"
+                "  source /home/likunwei/humanoid_ws/install/setup.bash\n"
+                "Then start control_robot.py from the same shell."
+            ) from exc
+
+        from beavr.teleop.components.interface.robots.fa_real_control import FaRealControlConfig
+        from beavr.teleop.configs.constants import robots
+
+        if not rclpy.ok():
+            rclpy.init(args=None)
+        self._rclpy = rclpy
+        self._node = rclpy.create_node("fa_dataset_replay")
+        self._robots = robots
+        self._msg_type = Int32
+        self._min_snap_msg_type = MinSnapTarget
+        config = FaRealControlConfig()
+        topics = config.ros2
+        # 双臂 joint-space 目标走 humanoid_ws/min_snap，和 FA real-control 内部发布路径保持一致。
+        self._min_snap_pub = self._node.create_publisher(
+            MinSnapTarget,
+            topics.min_snap_target_topic,
+            topics.min_snap_target_queue_size,
+        )
+        # 手部命令是独立 ROS Int32 topic，不属于 16D upper-body joint command。
+        self._left_hand_pub = self._node.create_publisher(
+            Int32, topics.left_hand_topic, topics.hand_command_queue_size
+        )
+        self._right_hand_pub = self._node.create_publisher(
+            Int32, topics.right_hand_topic, topics.hand_command_queue_size
+        )
+        self._open_ros_action = int(config.hand_open_ros_action)
+        self._grasp_ros_action = int(config.hand_grasp_ros_action)
+        # expected_duration_s 对齐 replay 帧率，使相邻帧目标按数据集采样节奏推进。
+        self._expected_duration_s = 1.0 / fps if fps else config.min_snap_expected_duration_s
+        self._max_velocity_rad_s = config.min_snap_max_velocity_rad_s
+        self._max_acceleration_rad_s2 = config.min_snap_max_acceleration_rad_s2
+
+    def publish(self, action) -> None:
+        action_np = np.asarray(action, dtype=np.float32).flatten()
+        if action_np.size != 16:
+            raise ValueError(
+                "FA replay action must contain 16 values (left7 + right7 + left/right hand), "
+                f"got {action_np.size}"
+            )
+
+        # action layout: [left_arm_7, right_arm_7, left_hand_state, right_hand_state]
+        arm_msg = self._min_snap_msg_type()
+        arm_msg.left_arm_target_rad = [float(value) for value in action_np[:7]]
+        arm_msg.right_arm_target_rad = [float(value) for value in action_np[7:14]]
+        arm_msg.expected_duration_s = float(self._expected_duration_s)
+        arm_msg.max_velocity_rad_s = float(self._max_velocity_rad_s)
+        arm_msg.max_acceleration_rad_s2 = float(self._max_acceleration_rad_s2)
+        self._min_snap_pub.publish(arm_msg)
+
+        self._publish_hand(self._robots.LEFT, action_np[14])
+        self._publish_hand(self._robots.RIGHT, action_np[15])
+        self._rclpy.spin_once(self._node, timeout_sec=0.0)
+
+    def _publish_hand(self, hand_side: str, gripper_state: float) -> None:
+        msg = self._msg_type()
+        msg.data = self._gripper_state_to_ros_action(gripper_state)
+        if hand_side == self._robots.LEFT:
+            self._left_hand_pub.publish(msg)
+        else:
+            self._right_hand_pub.publish(msg)
+
+    def _gripper_state_to_ros_action(self, gripper_state: float) -> int:
+        # 数据集里 0 表示打开，1 表示握紧；ROS 侧使用 FA 配置里的真实动作编号。
+        return self._grasp_ros_action if float(gripper_state) >= 0.5 else self._open_ros_action
+
+    def close(self) -> None:
+        self._node.destroy_node()
+
+
+def _extend_sys_path_from_ament_prefix() -> None:
+    """Restore ROS Python paths when users launch with PYTHONPATH=src.
+
+    `source /opt/ros/.../setup.bash` 和 `source humanoid_ws/install/setup.bash`
+    会设置 PYTHONPATH，但命令行前缀 `PYTHONPATH=src python ...` 会覆盖它。
+    AMENT_PREFIX_PATH 通常还保留着，所以这里从每个 prefix 推导 Python 包目录。
+    """
+    version_dir = f"python{sys.version_info.major}.{sys.version_info.minor}"
+    for prefix in os.environ.get("AMENT_PREFIX_PATH", "").split(os.pathsep):
+        if not prefix:
+            continue
+        for relative in (
+            Path("local") / "lib" / version_dir / "dist-packages",
+            Path("lib") / version_dir / "dist-packages",
+            Path("lib") / version_dir / "site-packages",
+        ):
+            candidate = Path(prefix) / relative
+            if candidate.is_dir():
+                candidate_text = str(candidate)
+                if candidate_text not in sys.path:
+                    sys.path.append(candidate_text)
+
+
+def _is_fa_bimanual_replay_action(robot: Robot, action) -> bool:
+    return getattr(robot, "robot_type", None) == "fa" and np.asarray(action).size == 16
+
+
+def _load_local_v30_replay_actions(root: str | Path | None, episode: int):
+    """Load actions from a local LeRobot v3.0 dataset without contacting Hugging Face.
+
+    当前仓库的 LeRobotDataset loader 仍以 v2.1 jsonl 元数据为主。录制命令如果设置
+    --control.dataset_format=v3.0，结束后会把本地数据转换成 parquet 元数据布局：
+    meta/tasks.parquet, meta/episodes/...parquet, data/chunk-xxx/file-xxx.parquet。
+    回放本地 v3.0 数据时直接读取这些 parquet 文件，避免误判本地缺文件后去 Hub 拉
+    repo_id，例如 local/fa_test。
+    """
+    if root is None:
+        return None
+    dataset_root = Path(root)
+    info_path = dataset_root / "meta" / "info.json"
+    if not info_path.is_file():
+        return None
+
+    with info_path.open("r", encoding="utf-8") as f:
+        info = json.load(f)
+    if str(info.get("codebase_version")) != "v3.0":
+        return None
+
+    try:
+        import pandas as pd
+    except Exception as exc:
+        raise RuntimeError(
+            "Local LeRobot v3.0 replay requires pandas with a parquet engine "
+            "(pyarrow or fastparquet) in the active Python environment."
+        ) from exc
+
+    # v3.0 episode 元数据按 chunk/file 分片，先合并索引表再定位目标 episode。
+    episode_rows = []
+    for episode_file in sorted((dataset_root / "meta" / "episodes").glob("chunk-*/file-*.parquet")):
+        episode_rows.append(pd.read_parquet(episode_file))
+    if not episode_rows:
+        raise FileNotFoundError(f"No v3.0 episode metadata found under {dataset_root / 'meta' / 'episodes'}")
+
+    episodes_df = pd.concat(episode_rows, ignore_index=True)
+    matches = episodes_df[episodes_df["episode_index"] == int(episode)]
+    if matches.empty:
+        available = sorted(int(value) for value in episodes_df["episode_index"].tolist())
+        raise ValueError(f"Episode {episode} not found in local v3.0 dataset. Available episodes: {available}")
+
+    row = matches.iloc[0]
+    data_path = info["data_path"].format(
+        chunk_index=int(row["data/chunk_index"]),
+        file_index=int(row["data/file_index"]),
+    )
+    # data parquet 中保存真正逐帧数据；这里只取 action，回放不需要图片和 observation。
+    data_df = pd.read_parquet(dataset_root / data_path)
+    if "episode_index" in data_df.columns:
+        data_df = data_df[data_df["episode_index"] == int(episode)]
+    if "frame_index" in data_df.columns:
+        data_df = data_df.sort_values("frame_index")
+    if "action" not in data_df.columns:
+        raise ValueError(f"Local v3.0 episode file has no action column: {dataset_root / data_path}")
+    return list(data_df["action"]), int(info["fps"])
 
 
 class _RecordTerminalLogFilter(logging.Filter):
@@ -522,25 +706,54 @@ def replay(
     # TODO: refactor with control_loop, once `dataset` is an instance of LeRobotDataset
     # TODO: Add option to record logs
 
-    dataset = LeRobotDataset(cfg.repo_id, root=cfg.root, episodes=[cfg.episode])
-    actions = dataset.hf_dataset.select_columns("action")
+    # Prefer local v3.0 parquet replay when available; fall back to the regular
+    # LeRobotDataset path for v2.1 datasets or Hub-backed datasets.
+    local_v30_actions = _load_local_v30_replay_actions(cfg.root, cfg.episode)
+    if local_v30_actions is None:
+        dataset = LeRobotDataset(cfg.repo_id, root=cfg.root, episodes=[cfg.episode])
+        actions = dataset.hf_dataset.select_columns("action")
+        num_frames = dataset.num_frames
+        replay_fps = cfg.fps or dataset.fps
+    else:
+        actions, dataset_fps = local_v30_actions
+        num_frames = len(actions)
+        replay_fps = cfg.fps or dataset_fps
+
+    fa_replay_publisher = None
+    if num_frames > 0:
+        first_action_item = actions[0]
+        first_action = first_action_item["action"] if isinstance(first_action_item, dict) else first_action_item
+        if _is_fa_bimanual_replay_action(robot, first_action):
+            # Initialize ROS publishers before opening cameras/robot adapters so a missing ROS environment
+            # fails early and does not briefly connect hardware resources.
+            fa_replay_publisher = _FaDatasetReplayPublisher(replay_fps)
 
     if not robot.is_connected:
         robot.connect()
 
     log_say("Replaying episode", cfg.play_sounds, blocking=True)
     # 按帧率逐帧发送动作
-    for idx in range(dataset.num_frames):
-        start_episode_t = time.perf_counter()
+    try:
+        for idx in range(num_frames):
+            start_episode_t = time.perf_counter()
 
-        action = actions[idx]["action"]
-        robot.send_action(action) # 将当前帧的动作发送给机器人
-        # 延时等待以匹配目标帧率(FPS)
-        dt_s = time.perf_counter() - start_episode_t
-        busy_wait(1 / cfg.fps - dt_s)
+            action_item = actions[idx]
+            # v2.1/HF dataset returns {"action": ...}; local v3.0 helper returns the raw action vector.
+            action = action_item["action"] if isinstance(action_item, dict) else action_item
+            if _is_fa_bimanual_replay_action(robot, action):
+                fa_replay_publisher.publish(action)
+            else:
+                robot.send_action(action) # 将当前帧的动作发送给机器人
+            # 延时等待以匹配目标帧率(FPS)
+            dt_s = time.perf_counter() - start_episode_t
+            if replay_fps:
+                busy_wait(1 / replay_fps - dt_s)
 
-        dt_s = time.perf_counter() - start_episode_t
-        log_control_info(robot, dt_s, fps=cfg.fps)
+            dt_s = time.perf_counter() - start_episode_t
+            log_control_info(robot, dt_s, fps=replay_fps)
+    finally:
+        if fa_replay_publisher is not None:
+            fa_replay_publisher.close()
 
 
 @parser.wrap()

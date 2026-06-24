@@ -1,0 +1,126 @@
+{
+    "codebase_version": "v3.0",
+    "robot_type": "fa",
+    "total_episodes": 2,
+    "total_frames": 1790,
+    "total_tasks": 1,
+    "total_videos": 2,
+    "total_chunks": 1,
+    "chunks_size": 1000,
+    "fps": 30,
+    "splits": {
+        "train": "0:2"
+    },
+    "data_path": "data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet",
+    "video_path": "videos/{video_key}/chunk-{chunk_index:03d}/file-{file_index:03d}.mp4",
+    "features": {
+        "observation.state": {
+            "shape": [
+                16
+            ],
+            "dtype": "float32",
+            "names": [
+                "fa_left_joint_0",
+                "fa_left_joint_1",
+                "fa_left_joint_2",
+                "fa_left_joint_3",
+                "fa_left_joint_4",
+                "fa_left_joint_5",
+                "fa_left_joint_6",
+                "fa_right_joint_0",
+                "fa_right_joint_1",
+                "fa_right_joint_2",
+                "fa_right_joint_3",
+                "fa_right_joint_4",
+                "fa_right_joint_5",
+                "fa_right_joint_6",
+                "left_hand_gripper_state",
+                "right_hand_gripper_state"
+            ]
+        },
+        "action": {
+            "shape": [
+                16
+            ],
+            "dtype": "float32",
+            "names": [
+                "fa_left_next_joint_0_rad",
+                "fa_left_next_joint_1_rad",
+                "fa_left_next_joint_2_rad",
+                "fa_left_next_joint_3_rad",
+                "fa_left_next_joint_4_rad",
+                "fa_left_next_joint_5_rad",
+                "fa_left_next_joint_6_rad",
+                "fa_right_next_joint_0_rad",
+                "fa_right_next_joint_1_rad",
+                "fa_right_next_joint_2_rad",
+                "fa_right_next_joint_3_rad",
+                "fa_right_next_joint_4_rad",
+                "fa_right_next_joint_5_rad",
+                "fa_right_next_joint_6_rad",
+                "left_hand_next_gripper_state",
+                "right_hand_next_gripper_state"
+            ]
+        },
+        "observation.images.front": {
+            "dtype": "video",
+            "shape": [
+                480,
+                640,
+                3
+            ],
+            "names": [
+                "height",
+                "width",
+                "channels"
+            ],
+            "info": {
+                "video.height": 480,
+                "video.width": 640,
+                "video.codec": "av1",
+                "video.pix_fmt": "yuv420p",
+                "video.is_depth_map": false,
+                "video.fps": 30,
+                "video.channels": 3,
+                "has_audio": false
+            }
+        },
+        "timestamp": {
+            "dtype": "float32",
+            "shape": [
+                1
+            ],
+            "names": null
+        },
+        "frame_index": {
+            "dtype": "int64",
+            "shape": [
+                1
+            ],
+            "names": null
+        },
+        "episode_index": {
+            "dtype": "int64",
+            "shape": [
+                1
+            ],
+            "names": null
+        },
+        "index": {
+            "dtype": "int64",
+            "shape": [
+                1
+            ],
+            "names": null
+        },
+        "task_index": {
+            "dtype": "int64",
+            "shape": [
+                1
+            ],
+            "names": null
+        }
+    },
+    "episodes_path": "meta/episodes/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet",
+    "episodes_stats_path": "meta/episodes_stats/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet"
+}
