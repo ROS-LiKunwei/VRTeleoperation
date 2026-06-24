@@ -160,7 +160,12 @@ class XArmOperator(Operator):
         self.stream_configs = stream_configs
 
         # State initialization
-        self.arm_teleop_state = robots.ARM_TELEOP_CONT  # 遥操作状态：默认持续控制
+        # 如果接入了 pause/resume 状态通道，启动时先等待"绿幕"/resume。
+        # 这样准备阶段收到的手部帧不会提前成为 Hand init H。
+        self._requires_resume_for_hand_init = teleoperation_state_port is not None
+        self.arm_teleop_state = (
+            robots.ARM_TELEOP_STOP if self._requires_resume_for_hand_init else robots.ARM_TELEOP_CONT
+        )
         self.resolution_scale = 1.0  # 分辨率缩放因子：默认1.0
         self.is_first_frame = True  # 是否为第一帧：默认为True，需要重置
         self._timer = FrequencyTimer(robots.VR_FREQ)  # 频率定时器：控制运行频率
@@ -184,12 +189,14 @@ class XArmOperator(Operator):
         self._last_reset_pose_wait_log_time: float = 0.0
         self._last_reset_hand_wait_log_time: float = 0.0
         self._last_no_hand_frame_log_time: float = 0.0
+        self._last_hand_timeout_log_time: float = 0.0
         self._last_publish_command_log_time: float = 0.0
         self._last_hand_frame_diag_time: float = 0.0
         self._last_command_publish_time: float = 0.0
         self._command_publish_count: int = 0
         self._last_command_rate_log_time: float = 0.0
         self._last_timing_log_time: float = 0.0
+        self._post_reset_hand_rebaseline_after_s: Optional[float] = None
 
         # Filter setup
         self.use_filter = use_filter  # 是否使用滤波器
@@ -282,7 +289,7 @@ class XArmOperator(Operator):
         从 ZMQ 订阅者获取最新的手部帧数据。
 
         当手部追踪数据丢失或无效时返回 None,使调用方跳过本轮发布。
-        如果缓存帧超过 hand_frame_timeout_s,会触发下一轮重新初始化 hand_init。
+        如果缓存帧超过 hand_frame_timeout_s,只暂停发布新目标，不重置 Hand init H。
 
         返回:
             一个 4x3 的 numpy 数组，代表手部坐标帧 ([t; R_列1; R_列2; R_列3])
@@ -336,26 +343,23 @@ class XArmOperator(Operator):
             now_s = time.time()
             last_hand_data_time = getattr(self, "_last_hand_data_time", None)
             if last_hand_data_time is not None and (now_s - last_hand_data_time) > self.hand_frame_timeout_s:
-                self._request_hand_timeout_rebaseline(now_s)
+                self._log_hand_frame_timeout(now_s - last_hand_data_time)
                 return None
             return self.last_valid_hand_frame
 
         # 如果既没有新数据也没有缓存帧，返回 None
         return None
 
-    def _request_hand_timeout_rebaseline(self, now_s: float) -> None:
-        """Force the next control loop to rebuild hand_init after tracking is stale."""
-        if self.is_first_frame:
+    def _log_hand_frame_timeout(self, gap_s: float) -> None:
+        """Report stale hand tracking without changing the post-resume hand baseline."""
+        now_s = time.time()
+        if now_s - getattr(self, "_last_hand_timeout_log_time", 0.0) < 1.0:
             return
+        self._last_hand_timeout_log_time = now_s
         logger.warning(
             f"{self.operator_name}: 手部数据超时(>{self.hand_frame_timeout_s:.2f}s), "
-            "已清除hand_init, 等待新VR手帧后自动重新初始化"
+            f"gap={gap_s:.2f}s, 保持当前Hand init H并等待下一帧"
         )
-        self.is_first_frame = True
-        self._ignore_hand_frames_before_s = now_s
-        self.hand_init_h = None
-        self.hand_init_t = None
-        self._clear_hand_tracking_cache()
 
     def _clear_hand_tracking_cache(self) -> None:
         """Clear hand-frame state so the next resume/reset cannot use stale VR data."""
@@ -366,6 +370,33 @@ class XArmOperator(Operator):
         self.hand_moving_h = None
         self.comp_filter = None
         self._arm_transformed_keypoint_subscriber.recv_keypoints()
+
+    def _rebaseline_hand_after_reset_if_needed(self) -> bool:
+        """Use the first hand frame after reset completion as the actual hand_init."""
+        min_timestamp_s = getattr(self, "_post_reset_hand_rebaseline_after_s", None)
+        if min_timestamp_s is None:
+            return False
+        moving_hand_frame = self._get_hand_frame(use_cache=False, min_timestamp_s=min_timestamp_s)
+        if moving_hand_frame is None:
+            self._log_reset_hand_wait()
+            return True
+        try:
+            self.hand_init_h = self._turn_frame_to_homo_mat(moving_hand_frame)
+            self.hand_init_t = copy(self.hand_init_h[:3, 3])
+            self.hand_moving_h = copy(self.hand_init_h)
+        except ValueError as e:
+            logger.error(f"ERROR ({self.operator_name}): Failed to rebaseline hand frame after reset: {e}")
+            return True
+        self.comp_filter = None
+        self._post_reset_hand_rebaseline_after_s = None
+        logger.info(
+            f"{self.operator_name} post-reset Hand init H:\n{self.hand_init_h}"
+        )
+        logger.info(
+            f"{self.operator_name}: post-reset hand baseline refreshed; "
+            "suppressing this frame so resume starts from the comfortable hand pose"
+        )
+        return True
 
     def _warn_invalid_hand_frame(self, reason: str) -> None:
         current_time = time.time()
@@ -648,13 +679,13 @@ class XArmOperator(Operator):
     # ------------------------------
     # Teleop reset logic
     # ------------------------------
-    def _reset_teleop(self, min_hand_timestamp_s: float = 0.0) -> Optional[np.ndarray]:
+    def _reset_teleop(self, min_hand_timestamp_s: float = 0.0, capture_hand_baseline: bool = True) -> bool:
         """
         通过捕捉当前机器人和手的姿态来重置远程操作baseline.
         发送重置信号并等待机器人的当前位姿,获取后更新robot_moving_h、robot_init_h、hand_init_h.
 
         Returns:
-            The initial moving hand frame (4x3) captured after reset, or None on failure.
+            True if reset completed, False on failure or pause interruption.
         """
 
         reset_started_at = time.time()
@@ -680,7 +711,7 @@ class XArmOperator(Operator):
                 self.is_first_frame = True
                 self._clear_hand_tracking_cache()
                 logger.info(f"{self.operator_name}: reset aborted because teleop paused while waiting robot pose")
-                return None
+                return False
             self._log_reset_pose_wait()
             self._publisher_manager.publish(
                 host=self._publisher_host,
@@ -709,11 +740,22 @@ class XArmOperator(Operator):
             # logger.error(f"ERROR ({self.operator_name}): Failed to process received robot frame: {e}")
             # 如果解析失败，标记为第一帧状态（以便下次循环重试）并退出
             self.is_first_frame = True  # Stay in reset state
-            return None
+            return False
 
         # 将当前计算出的目标位姿初始化为初始位姿
         self.robot_moving_h = copy(self.robot_init_h)  # 初始化机器人移动姿态为初始姿态
         logger.info(f"{self.operator_name} Robot init H:\n{self.robot_init_h}")
+
+        if not capture_hand_baseline:
+            # 绿幕/resume 后的第一帧新手部数据才允许写入 Hand init H。
+            # reset 阶段只同步机器人当前位姿，避免使用暂停/准备阶段缓存的手势。
+            self.hand_init_h = None
+            self.hand_init_t = None
+            self.hand_moving_h = None
+            self.is_first_frame = False
+            self.comp_filter = None
+            logger.info(f"{self.operator_name}: TELEOP RESET COMPLETE; waiting first post-resume hand frame")
+            return True
 
         # 4. 获取手部的初始位姿。连续读取几帧，避免使用 keypoint_transform
         # 滑动平均里残留的暂停期间历史帧作为恢复后的 hand_init。
@@ -725,7 +767,7 @@ class XArmOperator(Operator):
                 self.is_first_frame = True
                 self._clear_hand_tracking_cache()
                 logger.info(f"{self.operator_name}: reset aborted because teleop paused while waiting hand frame")
-                return None
+                return False
             self._log_reset_hand_wait()
             # 阻塞等待直到获取到有效的 VR 手部追踪数据
             candidate_hand_frame = self._get_hand_frame(
@@ -744,14 +786,14 @@ class XArmOperator(Operator):
         except ValueError as e:
             logger.error(f"ERROR ({self.operator_name}): Failed to convert initial hand frame to matrix: {e}")
             self.is_first_frame = True  # Stay in reset state
-            return None
+            return False
 
         # 5. 完成重置
         self.is_first_frame = False  # Reset successful
         self.comp_filter = None  # Reset filter, will be initialized on first _apply call
         logger.info(f"{self.operator_name}: TELEOP RESET COMPLETE")
         logger.info(f"[{self.operator_name}] hand_init_h\n{self.hand_init_h}")
-        return first_hand_frame  # Return the frame used for initialization
+        return True
 
     # ------------------------------
     # Main teleop: transforms
@@ -839,20 +881,30 @@ class XArmOperator(Operator):
 
         # 2. 处理重置逻辑（同步人手与机器人的起始位置）
         if needs_reset:
-            moving_hand_frame = self._reset_teleop(
+            reset_ok = self._reset_teleop(
                 min_hand_timestamp_s=self._ignore_hand_frames_before_s,
+                capture_hand_baseline=not self._requires_resume_for_hand_init,
             )  # 调用重置方法，返回当前手部基准帧
-            if moving_hand_frame is None:
+            if not reset_ok:
                 if self.arm_teleop_state != robots.ARM_TELEOP_STOP:
                     logger.error(f"ERROR ({self.operator_name}): Reset failed, cannot proceed.")
                 return  # Exit if reset failed
-            logger.info(
-                f"{self.operator_name}: reset complete; suppressing first post-reset command "
-                f"so current hand pose becomes the new baseline"
-            )
+            if self._requires_resume_for_hand_init:
+                logger.info(
+                    f"{self.operator_name}: reset complete; first post-resume hand frame will become Hand init H"
+                )
+                self._post_reset_hand_rebaseline_after_s = time.time()
+                self._clear_hand_tracking_cache()
+            else:
+                logger.info(
+                    f"{self.operator_name}: reset complete; suppressing first post-reset command "
+                    f"so current hand pose becomes the new baseline"
+                )
             return
         else:
             # 3. 正常运行模式：获取当前帧的手部追踪数据
+            if self._rebaseline_hand_after_reset_if_needed():
+                return
             moving_hand_frame = self._get_hand_frame()  # 获取当前手部帧
 
         # 如果无法获取有效的手部帧（可能丢包或追踪丢失），跳过本轮循环

@@ -2,7 +2,8 @@ import time
 
 import numpy as np
 
-from beavr.teleop.components.detector.detector_types import InputFrame
+from beavr.teleop.components.detector.detector_types import InputFrame, SessionCommand
+from beavr.teleop.components.interface.interface_types import CartesianState
 from beavr.teleop.components.operator.operator_types import CartesianTarget
 from beavr.teleop.components.operator.robots.xarm7_operator import XArmOperator
 from beavr.teleop.configs.constants import robots
@@ -32,7 +33,7 @@ def test_operator_publishes_cartesian_target(bus):
         stream_oculus=False,
         endeff_publish_port=endeff_publish_port,
         endeff_subscribe_port=endeff_subscribe_port,
-        moving_average_limit=3,
+        moving_average_limit=1,
         h_r_v=h_r_v,
         h_t_v=h_t_v,
         use_filter=False,
@@ -42,22 +43,13 @@ def test_operator_publishes_cartesian_target(bus):
         hand_side=robots.RIGHT,
     )
 
-    # Seed initial state by faking a robot pose response during reset
-    # The operator publishes 'reset' to endeff_publish_port; the robot would reply on endeff_subscribe_port
-    # For this focused test, we directly place a valid 4x4 identity pose on the robot feedback topic.
-    from beavr.teleop.components.interface.interface_types import CartesianState
+    op.robot_init_h = _identity4()
+    op.robot_moving_h = _identity4()
+    op.hand_init_h = _identity4()
+    op.hand_init_t = np.zeros(3)
+    op.is_first_frame = False
 
-    bus.publish(
-        host,
-        endeff_subscribe_port,
-        "endeff_homo",
-        CartesianState(
-            timestamp_s=time.time(),
-            h_matrix=tuple(map(tuple, np.eye(4).tolist())),
-        ),
-    )
-
-    # Provide a first hand frame to exit reset state. InputFrame.frame_vectors should be 4 vectors: origin + 3 axes.
+    # Provide a hand frame. InputFrame.frame_vectors should be 4 vectors: origin + 3 axes.
     # Here we simulate the right hand at origin with canonical axes; also provide some keypoints (not used for pose when frame_vectors present).
     origin = (0.0, 0.0, 0.0)
     x = (1.0, 0.0, 0.0)
@@ -68,37 +60,22 @@ def test_operator_publishes_cartesian_target(bus):
 
     # Publish hand frame for the right hand topic consumed by operator
     right_frame_topic = f"{robots.RIGHT}_{robots.TRANSFORMED_HAND_FRAME}"
-    bus.publish(
-        host,
-        transformed_keypoints_port,
-        right_frame_topic,
-        InputFrame(
-            timestamp_s=time.time(),
-            hand_side=robots.RIGHT,
-            keypoints=keypoints,
-            is_relative=False,
-            frame_vectors=frame_vectors,
-        ),
-    )
 
-    # First apply should reset and cache frames
-    op._apply_retargeted_angles()
+    def publish_hand_frame():
+        bus.publish(
+            host,
+            transformed_keypoints_port,
+            right_frame_topic,
+            InputFrame(
+                timestamp_s=time.time(),
+                hand_side=robots.RIGHT,
+                keypoints=keypoints,
+                is_relative=False,
+                frame_vectors=frame_vectors,
+            ),
+        )
 
-    # Provide another frame identical to produce a target command
-    bus.publish(
-        host,
-        transformed_keypoints_port,
-        right_frame_topic,
-        InputFrame(
-            timestamp_s=time.time(),
-            hand_side=robots.RIGHT,
-            keypoints=keypoints,
-            is_relative=False,
-            frame_vectors=frame_vectors,
-        ),
-    )
-
-    # Second apply should compute and publish a CartesianTarget when in CONT state
+    publish_hand_frame()
     op._apply_retargeted_angles()
 
     # Read what the operator published
@@ -146,7 +123,7 @@ def test_operator_rejects_nan_hand_frame():
     assert op._sanitize_hand_frame(frame) is None
 
 
-def test_operator_rebaseline_after_hand_frame_timeout():
+def test_operator_keeps_hand_init_after_hand_frame_timeout():
     op = XArmOperator.__new__(XArmOperator)
     op.operator_name = "xarm7_right_operator"
     op.hand_frame_timeout_s = 0.01
@@ -160,6 +137,7 @@ def test_operator_rebaseline_after_hand_frame_timeout():
     op.hand_init_h = np.eye(4)
     op.hand_init_t = np.zeros(3)
     op._ignore_hand_frames_before_s = 0.0
+    op._last_hand_timeout_log_time = 0.0
     op._arm_transformed_keypoint_subscriber = type(
         "EmptyHandFrameSubscriber",
         (),
@@ -169,11 +147,141 @@ def test_operator_rebaseline_after_hand_frame_timeout():
     result = op._get_hand_frame()
 
     assert result is None
-    assert op.is_first_frame is True
+    assert op.is_first_frame is False
+    np.testing.assert_allclose(op.hand_init_h, np.eye(4))
+    np.testing.assert_allclose(op.hand_init_t, np.zeros(3))
+    assert op.last_valid_hand_frame is not None
+    assert op.latest_hand_command == 1
+    assert op._last_hand_data_time > 0.0
+    assert op._last_hand_frame_timestamp_s > 0.0
+    assert op._ignore_hand_frames_before_s == 0.0
+
+
+def test_operator_refreshes_hand_init_after_reset_completion(monkeypatch):
+    op = XArmOperator.__new__(XArmOperator)
+    op.operator_name = "xarm7_right_operator"
+    op._post_reset_hand_rebaseline_after_s = 10.0
+    op.comp_filter = object()
+    op._last_reset_hand_wait_log_time = 0.0
+    op._log_reset_hand_wait = lambda: None
+    op._turn_frame_to_homo_mat = XArmOperator._turn_frame_to_homo_mat.__get__(op, XArmOperator)
+
+    frame = np.asarray(
+        [
+            [0.2, 0.3, 0.4],
+            [1.2, 0.3, 0.4],
+            [0.2, 1.3, 0.4],
+            [0.2, 0.3, 1.4],
+        ],
+        dtype=np.float64,
+    )
+    calls = []
+
+    def get_hand_frame(use_cache=True, min_timestamp_s=0.0):
+        calls.append((use_cache, min_timestamp_s))
+        return frame
+
+    op._get_hand_frame = get_hand_frame
+
+    assert op._rebaseline_hand_after_reset_if_needed()
+
+    assert calls == [(False, 10.0)]
+    np.testing.assert_allclose(op.hand_init_h[:3, 3], frame[0])
+    np.testing.assert_allclose(op.hand_moving_h, op.hand_init_h)
+    assert op.hand_init_t is not None
+    assert op.comp_filter is None
+    assert op._post_reset_hand_rebaseline_after_s is None
+
+
+def test_operator_uses_first_post_resume_hand_frame_for_hand_init(bus):
+    host = "127.0.0.1"
+    transformed_keypoints_port = 5555
+    endeff_publish_port = 7777
+    endeff_subscribe_port = 6666
+    teleop_state_port = 8888
+    hand_topic = f"{robots.RIGHT}_{robots.TRANSFORMED_HAND_FRAME}"
+
+    op = XArmOperator(
+        operator_name="xarm7_right_operator",
+        host=host,
+        transformed_keypoints_port=transformed_keypoints_port,
+        stream_configs={},
+        stream_oculus=False,
+        endeff_publish_port=endeff_publish_port,
+        endeff_subscribe_port=endeff_subscribe_port,
+        moving_average_limit=1,
+        h_r_v=_identity4(),
+        h_t_v=_identity4(),
+        use_filter=False,
+        arm_resolution_port=None,
+        teleoperation_state_port=teleop_state_port,
+        logging_config={"enabled": False},
+        hand_side=robots.RIGHT,
+    )
+
+    stale_frame = (
+        (9.0, 9.0, 9.0),
+        (1.0, 0.0, 0.0),
+        (0.0, 1.0, 0.0),
+        (0.0, 0.0, 1.0),
+    )
+    post_resume_frame = (
+        (0.2, 0.3, 0.4),
+        (1.0, 0.0, 0.0),
+        (0.0, 1.0, 0.0),
+        (0.0, 0.0, 1.0),
+    )
+    keypoints = [(0.0, 0.0, 0.0)] * robots.OCULUS_NUM_KEYPOINTS
+
+    # 绿幕/resume 前即使 PICO 已在稳定发送，也不能提前建立 Hand init H。
+    bus.publish(
+        host,
+        transformed_keypoints_port,
+        hand_topic,
+        InputFrame(
+            timestamp_s=time.time(),
+            hand_side=robots.RIGHT,
+            keypoints=keypoints,
+            is_relative=False,
+            frame_vectors=stale_frame,
+        ),
+    )
+    op._apply_retargeted_angles()
     assert op.hand_init_h is None
-    assert op.hand_init_t is None
-    assert op.last_valid_hand_frame is None
-    assert op.latest_hand_command is None
-    assert op._last_hand_data_time == 0.0
-    assert op._last_hand_frame_timestamp_s == 0.0
-    assert op._ignore_hand_frames_before_s > 0.0
+
+    resume_timestamp_s = time.time()
+    bus.publish(
+        host,
+        teleop_state_port,
+        "pause",
+        SessionCommand(timestamp_s=resume_timestamp_s, command=robots.RESUME),
+    )
+    bus.publish(
+        host,
+        endeff_subscribe_port,
+        "endeff_homo",
+        CartesianState(
+            timestamp_s=time.time(),
+            h_matrix=tuple(map(tuple, np.eye(4).tolist())),
+        ),
+    )
+    op._apply_retargeted_angles()
+    assert op.robot_init_h is not None
+    assert op.hand_init_h is None
+
+    bus.publish(
+        host,
+        transformed_keypoints_port,
+        hand_topic,
+        InputFrame(
+            timestamp_s=time.time(),
+            hand_side=robots.RIGHT,
+            keypoints=keypoints,
+            is_relative=False,
+            frame_vectors=post_resume_frame,
+        ),
+    )
+    op._apply_retargeted_angles()
+
+    np.testing.assert_allclose(op.hand_init_h[:3, 3], np.asarray(post_resume_frame[0]))
+    assert not np.allclose(op.hand_init_h[:3, 3], np.asarray(stale_frame[0]))

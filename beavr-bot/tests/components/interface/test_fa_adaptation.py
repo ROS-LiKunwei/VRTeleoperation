@@ -1,5 +1,4 @@
 import csv
-
 import numpy as np
 import pytest
 import sys
@@ -28,6 +27,7 @@ from beavr.teleop.components.interface.robots.fa_mujoco_kinematics import (
     FaMujocoKinematics,
 )
 from beavr.teleop.components.interface.robots.fa_real_control import FaRealControl, FaRealControlConfig
+from beavr.teleop.components.interface.robots import fa_real_control as fa_real_control_module
 from beavr.teleop.components.operator.operator_types import CartesianTarget
 from beavr.teleop.components.operator.robots.fa_operator import H_R_V_FA
 from beavr.teleop.components.operator.robots.sysmo32_operator import H_R_V_SYSMO32
@@ -80,6 +80,149 @@ def test_fa_config_routes_backends():
     assert mirror_cfg.environment[0].kinematics_type == "fa"
     assert mirror_cfg.environment[0].interpolation_profile == "linear"
     assert not mirror_cfg.environment[0].publish_joint_states
+
+
+def test_fa_mujoco_initial_pose_waits_for_joint_state():
+    controller = FaRealControl.__new__(FaRealControl)
+    controller.config = FaRealControlConfig(
+        initial_pose_enabled=True,
+        initial_left_arm_positions_rad=tuple([0.1] * 7),
+        initial_right_arm_positions_rad=tuple([0.2] * 7),
+    )
+    controller.control_backend = "mujoco"
+    controller._startup_initial_pose_armed = True
+    controller._initial_pose_done = False
+    controller._initial_pose_started_at_s = None
+    controller._real_joint_state_fresh = lambda: False
+    warnings = []
+    controller._warn_safety = lambda key, message: warnings.append((key, message))
+    controller._current_joint_snapshot = lambda: (_ for _ in ()).throw(AssertionError("snapshot should not be read"))
+
+    controller._publish_initial_pose_if_needed()
+
+    assert controller._initial_pose_started_at_s is None
+    assert warnings == [("initial_pose_joint_state_stale", "FA initial pose held until fresh /joint_states")]
+
+
+def test_fa_real_with_mujoco_initial_pose_publishes_native_upper_command():
+    class FakeRos2:
+        def __init__(self):
+            self.upper_commands = []
+            self.min_snap_commands = []
+
+        def publish_upper_position_command(self, command):
+            self.upper_commands.append(command)
+            return True
+
+        def publish_min_snap_target(self, command, expected_duration_s, max_velocity_rad_s, max_acceleration_rad_s2):
+            self.min_snap_commands.append(
+                (command, expected_duration_s, max_velocity_rad_s, max_acceleration_rad_s2)
+            )
+            return True
+
+    class ResetRecorder:
+        def __init__(self):
+            self.values = []
+
+        def reset(self, value):
+            self.values.append(tuple(value))
+
+    controller = FaRealControl.__new__(FaRealControl)
+    controller.config = FaRealControlConfig(
+        control_backend="real_with_mujoco",
+        initial_pose_enabled=True,
+        initial_left_arm_positions_rad=tuple([0.1] * 7),
+        initial_right_arm_positions_rad=tuple([0.2] * 7),
+    )
+    controller.control_backend = "real_with_mujoco"
+    controller._startup_initial_pose_armed = True
+    controller._initial_pose_done = False
+    controller._initial_pose_started_at_s = None
+    controller._ros2 = FakeRos2()
+    controller._builder = FaUpperPositionCommandBuilder()
+    controller._limiter = ResetRecorder()
+    controller._real_joint_state_fresh = lambda: True
+    controller._warn_safety = lambda key, message: (_ for _ in ()).throw(AssertionError(message))
+    snapshot = FaJointStateSnapshot(
+        timestamp_s=1.0,
+        left_arm=tuple([0.0] * 7),
+        right_arm=tuple([0.0] * 7),
+        neck=(0.3, 0.4),
+    )
+    controller._current_joint_snapshot = lambda: snapshot
+
+    controller._publish_initial_pose_if_needed()
+
+    assert controller._ros2.min_snap_commands == []
+    assert len(controller._ros2.upper_commands) == 1
+    command = controller._ros2.upper_commands[0]
+    assert command.left_arm == pytest.approx(tuple([0.1] * 7))
+    assert command.right_arm == pytest.approx(tuple([0.2] * 7))
+    assert command.neck == pytest.approx((0.3, 0.4))
+    assert controller._last_published_upper_command is command
+    assert controller._initial_pose_started_at_s is not None
+    assert controller._active_arm_goals[robots.LEFT] == pytest.approx(np.asarray([0.1] * 7))
+    assert controller._active_arm_goals[robots.RIGHT] == pytest.approx(np.asarray([0.2] * 7))
+
+
+def test_fa_real_with_mujoco_initial_pose_republishes_during_startup_window(monkeypatch):
+    class FakeRos2:
+        def __init__(self):
+            self.upper_commands = []
+
+        def publish_upper_position_command(self, command):
+            self.upper_commands.append(command)
+            return True
+
+    controller = FaRealControl.__new__(FaRealControl)
+    controller.config = FaRealControlConfig(
+        control_backend="real_with_mujoco",
+        initial_pose_enabled=True,
+        initial_left_arm_positions_rad=tuple([0.1] * 7),
+        initial_right_arm_positions_rad=tuple([0.2] * 7),
+        pause_hold_heartbeat_hz=20.0,
+    )
+    controller.control_backend = "real_with_mujoco"
+    controller._startup_initial_pose_armed = True
+    controller._initial_pose_done = False
+    controller._initial_pose_started_at_s = 10.0
+    controller._last_initial_pose_publish_time_s = 10.0
+    controller._last_published_upper_command = FaUpperPositionCommand(
+        timestamp_s=10.0,
+        values=tuple([0.1] * 7 + [0.2] * 7 + [0.3, 0.4]),
+    )
+    controller._ros2 = FakeRos2()
+    controller._warn_safety = lambda key, message: (_ for _ in ()).throw(AssertionError(message))
+
+    monkeypatch.setattr(fa_real_control_module.time, "time", lambda: 10.02)
+    controller._publish_initial_pose_if_needed()
+    assert controller._ros2.upper_commands == []
+
+    monkeypatch.setattr(fa_real_control_module.time, "time", lambda: 10.06)
+    controller._publish_initial_pose_if_needed()
+
+    assert len(controller._ros2.upper_commands) == 1
+    assert controller._ros2.upper_commands[0].left_arm == pytest.approx(tuple([0.1] * 7))
+    assert controller._ros2.upper_commands[0].right_arm == pytest.approx(tuple([0.2] * 7))
+
+
+def test_fa_initial_pose_ready_logs_teleop_prompt_once(monkeypatch):
+    controller = FaRealControl.__new__(FaRealControl)
+    controller.config = FaRealControlConfig(initial_pose_duration_s=5.0)
+    controller._initial_pose_done = False
+    controller._initial_pose_started_at_s = 10.0
+    controller._teleop_ready_prompt_logged = False
+    messages = []
+    monkeypatch.setattr(
+        fa_real_control_module.logger,
+        "info",
+        lambda message, *args: messages.append(message % args if args else message),
+    )
+
+    assert controller._initial_pose_ready(now_s=15.0)
+    assert controller._initial_pose_ready(now_s=16.0)
+
+    assert messages.count("FA 已到达准备位置，可以开始遥操作。") == 1
 
 
 def test_fa_upper_position_command_builder_maps_7d_arms_and_neck_to_16d_payload():
@@ -419,6 +562,156 @@ def test_fa_real_control_ignores_duplicate_session_state_commands():
     controller._handle_session_command()
 
     assert entered_pause == []
+
+
+def test_fa_pause_syncs_current_joints_as_next_ik_reference():
+    class ResetRecorder:
+        def __init__(self):
+            self.values = []
+
+        def reset(self, value):
+            self.values.append(tuple(value))
+
+    controller = FaRealControl.__new__(FaRealControl)
+    controller.config = FaRealControlConfig(safety_hold_arm_on_pause=True)
+    controller.control_backend = "real_with_mujoco"
+    controller._teleop_active = True
+    controller._needs_reset = False
+    controller._real_reset_ready = True
+    controller._latest_targets = {robots.LEFT: object(), robots.RIGHT: object()}
+    controller._latest_target_keys = {robots.LEFT: ("old",), robots.RIGHT: ("old",)}
+    controller._active_arm_goals = {robots.LEFT: np.asarray([9.0] * 7), robots.RIGHT: np.asarray([9.0] * 7)}
+    controller._arm_goal_dirty = {robots.LEFT: True, robots.RIGHT: True}
+    controller._last_safe_arm_targets = {
+        robots.LEFT: np.asarray([8.0] * 7),
+        robots.RIGHT: np.asarray([8.0] * 7),
+    }
+    controller._last_ik_cartesian_targets = {robots.LEFT: object(), robots.RIGHT: object()}
+    controller._builder = FaUpperPositionCommandBuilder()
+    controller._limiter = ResetRecorder()
+    controller._resume_hold_until_target = True
+    controller._last_pause_hold_publish_time = 0.0
+    published = []
+    controller._publish_upper_command_outputs = (
+        lambda command, require_real_reset=False, allow_stale_real_hold=False: published.append(command) or True
+    )
+    snapshot = FaJointStateSnapshot(
+        timestamp_s=1.0,
+        left_arm=tuple([0.1] * 7),
+        right_arm=tuple([0.2] * 7),
+        neck=(0.3, 0.4),
+    )
+    controller._real_joint_state_fresh = lambda: True
+    controller._current_joint_snapshot = lambda: snapshot
+
+    controller._enter_pause("unit-test pause")
+
+    assert not controller._teleop_active
+    assert controller._last_safe_arm_targets[robots.LEFT] == pytest.approx(np.asarray([0.1] * 7))
+    assert controller._last_safe_arm_targets[robots.RIGHT] == pytest.approx(np.asarray([0.2] * 7))
+    assert controller._last_ik_cartesian_targets == {robots.LEFT: None, robots.RIGHT: None}
+    assert len(controller._limiter.values) == 1
+    assert np.allclose(controller._limiter.values[0], snapshot.upper_joints)
+    assert controller._pause_hold_command.left_arm == pytest.approx(tuple([0.1] * 7))
+    assert controller._pause_hold_command.right_arm == pytest.approx(tuple([0.2] * 7))
+    assert published
+    assert not controller._resume_hold_until_target
+
+
+def test_fa_resume_holds_pause_pose_until_first_valid_target():
+    class FakePauseSubscriber:
+        def __init__(self, messages):
+            self.messages = list(messages)
+
+        def recv_keypoints(self):
+            if not self.messages:
+                return None
+            return self.messages.pop(0)
+
+    class FakeTargetSubscriber:
+        def __init__(self, message=None):
+            self.message = message
+
+        def recv_keypoints(self):
+            message = self.message
+            self.message = None
+            return message
+
+    class ResetRecorder:
+        def __init__(self):
+            self.values = []
+
+        def reset(self, value):
+            self.values.append(tuple(value))
+
+    controller = FaRealControl.__new__(FaRealControl)
+    controller.config = FaRealControlConfig(safety_hold_arm_on_pause=True)
+    controller.control_backend = "real_with_mujoco"
+    controller._teleop_active = False
+    controller._needs_reset = False
+    controller._real_reset_ready = False
+    controller._latest_targets = {robots.LEFT: object(), robots.RIGHT: object()}
+    controller._latest_target_keys = {robots.LEFT: ("old",), robots.RIGHT: ("old",)}
+    controller._active_arm_goals = {robots.LEFT: np.asarray([9.0] * 7), robots.RIGHT: np.asarray([9.0] * 7)}
+    controller._arm_goal_dirty = {robots.LEFT: True, robots.RIGHT: True}
+    controller._last_safe_arm_targets = {
+        robots.LEFT: np.asarray([8.0] * 7),
+        robots.RIGHT: np.asarray([8.0] * 7),
+    }
+    controller._last_ik_cartesian_targets = {robots.LEFT: object(), robots.RIGHT: object()}
+    controller._builder = FaUpperPositionCommandBuilder()
+    controller._limiter = ResetRecorder()
+    controller._last_pause_hold_publish_time = 0.0
+    controller._pause_subscriber = FakePauseSubscriber([SimpleNamespace(command=robots.RESUME)])
+    controller._warn_safety = lambda key, message: (_ for _ in ()).throw(AssertionError(message))
+    snapshot = FaJointStateSnapshot(
+        timestamp_s=1.0,
+        left_arm=tuple([0.3] * 7),
+        right_arm=tuple([0.4] * 7),
+        neck=(0.5, 0.6),
+    )
+    controller._real_joint_state_fresh = lambda: True
+    controller._current_joint_snapshot = lambda: snapshot
+
+    controller._handle_session_command()
+
+    assert controller._teleop_active
+    assert controller._needs_reset
+    assert not controller._real_reset_ready
+    assert controller._latest_targets == {robots.LEFT: None, robots.RIGHT: None}
+    assert controller._latest_target_keys == {robots.LEFT: None, robots.RIGHT: None}
+    assert controller._active_arm_goals == {robots.LEFT: None, robots.RIGHT: None}
+    assert controller._arm_goal_dirty == {robots.LEFT: False, robots.RIGHT: False}
+    assert controller._last_safe_arm_targets[robots.LEFT] == pytest.approx(np.asarray([0.3] * 7))
+    assert controller._last_safe_arm_targets[robots.RIGHT] == pytest.approx(np.asarray([0.4] * 7))
+    assert controller._last_ik_cartesian_targets == {robots.LEFT: None, robots.RIGHT: None}
+    assert controller._pause_hold_command.left_arm == pytest.approx(tuple([0.3] * 7))
+    assert controller._pause_hold_command.right_arm == pytest.approx(tuple([0.4] * 7))
+    assert controller._resume_hold_until_target
+
+    published = []
+    controller._publish_upper_command_outputs = (
+        lambda command, require_real_reset=False, allow_stale_real_hold=False: published.append(
+            (command, require_real_reset, allow_stale_real_hold)
+        )
+        or True
+    )
+    controller._publish_pause_hold_if_needed(force=True)
+
+    assert published
+    assert published[-1][0].left_arm == pytest.approx(tuple([0.3] * 7))
+    assert published[-1][1] is False
+    assert published[-1][2] is True
+
+    target = SimpleNamespace(hand_side=robots.LEFT, hand_command=None)
+    controller._left_target_subscriber = FakeTargetSubscriber(target)
+    controller._right_target_subscriber = FakeTargetSubscriber()
+    controller._publish_hand_command_on_edge = lambda hand_side, hand_command: None
+
+    controller._receive_cartesian_targets()
+
+    assert not controller._resume_hold_until_target
+    assert controller._latest_targets[robots.LEFT] is target
 
 
 def test_fa_real_control_holds_large_ik_solution_jump():

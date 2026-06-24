@@ -178,6 +178,8 @@ class FaRos2Bridge:
         self._rclpy = None
         self._node = None
         self._min_snap_target_publisher = None
+        self._upper_position_publisher = None
+        self._upper_position_msg_type = None
         self._left_hand_pub = None
         self._right_hand_pub = None
         self._hand_msg_type = None
@@ -189,18 +191,24 @@ class FaRos2Bridge:
             import rclpy
             from min_snap.msg import MinSnapTarget
             from sensor_msgs.msg import JointState
-            from std_msgs.msg import Int32
+            from std_msgs.msg import Float64MultiArray, Int32
 
             self._rclpy = rclpy
             if not rclpy.ok():
                 rclpy.init(args=None)
             self._node = rclpy.create_node(node_name)
             self._hand_msg_type = Int32
+            self._upper_position_msg_type = Float64MultiArray
             self._min_snap_target_publisher = MinSnapTargetPublisher(
                 ros_node=self._node,
                 msg_type=MinSnapTarget,
                 topic=self.topics.min_snap_target_topic,
                 queue_size=self.topics.min_snap_target_queue_size,
+            )
+            self._upper_position_publisher = self._node.create_publisher(
+                Float64MultiArray,
+                self.topics.upper_position_command_topic,
+                self.topics.upper_position_command_queue_size,
             )
             self._left_hand_pub = self._node.create_publisher(
                 Int32, self.topics.left_hand_topic, self.topics.hand_command_queue_size
@@ -257,6 +265,14 @@ class FaRos2Bridge:
             max_velocity_rad_s,
             max_acceleration_rad_s2,
         )
+
+    def publish_upper_position_command(self, command: FaUpperPositionCommand) -> bool:
+        if not self.available or self._upper_position_publisher is None or self._upper_position_msg_type is None:
+            return False
+        msg = self._upper_position_msg_type()
+        msg.data = [float(value) for value in command.values]
+        self._upper_position_publisher.publish(msg)
+        return True
 
     def close(self) -> None:
         if self._node is not None:
@@ -350,6 +366,7 @@ class FaRealControl(Component):
         self._last_safe_arm_targets: Dict[str, Optional[np.ndarray]] = {robots.LEFT: None, robots.RIGHT: None}
         self._last_ik_cartesian_targets: Dict[str, Optional[CartesianTarget]] = {robots.LEFT: None, robots.RIGHT: None}
         self._pause_hold_command: Optional[FaUpperPositionCommand] = None
+        self._resume_hold_until_target = False
         self._last_pause_hold_publish_time = 0.0
         self._next_state_publish_time_s = 0.0
         self._last_published_upper_command: Optional[FaUpperPositionCommand] = None
@@ -361,6 +378,8 @@ class FaRealControl(Component):
         self._startup_initial_hand_armed = self.config.initial_hand_ros_action is not None
         self._initial_pose_started_at_s: Optional[float] = None
         self._initial_pose_done = not self.config.initial_pose_enabled
+        self._teleop_ready_prompt_logged = not self.config.initial_pose_enabled
+        self._last_initial_pose_publish_time_s = 0.0
         self._last_safety_log_time: Dict[str, float] = {}
 
     def _make_default_ik_client(self) -> FaArmIkClientBase:
@@ -408,7 +427,14 @@ class FaRealControl(Component):
             self._latest_target_keys = {robots.LEFT: None, robots.RIGHT: None}
             self._active_arm_goals = {robots.LEFT: None, robots.RIGHT: None}
             self._arm_goal_dirty = {robots.LEFT: False, robots.RIGHT: False}
-            self._pause_hold_command = None
+            snapshot = self._resume_hold_snapshot()
+            if snapshot is not None:
+                # Resume should seed the next IK solve from the actual arm state,
+                # not from the last pre-pause IK branch.
+                self._sync_ik_reference_from_snapshot(snapshot, reset_limiter=True)
+                if self.config.safety_hold_arm_on_pause:
+                    self._pause_hold_command = self._builder.build(snapshot.left_arm, snapshot.right_arm, snapshot.neck)
+            self._resume_hold_until_target = self.config.safety_hold_arm_on_pause and self._pause_hold_command is not None
 
     def _initial_pose_ready(self, now_s: Optional[float] = None) -> bool:
         if self._initial_pose_done:
@@ -419,7 +445,14 @@ class FaRealControl(Component):
         if now - self._initial_pose_started_at_s < self.config.initial_pose_duration_s:
             return False
         self._initial_pose_done = True
+        self._log_teleop_ready_once()
         return True
+
+    def _log_teleop_ready_once(self) -> None:
+        if getattr(self, "_teleop_ready_prompt_logged", False):
+            return
+        self._teleop_ready_prompt_logged = True
+        logger.info("FA 已到达准备位置，可以开始遥操作。")
 
     def _publish_initial_hand_pose_if_needed(self) -> None:
         if not self._startup_initial_hand_armed:
@@ -440,13 +473,16 @@ class FaRealControl(Component):
 
     def _publish_initial_pose_if_needed(self) -> None:
         initial_pose_armed = getattr(self, "_startup_initial_pose_armed", self.config.initial_pose_enabled)
-        if not initial_pose_armed or self._initial_pose_done or self._initial_pose_started_at_s is not None:
+        if not initial_pose_armed or self._initial_pose_done:
+            return
+        if self._initial_pose_started_at_s is not None:
+            self._republish_initial_pose_if_needed()
             return
         if not self.config.initial_pose_enabled:
             self._initial_pose_done = True
             self._startup_initial_pose_armed = False
             return
-        if self.control_backend in ("real", "real_with_mujoco") and not self._real_joint_state_fresh():
+        if self._initial_pose_requires_fresh_joint_state() and not self._real_joint_state_fresh():
             self._warn_safety("initial_pose_joint_state_stale", "FA initial pose held until fresh /joint_states")
             return
         snapshot = self._current_joint_snapshot()
@@ -456,7 +492,13 @@ class FaRealControl(Component):
         left = np.asarray(self.config.initial_left_arm_positions_rad, dtype=np.float64)
         right = np.asarray(self.config.initial_right_arm_positions_rad, dtype=np.float64)
         command = self._builder.build(left, right, snapshot.neck, timestamp_s=time.time())
-        if not self._ros2.publish_min_snap_target(
+        if self.control_backend in ("real", "real_with_mujoco"):
+            # The native FA controller consumes /upper_position_controller/commands.
+            # Startup must not depend on an external min_snap relay being alive.
+            if not self._ros2.publish_upper_position_command(command):
+                self._warn_safety("initial_pose_upper_unavailable", "FA initial upper-position publisher unavailable")
+                return
+        elif not self._ros2.publish_min_snap_target(
             command,
             self.config.initial_pose_duration_s,
             self.config.initial_pose_max_velocity_rad_s,
@@ -468,6 +510,7 @@ class FaRealControl(Component):
         self._startup_initial_pose_armed = False
         self._last_min_snap_target_command = command
         self._last_min_snap_target_publish_time_s = self._initial_pose_started_at_s
+        self._last_initial_pose_publish_time_s = self._initial_pose_started_at_s
         self._last_published_upper_command = command
         self._active_arm_goals = {robots.LEFT: left.copy(), robots.RIGHT: right.copy()}
         self._arm_goal_dirty = {robots.LEFT: False, robots.RIGHT: False}
@@ -482,6 +525,24 @@ class FaRealControl(Component):
             self.config.initial_pose_max_acceleration_rad_s2,
         )
 
+    def _republish_initial_pose_if_needed(self) -> None:
+        if self.control_backend not in ("real", "real_with_mujoco"):
+            return
+        command = getattr(self, "_last_published_upper_command", None)
+        if command is None:
+            return
+        now = time.time()
+        period_s = 1.0 / max(1.0, float(self.config.pause_hold_heartbeat_hz))
+        if now - getattr(self, "_last_initial_pose_publish_time_s", 0.0) < period_s:
+            return
+        if not self._ros2.publish_upper_position_command(command):
+            self._warn_safety("initial_pose_upper_unavailable", "FA initial upper-position publisher unavailable")
+            return
+        self._last_initial_pose_publish_time_s = now
+
+    def _initial_pose_requires_fresh_joint_state(self) -> bool:
+        return self.control_backend in ("mujoco", "real", "real_with_mujoco")
+
     def _enter_pause(self, reason: str) -> None:
         self._teleop_active = False
         self._needs_reset = True
@@ -492,10 +553,12 @@ class FaRealControl(Component):
         self._arm_goal_dirty = {robots.LEFT: False, robots.RIGHT: False}
         snapshot = self._pause_hold_snapshot()
         if snapshot is not None:
-            self._limiter.reset(snapshot.upper_joints)
+            # The paused pose becomes the safe reference for the next resume.
+            self._sync_ik_reference_from_snapshot(snapshot, reset_limiter=True)
             if self.config.safety_hold_arm_on_pause:
                 self._pause_hold_command = self._builder.build(snapshot.left_arm, snapshot.right_arm, snapshot.neck)
                 self._publish_pause_hold_if_needed(force=True, reason=reason)
+        self._resume_hold_until_target = False
 
     def _pause_hold_snapshot(self) -> Optional[FaJointStateSnapshot]:
         if self.control_backend in ("real", "real_with_mujoco") and not self._real_joint_state_fresh():
@@ -503,8 +566,27 @@ class FaRealControl(Component):
             return None
         return self._current_joint_snapshot()
 
+    def _resume_hold_snapshot(self) -> Optional[FaJointStateSnapshot]:
+        if self.control_backend in ("real", "real_with_mujoco") and not self._real_joint_state_fresh():
+            self._warn_safety("resume_joint_state_stale", "resume hold uses previous pause target: /joint_states is stale")
+            return None
+        return self._current_joint_snapshot()
+
+    def _sync_ik_reference_from_snapshot(self, snapshot: FaJointStateSnapshot, reset_limiter: bool = False) -> None:
+        self._last_safe_arm_targets = {
+            robots.LEFT: np.asarray(snapshot.left_arm, dtype=np.float64).copy(),
+            robots.RIGHT: np.asarray(snapshot.right_arm, dtype=np.float64).copy(),
+        }
+        self._last_ik_cartesian_targets = {robots.LEFT: None, robots.RIGHT: None}
+        if reset_limiter:
+            self._limiter.reset(snapshot.upper_joints)
+
     def _publish_pause_hold_if_needed(self, force: bool = False, reason: str = "pause hold") -> None:
-        if self._teleop_active or not self.config.safety_hold_arm_on_pause or self._pause_hold_command is None:
+        if (
+            (self._teleop_active and not getattr(self, "_resume_hold_until_target", False))
+            or not self.config.safety_hold_arm_on_pause
+            or self._pause_hold_command is None
+        ):
             return
         now = time.time()
         period = 1.0 / max(0.1, float(self.config.pause_hold_heartbeat_hz))
@@ -551,7 +633,7 @@ class FaRealControl(Component):
         )
         self._needs_reset = False
         self._real_reset_ready = real_fresh or self.control_backend == "mujoco"
-        self._limiter.reset(snapshot.upper_joints)
+        self._sync_ik_reference_from_snapshot(snapshot, reset_limiter=True)
         self._active_arm_goals = {
             robots.LEFT: np.asarray(snapshot.left_arm, dtype=np.float64),
             robots.RIGHT: np.asarray(snapshot.right_arm, dtype=np.float64),
@@ -566,6 +648,9 @@ class FaRealControl(Component):
             if msg.hand_side != hand_side:
                 self._warn_safety(f"{hand_side}_wrong_target_side", f"wrong target side: {msg.hand_side}")
                 continue
+            # A fresh operator target means the post-resume rebaseline finished;
+            # stop replaying the paused hold so this target owns the arm command.
+            self._resume_hold_until_target = False
             self._latest_targets[hand_side] = msg
             self._publish_hand_command_on_edge(hand_side, msg.hand_command)
 
@@ -679,7 +764,7 @@ class FaRealControl(Component):
             self._warn_safety("command_limited_reject", f"FA command rejected: {reason}")
             return
         published = self._publish_upper_command_outputs(limited, require_real_reset=True)
-        if published and self._last_min_snap_target_command is limited:
+        if published and getattr(self, "_last_min_snap_target_command", None) is limited:
             self._arm_goal_dirty = {robots.LEFT: False, robots.RIGHT: False}
 
     def _update_active_arm_goals(self, snapshot: FaJointStateSnapshot) -> None:
