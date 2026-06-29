@@ -104,15 +104,13 @@ def test_fa_mujoco_initial_pose_waits_for_joint_state():
     assert warnings == [("initial_pose_joint_state_stale", "FA initial pose held until fresh /joint_states")]
 
 
-def test_fa_real_with_mujoco_initial_pose_publishes_native_upper_command():
+def test_fa_real_with_mujoco_initial_pose_publishes_min_snap_target():
     class FakeRos2:
         def __init__(self):
-            self.upper_commands = []
             self.min_snap_commands = []
 
         def publish_upper_position_command(self, command):
-            self.upper_commands.append(command)
-            return True
+            raise AssertionError("FA modes must not publish native upper commands directly")
 
         def publish_min_snap_target(self, command, expected_duration_s, max_velocity_rad_s, max_acceleration_rad_s2):
             self.min_snap_commands.append(
@@ -153,12 +151,14 @@ def test_fa_real_with_mujoco_initial_pose_publishes_native_upper_command():
 
     controller._publish_initial_pose_if_needed()
 
-    assert controller._ros2.min_snap_commands == []
-    assert len(controller._ros2.upper_commands) == 1
-    command = controller._ros2.upper_commands[0]
+    assert len(controller._ros2.min_snap_commands) == 1
+    command, duration, max_velocity, max_acceleration = controller._ros2.min_snap_commands[0]
     assert command.left_arm == pytest.approx(tuple([0.1] * 7))
     assert command.right_arm == pytest.approx(tuple([0.2] * 7))
     assert command.neck == pytest.approx((0.3, 0.4))
+    assert duration == pytest.approx(controller.config.initial_pose_duration_s)
+    assert max_velocity == pytest.approx(controller.config.initial_pose_max_velocity_rad_s)
+    assert max_acceleration == pytest.approx(controller.config.initial_pose_max_acceleration_rad_s2)
     assert controller._last_published_upper_command is command
     assert controller._initial_pose_started_at_s is not None
     assert controller._active_arm_goals[robots.LEFT] == pytest.approx(np.asarray([0.1] * 7))
@@ -168,10 +168,15 @@ def test_fa_real_with_mujoco_initial_pose_publishes_native_upper_command():
 def test_fa_real_with_mujoco_initial_pose_republishes_during_startup_window(monkeypatch):
     class FakeRos2:
         def __init__(self):
-            self.upper_commands = []
+            self.min_snap_commands = []
 
         def publish_upper_position_command(self, command):
-            self.upper_commands.append(command)
+            raise AssertionError("FA modes must not publish native upper commands directly")
+
+        def publish_min_snap_target(self, command, expected_duration_s, max_velocity_rad_s, max_acceleration_rad_s2):
+            self.min_snap_commands.append(
+                (command, expected_duration_s, max_velocity_rad_s, max_acceleration_rad_s2)
+            )
             return True
 
     controller = FaRealControl.__new__(FaRealControl)
@@ -196,14 +201,15 @@ def test_fa_real_with_mujoco_initial_pose_republishes_during_startup_window(monk
 
     monkeypatch.setattr(fa_real_control_module.time, "time", lambda: 10.02)
     controller._publish_initial_pose_if_needed()
-    assert controller._ros2.upper_commands == []
+    assert controller._ros2.min_snap_commands == []
 
     monkeypatch.setattr(fa_real_control_module.time, "time", lambda: 10.06)
     controller._publish_initial_pose_if_needed()
 
-    assert len(controller._ros2.upper_commands) == 1
-    assert controller._ros2.upper_commands[0].left_arm == pytest.approx(tuple([0.1] * 7))
-    assert controller._ros2.upper_commands[0].right_arm == pytest.approx(tuple([0.2] * 7))
+    assert len(controller._ros2.min_snap_commands) == 1
+    command = controller._ros2.min_snap_commands[0][0]
+    assert command.left_arm == pytest.approx(tuple([0.1] * 7))
+    assert command.right_arm == pytest.approx(tuple([0.2] * 7))
 
 
 def test_fa_initial_pose_ready_logs_teleop_prompt_once(monkeypatch):
@@ -593,7 +599,7 @@ def test_fa_pause_syncs_current_joints_as_next_ik_reference():
     controller._last_pause_hold_publish_time = 0.0
     published = []
     controller._publish_upper_command_outputs = (
-        lambda command, require_real_reset=False, allow_stale_real_hold=False: published.append(command) or True
+        lambda command, require_real_reset=False, allow_stale_real_hold=False, **kwargs: published.append(command) or True
     )
     snapshot = FaJointStateSnapshot(
         timestamp_s=1.0,
@@ -691,8 +697,8 @@ def test_fa_resume_holds_pause_pose_until_first_valid_target():
 
     published = []
     controller._publish_upper_command_outputs = (
-        lambda command, require_real_reset=False, allow_stale_real_hold=False: published.append(
-            (command, require_real_reset, allow_stale_real_hold)
+        lambda command, require_real_reset=False, allow_stale_real_hold=False, **kwargs: published.append(
+            (command, require_real_reset, allow_stale_real_hold, kwargs)
         )
         or True
     )
@@ -702,6 +708,7 @@ def test_fa_resume_holds_pause_pose_until_first_valid_target():
     assert published[-1][0].left_arm == pytest.approx(tuple([0.3] * 7))
     assert published[-1][1] is False
     assert published[-1][2] is True
+    assert published[-1][3]["force_min_snap_publish"] is True
 
     target = SimpleNamespace(hand_side=robots.LEFT, hand_command=None)
     controller._left_target_subscriber = FakeTargetSubscriber(target)

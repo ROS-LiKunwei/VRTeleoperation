@@ -104,8 +104,8 @@ class FaRealControlConfig:
     allow_mujoco_mirror_without_joint_state: bool = True
     max_ik_solution_jump_rad: float = 0.3
     ik_solution_jump_clip_rad: float = 0.3
-    ik_max_position_error_m: float = 0.15
-    ik_max_orientation_error_rad: float = 1.2
+    ik_max_position_error_m: float = 0.05
+    ik_max_orientation_error_rad: float = 0.5
     min_snap_expected_duration_s: float = 0.016
     min_snap_max_velocity_rad_s: float = 1.5
     min_snap_max_acceleration_rad_s2: float = 15.0
@@ -163,7 +163,7 @@ class FaRealControlConfig:
 
 
 class FaRos2Bridge:
-    """ROS2 bridge for FA joint states and native 16D command publishing."""
+    """ROS2 bridge for FA joint states and min-snap target publishing."""
 
     def __init__(
         self,
@@ -178,8 +178,6 @@ class FaRos2Bridge:
         self._rclpy = None
         self._node = None
         self._min_snap_target_publisher = None
-        self._upper_position_publisher = None
-        self._upper_position_msg_type = None
         self._left_hand_pub = None
         self._right_hand_pub = None
         self._hand_msg_type = None
@@ -191,24 +189,18 @@ class FaRos2Bridge:
             import rclpy
             from min_snap.msg import MinSnapTarget
             from sensor_msgs.msg import JointState
-            from std_msgs.msg import Float64MultiArray, Int32
+            from std_msgs.msg import Int32
 
             self._rclpy = rclpy
             if not rclpy.ok():
                 rclpy.init(args=None)
             self._node = rclpy.create_node(node_name)
             self._hand_msg_type = Int32
-            self._upper_position_msg_type = Float64MultiArray
             self._min_snap_target_publisher = MinSnapTargetPublisher(
                 ros_node=self._node,
                 msg_type=MinSnapTarget,
                 topic=self.topics.min_snap_target_topic,
                 queue_size=self.topics.min_snap_target_queue_size,
-            )
-            self._upper_position_publisher = self._node.create_publisher(
-                Float64MultiArray,
-                self.topics.upper_position_command_topic,
-                self.topics.upper_position_command_queue_size,
             )
             self._left_hand_pub = self._node.create_publisher(
                 Int32, self.topics.left_hand_topic, self.topics.hand_command_queue_size
@@ -265,14 +257,6 @@ class FaRos2Bridge:
             max_velocity_rad_s,
             max_acceleration_rad_s2,
         )
-
-    def publish_upper_position_command(self, command: FaUpperPositionCommand) -> bool:
-        if not self.available or self._upper_position_publisher is None or self._upper_position_msg_type is None:
-            return False
-        msg = self._upper_position_msg_type()
-        msg.data = [float(value) for value in command.values]
-        self._upper_position_publisher.publish(msg)
-        return True
 
     def close(self) -> None:
         if self._node is not None:
@@ -492,19 +476,15 @@ class FaRealControl(Component):
         left = np.asarray(self.config.initial_left_arm_positions_rad, dtype=np.float64)
         right = np.asarray(self.config.initial_right_arm_positions_rad, dtype=np.float64)
         command = self._builder.build(left, right, snapshot.neck, timestamp_s=time.time())
-        if self.control_backend in ("real", "real_with_mujoco"):
-            # The native FA controller consumes /upper_position_controller/commands.
-            # Startup must not depend on an external min_snap relay being alive.
-            if not self._ros2.publish_upper_position_command(command):
-                self._warn_safety("initial_pose_upper_unavailable", "FA initial upper-position publisher unavailable")
-                return
-        elif not self._ros2.publish_min_snap_target(
+        if not self._publish_min_snap_target_command(
             command,
             self.config.initial_pose_duration_s,
             self.config.initial_pose_max_velocity_rad_s,
             self.config.initial_pose_max_acceleration_rad_s2,
+            warning_key="initial_pose_min_snap_unavailable",
+            warning_message="FA initial pose min-snap target publisher unavailable",
+            force=True,
         ):
-            self._warn_safety("initial_pose_min_snap_unavailable", "FA initial pose publisher unavailable")
             return
         self._initial_pose_started_at_s = time.time()
         self._startup_initial_pose_armed = False
@@ -526,8 +506,6 @@ class FaRealControl(Component):
         )
 
     def _republish_initial_pose_if_needed(self) -> None:
-        if self.control_backend not in ("real", "real_with_mujoco"):
-            return
         command = getattr(self, "_last_published_upper_command", None)
         if command is None:
             return
@@ -535,8 +513,15 @@ class FaRealControl(Component):
         period_s = 1.0 / max(1.0, float(self.config.pause_hold_heartbeat_hz))
         if now - getattr(self, "_last_initial_pose_publish_time_s", 0.0) < period_s:
             return
-        if not self._ros2.publish_upper_position_command(command):
-            self._warn_safety("initial_pose_upper_unavailable", "FA initial upper-position publisher unavailable")
+        if not self._publish_min_snap_target_command(
+            command,
+            self.config.initial_pose_duration_s,
+            self.config.initial_pose_max_velocity_rad_s,
+            self.config.initial_pose_max_acceleration_rad_s2,
+            warning_key="initial_pose_min_snap_unavailable",
+            warning_message="FA initial pose min-snap target publisher unavailable",
+            force=True,
+        ):
             return
         self._last_initial_pose_publish_time_s = now
 
@@ -593,7 +578,12 @@ class FaRealControl(Component):
         if not force and now - self._last_pause_hold_publish_time < period:
             return
         command = FaUpperPositionCommand(now, self._pause_hold_command.values)
-        if self._publish_upper_command_outputs(command, require_real_reset=False, allow_stale_real_hold=True):
+        if self._publish_upper_command_outputs(
+            command,
+            require_real_reset=False,
+            allow_stale_real_hold=True,
+            force_min_snap_publish=True,
+        ):
             self._pause_hold_command = command
             self._last_pause_hold_publish_time = now
 
@@ -888,6 +878,7 @@ class FaRealControl(Component):
         command: FaUpperPositionCommand,
         require_real_reset: bool,
         allow_stale_real_hold: bool = False,
+        force_min_snap_publish: bool = False,
     ) -> bool:
         if len(command.values) != FA_UPPER_COMMAND_LENGTH:
             raise ValueError("Refusing to publish non-16D FA command")
@@ -897,15 +888,38 @@ class FaRealControl(Component):
             if not state_ready or not reset_ready:
                 self._warn_safety("real_reset_required", "FA real command held until fresh /joint_states and reset")
                 return False
-        if not self._should_publish_min_snap_target(command):
+        if not force_min_snap_publish and not self._should_publish_min_snap_target(command):
             return True
-        if not self._ros2.publish_min_snap_target(
+        return self._publish_min_snap_target_command(
             command,
             self.config.min_snap_expected_duration_s,
             self.config.min_snap_max_velocity_rad_s,
             self.config.min_snap_max_acceleration_rad_s2,
+            warning_key="min_snap_unavailable",
+            warning_message="FA min-snap target publisher unavailable",
+            force=True,
+        )
+
+    def _publish_min_snap_target_command(
+        self,
+        command: FaUpperPositionCommand,
+        expected_duration_s: float,
+        max_velocity_rad_s: float,
+        max_acceleration_rad_s2: float,
+        *,
+        warning_key: str,
+        warning_message: str,
+        force: bool = False,
+    ) -> bool:
+        if not force and not self._should_publish_min_snap_target(command):
+            return True
+        if not self._ros2.publish_min_snap_target(
+            command,
+            expected_duration_s,
+            max_velocity_rad_s,
+            max_acceleration_rad_s2,
         ):
-            self._warn_safety("min_snap_unavailable", "FA min_snap target publisher unavailable")
+            self._warn_safety(warning_key, warning_message)
             return False
         self._last_min_snap_target_command = command
         self._last_min_snap_target_publish_time_s = time.time()

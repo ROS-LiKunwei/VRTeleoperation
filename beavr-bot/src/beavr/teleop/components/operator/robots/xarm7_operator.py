@@ -632,9 +632,9 @@ class XArmOperator(Operator):
 
             # Update internal resolution scale based on mode
             if scale_mode == robots.ARM_HIGH_RESOLUTION:
-                self.resolution_scale = 1.5
+                self.resolution_scale = 1.0
             elif scale_mode == robots.ARM_LOW_RESOLUTION:
-                self.resolution_scale = 1.5
+                self.resolution_scale = 1.0
             return self.resolution_scale  # Return the updated scale
         except Exception as e:
             logger.error(f"Error processing resolution scale data: {e}")
