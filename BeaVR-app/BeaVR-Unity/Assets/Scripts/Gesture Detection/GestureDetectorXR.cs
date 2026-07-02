@@ -95,7 +95,7 @@ public class GestureDetectorXR : MonoBehaviour
 
 	// 头部手势控制：点头开始，摇头结束
 	[Header("头部手势控制")]
-	public bool EnableHeadGestureControl = true;
+	public bool EnableHeadGestureControl = false;
 	public Button NodStartButton;
 	public Button ShakeEndButton;
 	[Range(5f, 35f)] public float HeadGestureAngleThresholdDegrees = 12f;
@@ -152,6 +152,26 @@ public class GestureDetectorXR : MonoBehaviour
 	private bool ShouldContinueArmTeleop = false;
 	[Header("手势模式切换")]
 	public bool EnablePinchStreamingControl = false;
+
+	[Header("挂脖双手遥操作开关")]
+	[Tooltip("网络连接成功后保持暂停状态，必须通过双手捏合或显式按钮开启遥操作。")]
+	public bool StartPausedAfterConnection = true;
+	[Tooltip("双手同时拇指+食指捏合并保持一段时间后，切换遥操作开启/暂停。适合头显挂在脖子上时使用。")]
+	public bool EnableNeckMountedBimanualToggle = true;
+	[Tooltip("双手捏合需要保持的时间。单位：秒。")]
+	[Range(0.2f, 2.0f)] public float BimanualToggleHoldSeconds = 0.8f;
+	[Tooltip("一次切换后忽略后续双手捏合的时间。单位：秒。")]
+	[Range(0.5f, 5.0f)] public float BimanualToggleCooldownSeconds = 1.5f;
+	[Tooltip("双手捏合判定距离。单位：米。")]
+	public float BimanualPinchThresholdMeters = 0.025f;
+	[Tooltip("挂脖遥操作开关使用拇指+中指捏合，避免和灵巧手拇指+食指抓放冲突。关闭后退回拇指+食指。")]
+	public bool UseMiddleFingerForBimanualToggle = true;
+	[Tooltip("遥操作状态切换时使用Android语音提示。")]
+	public bool EnableTeleopVoicePrompt = true;
+	public string TeleopStartedVoicePrompt = "遥操作已开启";
+	public string TeleopPausedVoicePrompt = "遥操作已暂停";
+	private float _bimanualToggleStartTime = -1f;
+	private float _lastBimanualToggleTime = -999f;
 
 	// 关节顺序定义（26个关节）
 	static readonly XRHandJointID[] k_JointOrder = new XRHandJointID[]
@@ -346,12 +366,15 @@ public class GestureDetectorXR : MonoBehaviour
 		if (!_wasConnected)
 		{
 			_wasConnected = true;
+			if (StartPausedAfterConnection)
+				ApplyTeleopPausedState("连接后默认暂停");
 			ForceSendAuxiliaryChannels();
 		}
 
 		// 处理手势（左手捏合）
 		if (EnablePinchStreamingControl)
 			StreamPauser();
+		ProcessNeckMountedBimanualToggle();
 
 		// 辅助通道只在状态变化时立即发送，平时低频保活，避免抢占手部数据通道。
 		SendResolutionThroughController();
@@ -392,7 +415,7 @@ public class GestureDetectorXR : MonoBehaviour
 		yield return new WaitForSeconds(2f);
 
 		bool success = NetMQController.Instance.AreSocketsConnected();
-		SetStreamBorder(success ? StreamBorderGreen : StreamBorderRed);
+		SetStreamBorder(success && ShouldContinueArmTeleop ? StreamBorderGreen : StreamBorderRed);
 		ToggleMenuButton(!success);
 		connectionAttemptInProgress = false;
 	}
@@ -464,6 +487,51 @@ public class GestureDetectorXR : MonoBehaviour
 		Vector3 tp = ToWorldPosition(tPose.position);
 		Vector3 fp = ToWorldPosition(fPose.position);
 		return Vector3.Distance(tp, fp) < thresholdMeters;
+	}
+
+	void ProcessNeckMountedBimanualToggle()
+	{
+		if (!EnableNeckMountedBimanualToggle || _handSubsystem == null)
+			return;
+
+		var left = _handSubsystem.leftHand;
+		var right = _handSubsystem.rightHand;
+		if (!left.isTracked || !right.isTracked)
+		{
+			_bimanualToggleStartTime = -1f;
+			return;
+		}
+
+		float currentTime = Time.time;
+		if (currentTime - _lastBimanualToggleTime < BimanualToggleCooldownSeconds)
+			return;
+
+		float pinchThreshold = Mathf.Max(0.005f, BimanualPinchThresholdMeters);
+		XRHandJointID toggleFinger = UseMiddleFingerForBimanualToggle
+			? XRHandJointID.MiddleTip
+			: XRHandJointID.IndexTip;
+		bool bothPinching =
+			IsPinching(left, toggleFinger, pinchThreshold) &&
+			IsPinching(right, toggleFinger, pinchThreshold);
+
+		if (!bothPinching)
+		{
+			_bimanualToggleStartTime = -1f;
+			return;
+		}
+
+		if (_bimanualToggleStartTime < 0f)
+		{
+			_bimanualToggleStartTime = currentTime;
+			return;
+		}
+
+		if (currentTime - _bimanualToggleStartTime < Mathf.Max(0.1f, BimanualToggleHoldSeconds))
+			return;
+
+		_lastBimanualToggleTime = currentTime;
+		_bimanualToggleStartTime = -1f;
+		SetTeleopStreaming(!ShouldContinueArmTeleop, "双手捏合");
 	}
 
 	/// <summary>
@@ -644,7 +712,7 @@ public class GestureDetectorXR : MonoBehaviour
 		if (NodStartButton != null)
 			StartCoroutine(FlashButton(NodStartButton));
 
-		SetHeadGestureStreaming(true);
+		SetTeleopStreaming(true, "头部点头");
 	}
 
 	/// <summary>
@@ -656,7 +724,7 @@ public class GestureDetectorXR : MonoBehaviour
 		if (ShakeEndButton != null)
 			StartCoroutine(FlashButton(ShakeEndButton));
 
-		SetHeadGestureStreaming(false);
+		SetTeleopStreaming(false, "头部摇头");
 	}
 
 	/// <summary>
@@ -664,18 +732,34 @@ public class GestureDetectorXR : MonoBehaviour
 	/// </summary>
 	void SetHeadGestureStreaming(bool shouldStream)
 	{
+		SetTeleopStreaming(shouldStream, "头部手势");
+	}
+
+	void SetTeleopStreaming(bool shouldStream, string reason)
+	{
 		if (shouldStream)
 		{
 			StreamResolution = false;
-			StreamRelativeData = true;
-			StreamAbsoluteData = false;
+			if (!StreamAbsoluteData)
+				StreamRelativeData = true;
 			ShouldContinueArmTeleop = true;
-			SetStreamBorder(StreamBorderGreen);
+			SetStreamBorder(StreamAbsoluteData ? StreamBorderBlue : StreamBorderGreen);
 			SendPauseStatusThroughController(force: true);
 			QueuePauseStatusBurst("High");
+			SpeakTeleopState(true);
+			Debug.Log($"遥操作已开启: {reason}");
 			return;
 		}
 
+		ApplyTeleopPausedState(reason);
+		SendPauseStatusThroughController(force: true);
+		QueuePauseStatusBurst("Low");
+		SpeakTeleopState(false);
+		Debug.Log($"遥操作已暂停: {reason}");
+	}
+
+	void ApplyTeleopPausedState(string reason)
+	{
 		StreamRelativeData = false;
 		StreamAbsoluteData = false;
 		StreamResolution = false;
@@ -683,8 +767,15 @@ public class GestureDetectorXR : MonoBehaviour
 		ResetLastSentHandFrame("RightHand");
 		ResetLastSentHandFrame("LeftHand");
 		SetStreamBorder(StreamBorderRed);
-		SendPauseStatusThroughController(force: true);
-		QueuePauseStatusBurst("Low");
+	}
+
+	void SpeakTeleopState(bool started)
+	{
+		if (!EnableTeleopVoicePrompt)
+			return;
+
+		string prompt = started ? TeleopStartedVoicePrompt : TeleopPausedVoicePrompt;
+		AndroidTextToSpeech.Instance.Speak(prompt);
 	}
 
 	/// <summary>
@@ -1217,8 +1308,7 @@ public class GestureDetectorXR : MonoBehaviour
 				SetStreamBorder(StreamBorderGreen);
 			}
 			ToggleMenuButton(false);
-			ShouldContinueArmTeleop = true;
-			SendPauseStatusThroughController(force: true);
+			SetTeleopStreaming(true, "按钮启动");
 		}
 		catch (Exception e)
 		{
@@ -1236,12 +1326,8 @@ public class GestureDetectorXR : MonoBehaviour
 			StreamRelativeData = false;
 			StreamAbsoluteData = false;
 			StreamResolution = false;
-			ShouldContinueArmTeleop = false;
-			ResetLastSentHandFrame("RightHand");
-			ResetLastSentHandFrame("LeftHand");
-			SetStreamBorder(StreamBorderRed);
 			ToggleMenuButton(true);
-			SendPauseStatusThroughController(force: true);
+			SetTeleopStreaming(false, "按钮停止");
 		}
 		catch (Exception e)
 		{

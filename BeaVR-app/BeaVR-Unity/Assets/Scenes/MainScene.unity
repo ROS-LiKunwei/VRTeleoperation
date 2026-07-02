@@ -1570,6 +1570,7 @@ MonoBehaviour:
   networkManager: {fileID: 1197026216}
   canvasSwitch: {fileID: 213152973}
   connectTimeoutSeconds: 2
+  autoActivateStreamingAfterConnection: 0
 --- !u!1 &223974226
 GameObject:
   m_ObjectHideFlags: 0
@@ -1629,7 +1630,7 @@ MonoBehaviour:
   StreamBorderOutlineDistance: {x: 30, y: -30}
   HighResolutionButtonController: {fileID: 0}
   LowResolutionButtonController: {fileID: 0}
-  EnableHeadGestureControl: 1
+  EnableHeadGestureControl: 0
   NodStartButton: {fileID: 248164267}
   ShakeEndButton: {fileID: 1962918559}
   HeadGestureAngleThresholdDegrees: 10
@@ -1643,6 +1644,15 @@ MonoBehaviour:
   RequestIgnoreBatteryOptimizations: 1
   TargetApplicationFrameRate: 60
   EnablePinchStreamingControl: 0
+  StartPausedAfterConnection: 1
+  EnableNeckMountedBimanualToggle: 1
+  BimanualToggleHoldSeconds: 0.8
+  BimanualToggleCooldownSeconds: 1.5
+  BimanualPinchThresholdMeters: 0.025
+  UseMiddleFingerForBimanualToggle: 1
+  EnableTeleopVoicePrompt: 1
+  TeleopStartedVoicePrompt: "\u9065\u64CD\u4F5C\u5DF2\u5F00\u542F"
+  TeleopPausedVoicePrompt: "\u9065\u64CD\u4F5C\u5DF2\u6682\u505C"
 --- !u!1 &248164262
 GameObject:
   m_ObjectHideFlags: 0

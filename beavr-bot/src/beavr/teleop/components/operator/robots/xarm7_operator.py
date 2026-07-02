@@ -56,6 +56,9 @@ class XArmOperator(Operator):
         hand_side: str = robots.RIGHT,
         hand_frame_timeout_s: float = 0.5,
         rotation_delta_frame: str = "body",
+        post_resume_stable_position_epsilon_m: float = 0.008,
+        post_resume_stable_orientation_epsilon_rad: float = 0.08,
+        post_resume_stable_dwell_s: float = 1.0,
     ):
         """
         Initializes the XArmOperator.
@@ -78,6 +81,9 @@ class XArmOperator(Operator):
             hand_side: 手侧（'left' 左手或 'right' 右手），用于确定关键点订阅的正确话题.
             hand_frame_timeout_s: 允许复用上一帧手部数据的最长时间，超时后本周期不发布新目标.
             rotation_delta_frame: 姿态增量表达坐标系，"body" 保留旧行为，"base" 使用世界/base增量.
+            post_resume_stable_position_epsilon_m: resume 后手腕稳定判定的位置阈值.
+            post_resume_stable_orientation_epsilon_rad: resume 后手腕稳定判定的姿态阈值.
+            post_resume_stable_dwell_s: resume 后手腕必须持续稳定的最短时间.
         """
         # 初始化基础属性
         self.operator_name = operator_name
@@ -197,6 +203,11 @@ class XArmOperator(Operator):
         self._last_command_rate_log_time: float = 0.0
         self._last_timing_log_time: float = 0.0
         self._post_reset_hand_rebaseline_after_s: Optional[float] = None
+        self._post_reset_hand_rebaseline_frames: list[np.ndarray] = []
+        self._post_reset_hand_rebaseline_first_frame_time_s: Optional[float] = None
+        self._post_resume_stable_position_epsilon_m = float(post_resume_stable_position_epsilon_m)
+        self._post_resume_stable_orientation_epsilon_rad = float(post_resume_stable_orientation_epsilon_rad)
+        self._post_resume_stable_dwell_s = max(0.0, float(post_resume_stable_dwell_s))
 
         # Filter setup
         self.use_filter = use_filter  # 是否使用滤波器
@@ -369,10 +380,12 @@ class XArmOperator(Operator):
         self._last_hand_frame_timestamp_s = 0.0
         self.hand_moving_h = None
         self.comp_filter = None
+        self._post_reset_hand_rebaseline_frames = []
+        self._post_reset_hand_rebaseline_first_frame_time_s = None
         self._arm_transformed_keypoint_subscriber.recv_keypoints()
 
     def _rebaseline_hand_after_reset_if_needed(self) -> bool:
-        """Use the first hand frame after reset completion as the actual hand_init."""
+        """Use several fresh post-reset hand frames before refreshing hand_init."""
         min_timestamp_s = getattr(self, "_post_reset_hand_rebaseline_after_s", None)
         if min_timestamp_s is None:
             return False
@@ -380,8 +393,29 @@ class XArmOperator(Operator):
         if moving_hand_frame is None:
             self._log_reset_hand_wait()
             return True
+        if not hasattr(self, "_post_reset_hand_rebaseline_frames"):
+            self._post_reset_hand_rebaseline_frames = []
+        now_s = time.time()
+        if getattr(self, "_post_reset_hand_rebaseline_first_frame_time_s", None) is None:
+            self._post_reset_hand_rebaseline_first_frame_time_s = now_s
+        self._post_reset_hand_rebaseline_frames.append(np.asarray(moving_hand_frame, dtype=np.float64).copy())
+        required_frames = max(1, int(getattr(self, "_reset_hand_settle_frames", 1)))
+        if len(self._post_reset_hand_rebaseline_frames) < required_frames:
+            self._log_reset_hand_wait()
+            return True
+        if not self._post_resume_hand_frames_are_stable(self._post_reset_hand_rebaseline_frames):
+            self._post_reset_hand_rebaseline_frames = [self._post_reset_hand_rebaseline_frames[-1]]
+            self._post_reset_hand_rebaseline_first_frame_time_s = now_s
+            self._log_reset_hand_wait()
+            return True
+        stable_dwell_s = float(getattr(self, "_post_resume_stable_dwell_s", 0.0))
+        stable_elapsed_s = now_s - float(self._post_reset_hand_rebaseline_first_frame_time_s or now_s)
+        if stable_elapsed_s < stable_dwell_s:
+            self._log_reset_hand_wait()
+            return True
+        baseline_frame = self._post_reset_hand_rebaseline_frames[-1]
         try:
-            self.hand_init_h = self._turn_frame_to_homo_mat(moving_hand_frame)
+            self.hand_init_h = self._turn_frame_to_homo_mat(baseline_frame)
             self.hand_init_t = copy(self.hand_init_h[:3, 3])
             self.hand_moving_h = copy(self.hand_init_h)
         except ValueError as e:
@@ -389,13 +423,91 @@ class XArmOperator(Operator):
             return True
         self.comp_filter = None
         self._post_reset_hand_rebaseline_after_s = None
+        self._post_reset_hand_rebaseline_frames = []
+        self._post_reset_hand_rebaseline_first_frame_time_s = None
+        if not self._refresh_robot_init_pose_after_hand_baseline():
+            self.hand_init_h = None
+            self.hand_init_t = None
+            self.hand_moving_h = None
+            self._post_reset_hand_rebaseline_after_s = time.time()
+            return True
         logger.info(
             f"{self.operator_name} post-reset Hand init H:\n{self.hand_init_h}"
         )
         logger.info(
             f"{self.operator_name}: post-reset hand baseline refreshed; "
+            f"stable for {stable_elapsed_s:.2f}s over {required_frames}+ fresh frames; "
             "suppressing this frame so resume starts from the comfortable hand pose"
         )
+        return True
+
+    def _post_resume_hand_frames_are_stable(self, frames: list[np.ndarray]) -> bool:
+        if len(frames) <= 1:
+            return True
+        position_epsilon = float(getattr(self, "_post_resume_stable_position_epsilon_m", 0.008))
+        orientation_epsilon = float(getattr(self, "_post_resume_stable_orientation_epsilon_rad", 0.08))
+        reference_h = self._turn_frame_to_homo_mat(frames[0])
+        max_position_delta = 0.0
+        max_orientation_delta = 0.0
+        for frame in frames[1:]:
+            current_h = self._turn_frame_to_homo_mat(frame)
+            position_delta = float(np.linalg.norm(current_h[:3, 3] - reference_h[:3, 3]))
+            rotation_delta = current_h[:3, :3] @ reference_h[:3, :3].T
+            rotation_delta = self.project_to_rotation_matrix(rotation_delta)
+            orientation_delta = float(Rotation.from_matrix(rotation_delta).magnitude())
+            max_position_delta = max(max_position_delta, position_delta)
+            max_orientation_delta = max(max_orientation_delta, orientation_delta)
+        stable = max_position_delta <= position_epsilon and max_orientation_delta <= orientation_epsilon
+        if not stable:
+            logger.info(
+                "%s: waiting stable wrist before Hand_Init_H pos_delta=%.4fm ori_delta=%.4frad",
+                self.operator_name,
+                max_position_delta,
+                max_orientation_delta,
+            )
+        return stable
+
+    def _refresh_robot_init_pose_after_hand_baseline(self) -> bool:
+        """Refresh robot_init_h after Hand_Init_H is stable, without changing the hand baseline."""
+        logger.info(f"{self.operator_name}: refreshing robot init pose after stable Hand_Init_H")
+        self._publisher_manager.publish(
+            host=self._publisher_host,
+            port=self._publisher_port,
+            topic="reset",
+            data=SessionCommand(timestamp_s=time.time(), command="reset"),
+        )
+        robot_frame_homo = self.endeff_homo_subscriber.recv_keypoints()
+        while robot_frame_homo is None:
+            if self._get_arm_teleop_state() == robots.ARM_TELEOP_STOP:
+                self.arm_teleop_state = robots.ARM_TELEOP_STOP
+                self.is_first_frame = True
+                self._clear_hand_tracking_cache()
+                logger.info(f"{self.operator_name}: robot init refresh aborted because teleop paused")
+                return False
+            self._log_reset_pose_wait()
+            self._publisher_manager.publish(
+                host=self._publisher_host,
+                port=self._publisher_port,
+                topic="reset",
+                data=SessionCommand(timestamp_s=time.time(), command="reset"),
+            )
+            robot_frame_homo = self.endeff_homo_subscriber.recv_keypoints()
+            time.sleep(0.01)
+        try:
+            h = np.array(robot_frame_homo.h_matrix, dtype=np.float64).reshape(4, 4)
+            if not np.allclose(h[3, :], [0, 0, 0, 1]):
+                logger.warning(
+                    f"Warning ({self.operator_name}): refreshed robot frame is not a valid homogeneous matrix. Resetting bottom row."
+                )
+                h[3, :] = [0, 0, 0, 1]
+            h[:3, :3] = self.project_to_rotation_matrix(h[:3, :3])
+        except Exception:
+            logger.error(f"ERROR ({self.operator_name}): Failed to refresh robot init pose after Hand_Init_H")
+            self.is_first_frame = True
+            return False
+        self.robot_init_h = h
+        self.robot_moving_h = copy(self.robot_init_h)
+        logger.info(f"{self.operator_name} Robot init H refreshed after stable Hand_Init_H:\n{self.robot_init_h}")
         return True
 
     def _warn_invalid_hand_frame(self, reason: str) -> None:
@@ -632,9 +744,9 @@ class XArmOperator(Operator):
 
             # Update internal resolution scale based on mode
             if scale_mode == robots.ARM_HIGH_RESOLUTION:
-                self.resolution_scale = 1.0
+                self.resolution_scale = 1.2
             elif scale_mode == robots.ARM_LOW_RESOLUTION:
-                self.resolution_scale = 1.0
+                self.resolution_scale = 1.2
             return self.resolution_scale  # Return the updated scale
         except Exception as e:
             logger.error(f"Error processing resolution scale data: {e}")
@@ -891,9 +1003,11 @@ class XArmOperator(Operator):
                 return  # Exit if reset failed
             if self._requires_resume_for_hand_init:
                 logger.info(
-                    f"{self.operator_name}: reset complete; first post-resume hand frame will become Hand init H"
+                    f"{self.operator_name}: reset complete; waiting fresh post-resume hand frames for Hand init H"
                 )
                 self._post_reset_hand_rebaseline_after_s = time.time()
+                self._post_reset_hand_rebaseline_frames = []
+                self._post_reset_hand_rebaseline_first_frame_time_s = None
                 self._clear_hand_tracking_cache()
             else:
                 logger.info(

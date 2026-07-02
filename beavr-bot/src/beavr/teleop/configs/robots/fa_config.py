@@ -91,7 +91,7 @@ class FaRealControlCfg:
             control_backend="mujoco",
             ros2=FaRos2Topics(
                 joint_state_topic="/joint_states",
-                upper_position_command_topic=FA_UPPER_POSITION_COMMAND_TOPIC,
+                upper_position_command_topic="",
                 min_snap_target_topic="/min_snap/target",
                 upper_position_command_queue_size=60,
                 min_snap_target_queue_size=10,
@@ -121,18 +121,18 @@ class FaRealControlCfg:
             allow_mujoco_mirror_without_joint_state=True,
             max_ik_solution_jump_rad=0.5,
             ik_solution_jump_clip_rad=0.3,
-            ik_max_position_error_m=0.05,
-            ik_max_orientation_error_rad=1.0,
-            min_snap_expected_duration_s=0.08,
-            min_snap_max_velocity_rad_s=1.5,
-            min_snap_max_acceleration_rad_s2=10.0,
+            ik_max_position_error_m=0.08,
+            ik_max_orientation_error_rad=0.2,
+            min_snap_expected_duration_s=0.2,
+            min_snap_max_velocity_rad_s=0.6,
+            min_snap_max_acceleration_rad_s2=3.0,
             min_snap_target_publish_hz=60.0,
             min_snap_target_epsilon_rad=0.002,
             ik_cartesian_position_deadband_m=0.01,
             ik_cartesian_orientation_deadband_rad=0.06,
             initial_pose_enabled=True,
-            initial_left_arm_positions_rad=(-0.68, 0.82, -0.97, -1.16, -0.36, 0.0, 0.15),
-            initial_right_arm_positions_rad=(-0.68, -0.82, 0.97, -1.16, 0.36, 0.0, -0.15),
+            initial_left_arm_positions_rad=(-1.05, 0.76, -0.62, -1.03, -0.68, 0.0, -0.35),
+            initial_right_arm_positions_rad=(-1.05, -0.76, 0.62, -1.03, 0.68, 0.0, 0.35),
             initial_pose_duration_s=5.0,
             initial_pose_max_velocity_rad_s=0.8,
             initial_pose_max_acceleration_rad_s2=5.0,
@@ -198,6 +198,9 @@ class FaOperatorCfg:
     teleoperation_state_port: int = ports.XARM_TELEOPERATION_STATE_PORT
     hand_frame_timeout_s: float = 1.0
     rotation_delta_frame: str = "base"
+    post_resume_stable_position_epsilon_m: float = 0.008
+    post_resume_stable_orientation_epsilon_rad: float = 0.08
+    post_resume_stable_dwell_s: float = 1.0
     logging_config: dict[str, Any] = field(
         default_factory=lambda: {
             "enabled": False,
@@ -225,6 +228,9 @@ class FaOperatorCfg:
             hand_side=self.hand_side,
             hand_frame_timeout_s=self.hand_frame_timeout_s,
             rotation_delta_frame=self.rotation_delta_frame,
+            post_resume_stable_position_epsilon_m=self.post_resume_stable_position_epsilon_m,
+            post_resume_stable_orientation_epsilon_rad=self.post_resume_stable_orientation_epsilon_rad,
+            post_resume_stable_dwell_s=self.post_resume_stable_dwell_s,
             h_r_v=H_R_V_FA,
         )
 
@@ -358,13 +364,15 @@ class FaConfig:
                     render=True,
                     load_model=True,
                     print_hand_action_only=True,
-                    arm_command_source="ros2",
-                    ros_arm_command_topic=FA_UPPER_POSITION_COMMAND_TOPIC,
+                    arm_command_source="none",
+                    ros_arm_command_topic="",
+                    subscribe_min_snap_target=True,
+                    min_snap_target_topic="/min_snap/target",
                     publish_joint_states=self.control_backend == "mujoco",
                     joint_state_topic="/joint_states",
                     joint_state_publish_hz=50.0,
                     arm_command_interpolation_steps=5,
-                    interpolation_profile="linear",
+                    interpolation_profile="min_snap",
                     expected_command_length=FA_UPPER_COMMAND_LENGTH,
                     joint_state_joint_names=FA_LEFT_ARM_JOINT_NAMES + FA_RIGHT_ARM_JOINT_NAMES,
                 )

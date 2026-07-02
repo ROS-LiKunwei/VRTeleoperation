@@ -53,6 +53,8 @@ class Sysmo32MujocoCommandMirror(Component):
         publish_joint_states: bool = False,
         joint_state_topic: str = "/joint_states",
         joint_state_publish_hz: float = 50.0,
+        subscribe_min_snap_target: bool = False,
+        min_snap_target_topic: str = "/min_snap/target",
         arm_command_interpolation_steps: int = 5,
         interpolation_profile: str = "quintic",
         expected_command_length: int = SYSMO32_COMMAND_LENGTH,
@@ -60,10 +62,12 @@ class Sysmo32MujocoCommandMirror(Component):
         kinematics_type: str = "sysmo32",
     ):
         self.notify_component_start("sysmo32_mujoco_command_mirror")
-        if arm_command_source not in ("zmq", "ros2", "both"):
-            raise ValueError("arm_command_source must be one of: zmq, ros2, both")
+        if arm_command_source not in ("none", "zmq", "ros2", "both"):
+            raise ValueError("arm_command_source must be one of: none, zmq, ros2, both")
         if kinematics_type not in ("sysmo32", "fa"):
             raise ValueError("kinematics_type must be one of: sysmo32, fa")
+        if subscribe_min_snap_target and kinematics_type != "fa":
+            raise ValueError("subscribe_min_snap_target is currently supported only for FA mirror")
         interpolation_profile = str(interpolation_profile or "quintic").strip().lower()
         if interpolation_profile in ("septic", "seventh_order", "minimum_snap"):
             interpolation_profile = "min_snap"
@@ -78,6 +82,8 @@ class Sysmo32MujocoCommandMirror(Component):
         self.publish_joint_states = publish_joint_states
         self.joint_state_topic = joint_state_topic
         self.joint_state_publish_hz = max(0.1, float(joint_state_publish_hz))
+        self.subscribe_min_snap_target = bool(subscribe_min_snap_target)
+        self.min_snap_target_topic = min_snap_target_topic
         self.arm_command_interpolation_steps = max(1, int(arm_command_interpolation_steps))
         self.interpolation_profile = interpolation_profile
         self.expected_command_length = int(expected_command_length)
@@ -101,6 +107,7 @@ class Sysmo32MujocoCommandMirror(Component):
         self._trajectory_start_positions: Optional[np.ndarray] = None
         self._trajectory_target_positions: Optional[np.ndarray] = None
         self._trajectory_start_time_s: Optional[float] = None
+        self._trajectory_duration_s: Optional[float] = None
         self._rclpy = None
         self._ros_node = None
         self._joint_state_msg_type = None
@@ -132,7 +139,7 @@ class Sysmo32MujocoCommandMirror(Component):
             self._left_hand_action_subscriber,
             self._right_hand_action_subscriber,
         ]
-        if self.arm_command_source in ("ros2", "both") or self.publish_joint_states:
+        if self.arm_command_source in ("ros2", "both") or self.publish_joint_states or self.subscribe_min_snap_target:
             self._init_ros2_interfaces()
 
         self._kinematics: Optional[object] = None
@@ -179,6 +186,20 @@ class Sysmo32MujocoCommandMirror(Component):
                     "SYSMO-32 MuJoCo command mirror subscribed to ROS2 arm command topic %s",
                     self.ros_arm_command_topic,
                 )
+            if self.subscribe_min_snap_target:
+                from min_snap.msg import MinSnapTarget
+
+                self._ros_node.create_subscription(
+                    MinSnapTarget,
+                    self.min_snap_target_topic,
+                    self._on_min_snap_target,
+                    10,
+                )
+                logger.info(
+                    "%s MuJoCo command mirror subscribed to ROS2 min-snap target topic %s",
+                    self.robot_label,
+                    self.min_snap_target_topic,
+                )
             if self.publish_joint_states:
                 self._joint_state_msg_type = JointState
                 self._joint_state_pub = self._ros_node.create_publisher(JointState, self.joint_state_topic, 10)
@@ -202,6 +223,22 @@ class Sysmo32MujocoCommandMirror(Component):
             logger.warning("[MuJoCo][ROS2 ArmCommand] invalid command: %s", exc)
             return
         self.apply_arm_command(command)
+
+    def _on_min_snap_target(self, msg) -> None:
+        if self.kinematics_type != "fa":
+            return
+        try:
+            left = np.asarray(msg.left_arm_target_rad, dtype=np.float64)
+            right = np.asarray(msg.right_arm_target_rad, dtype=np.float64)
+            if left.shape != (7,) or right.shape != (7,):
+                raise ValueError(f"expected 7+7 arm joints, got {left.shape} and {right.shape}")
+            values = tuple(float(v) for v in np.concatenate([left, right, np.zeros(2, dtype=np.float64)]))
+            command = self._arm_command_type(timestamp_s=time.time(), values=values)
+            duration_s = float(getattr(msg, "expected_duration_s", 0.0) or 0.0)
+        except Exception as exc:
+            logger.warning("[MuJoCo][MinSnapTarget] invalid target: %s", exc)
+            return
+        self.apply_arm_command(command, duration_s=duration_s if duration_s > 0.0 else None)
 
     def stream(self):
         if self._kinematics is None or not self._kinematics.available:
@@ -260,7 +297,7 @@ class Sysmo32MujocoCommandMirror(Component):
             self._kinematics.data.qvel[dof_addr] = 0.0
 
     def _receive_once(self) -> None:
-        if self.arm_command_source in ("ros2", "both"):
+        if self.arm_command_source in ("ros2", "both") or self.subscribe_min_snap_target or self.publish_joint_states:
             self._spin_ros2_once()
 
         if self.arm_command_source in ("zmq", "both"):
@@ -276,7 +313,7 @@ class Sysmo32MujocoCommandMirror(Component):
         if right_action is not None:
             self.on_right_hand_action(right_action.action_id)
 
-    def apply_arm_command(self, command: Sysmo32ArmCommand) -> None:
+    def apply_arm_command(self, command: Sysmo32ArmCommand, duration_s: Optional[float] = None) -> None:
         values = np.asarray(command.values, dtype=np.float64)
         expected_command_length = getattr(self, "expected_command_length", SYSMO32_COMMAND_LENGTH)
         if values.shape != (expected_command_length,) or not np.all(np.isfinite(values)):
@@ -307,6 +344,10 @@ class Sysmo32MujocoCommandMirror(Component):
         self._trajectory_start_positions = self._hold_joint_positions.copy()
         self._trajectory_target_positions = np.asarray(target, dtype=np.float64)
         self._trajectory_start_time_s = now_s
+        if duration_s is not None and np.isfinite(duration_s) and duration_s > 0.0:
+            self._trajectory_duration_s = max(self.control_dt, float(duration_s))
+        else:
+            self._trajectory_duration_s = None
         self._update_interpolated_hold(now_s)
         self._log_applied_arm_command(values)
 
@@ -317,7 +358,9 @@ class Sysmo32MujocoCommandMirror(Component):
             or self._trajectory_start_time_s is None
         ):
             return
-        duration_s = max(self.control_dt, self.control_dt * self.arm_command_interpolation_steps)
+        duration_s = self._trajectory_duration_s
+        if duration_s is None:
+            duration_s = max(self.control_dt, self.control_dt * self.arm_command_interpolation_steps)
         progress = (now_s - self._trajectory_start_time_s) / duration_s
         blend = _trajectory_blend(progress, getattr(self, "interpolation_profile", "quintic"))
         self._hold_joint_positions = self._trajectory_start_positions + (
@@ -328,6 +371,7 @@ class Sysmo32MujocoCommandMirror(Component):
             self._trajectory_start_positions = None
             self._trajectory_target_positions = None
             self._trajectory_start_time_s = None
+            self._trajectory_duration_s = None
 
     def _publish_joint_state_if_due(self) -> None:
         if (

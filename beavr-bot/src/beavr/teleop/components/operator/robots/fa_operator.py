@@ -39,6 +39,9 @@ class FaOperator(XArmOperator):
         hand_side: str = "right",
         hand_frame_timeout_s: float = 0.5,
         rotation_delta_frame: str = "base",
+        post_resume_stable_position_epsilon_m: float = 0.008,
+        post_resume_stable_orientation_epsilon_rad: float = 0.08,
+        post_resume_stable_dwell_s: float = 1.0,
         h_r_v: np.ndarray | None = None,
         **kwargs,
     ):
@@ -64,4 +67,7 @@ class FaOperator(XArmOperator):
             hand_side=hand_side,
             hand_frame_timeout_s=hand_frame_timeout_s,
             rotation_delta_frame=rotation_delta_frame,
+            post_resume_stable_position_epsilon_m=post_resume_stable_position_epsilon_m,
+            post_resume_stable_orientation_epsilon_rad=post_resume_stable_orientation_epsilon_rad,
+            post_resume_stable_dwell_s=post_resume_stable_dwell_s,
         )

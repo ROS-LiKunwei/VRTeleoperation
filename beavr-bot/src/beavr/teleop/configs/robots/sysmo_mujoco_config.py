@@ -53,6 +53,8 @@ class Sysmo32MujocoCommandMirrorCfg:
     publish_joint_states: bool = False
     joint_state_topic: str = "/joint_states"
     joint_state_publish_hz: float = 50.0
+    subscribe_min_snap_target: bool = False
+    min_snap_target_topic: str = "/min_snap/target"
     arm_command_interpolation_steps: int = 5
     interpolation_profile: str = "quintic"
     expected_command_length: int = 18
@@ -78,6 +80,8 @@ class Sysmo32MujocoCommandMirrorCfg:
             publish_joint_states=self.publish_joint_states,
             joint_state_topic=self.joint_state_topic,
             joint_state_publish_hz=self.joint_state_publish_hz,
+            subscribe_min_snap_target=self.subscribe_min_snap_target,
+            min_snap_target_topic=self.min_snap_target_topic,
             arm_command_interpolation_steps=self.arm_command_interpolation_steps,
             interpolation_profile=self.interpolation_profile,
             expected_command_length=self.expected_command_length,

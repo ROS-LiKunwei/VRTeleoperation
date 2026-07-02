@@ -9,6 +9,7 @@ public class StartTeleopButton : MonoBehaviour
 
     [Header("Behavior")]
     public float connectTimeoutSeconds = 2.0f;
+    public bool autoActivateStreamingAfterConnection = false;
 
     public void OnClick_StartTeleop()
     {
@@ -74,11 +75,13 @@ public class StartTeleopButton : MonoBehaviour
             {
                 canvasSwitch.Switch();
 
-                // After switching, set streaming active (relative by default)
-                var gd = FindFirstObjectByType<GestureDetectorXR>();
-                if (gd != null)
+                if (autoActivateStreamingAfterConnection)
                 {
-                    gd.ActivateStreaming("relative");
+                    var gd = FindFirstObjectByType<GestureDetectorXR>();
+                    if (gd != null)
+                    {
+                        gd.ActivateStreaming("relative");
+                    }
                 }
             }
         }
@@ -89,5 +92,4 @@ public class StartTeleopButton : MonoBehaviour
         }
     }
 }
-
 

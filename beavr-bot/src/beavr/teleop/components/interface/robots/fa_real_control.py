@@ -211,10 +211,9 @@ class FaRos2Bridge:
             self._node.create_subscription(JointState, self.topics.joint_state_topic, self._on_joint_state, 10)
             self.available = True
             logger.info(
-                "FA ROS2 bridge connected: joint_state=%s min_snap_target=%s min_snap_output=%s",
+                "FA ROS2 bridge connected: joint_state=%s min_snap_target=%s",
                 self.topics.joint_state_topic,
                 self.topics.min_snap_target_topic,
-                self.topics.upper_position_command_topic,
             )
         except Exception as exc:
             self.available = False
@@ -298,8 +297,7 @@ class FaRealControl(Component):
         self._left_endeff_publish_port = left_endeff_publish_port or left_state_publish_port
         self._publisher_manager.register_topic(self.host, self._right_state_publish_port, "fa_right")
         self._publisher_manager.register_topic(self.host, self._left_state_publish_port, "fa_left")
-        
-        self._startup_initial_pose_armed = self.config.initial_pose_enabled
+        self._requires_resume_for_teleop = teleoperation_state_port is not None
 
         self._right_target_subscriber = ZMQSubscriber(
             host, right_target_port, "endeff_coords", message_type=CartesianTarget
@@ -340,17 +338,20 @@ class FaRealControl(Component):
         self._builder = FaUpperPositionCommandBuilder(self.config.upper)
         self._limiter = FaCommandLimiter(self.config.upper)
 
-        self._teleop_active = True
+        self._teleop_active = not self._requires_resume_for_teleop
         self._needs_reset = True
         self._real_reset_ready = self.control_backend == "mujoco"
         self._latest_targets: Dict[str, Optional[CartesianTarget]] = {robots.LEFT: None, robots.RIGHT: None}
         self._latest_target_keys: Dict[str, Optional[tuple]] = {robots.LEFT: None, robots.RIGHT: None}
         self._active_arm_goals: Dict[str, Optional[np.ndarray]] = {robots.LEFT: None, robots.RIGHT: None}
         self._arm_goal_dirty: Dict[str, bool] = {robots.LEFT: False, robots.RIGHT: False}
+        self._hand_init_ready: Dict[str, bool] = {robots.LEFT: False, robots.RIGHT: False}
+        self._accept_cartesian_targets_after_s: Dict[str, float] = {robots.LEFT: 0.0, robots.RIGHT: 0.0}
         self._last_safe_arm_targets: Dict[str, Optional[np.ndarray]] = {robots.LEFT: None, robots.RIGHT: None}
         self._last_ik_cartesian_targets: Dict[str, Optional[CartesianTarget]] = {robots.LEFT: None, robots.RIGHT: None}
         self._pause_hold_command: Optional[FaUpperPositionCommand] = None
         self._resume_hold_until_target = False
+        self._pending_resume_after_initial_pose = False
         self._last_pause_hold_publish_time = 0.0
         self._next_state_publish_time_s = 0.0
         self._last_published_upper_command: Optional[FaUpperPositionCommand] = None
@@ -361,8 +362,8 @@ class FaRealControl(Component):
         self._startup_initial_pose_armed = self.config.initial_pose_enabled
         self._startup_initial_hand_armed = self.config.initial_hand_ros_action is not None
         self._initial_pose_started_at_s: Optional[float] = None
-        self._initial_pose_done = not self.config.initial_pose_enabled
-        self._teleop_ready_prompt_logged = not self.config.initial_pose_enabled
+        self._initial_pose_done = not self._startup_initial_pose_armed
+        self._teleop_ready_prompt_logged = not self._startup_initial_pose_armed
         self._last_initial_pose_publish_time_s = 0.0
         self._last_safety_log_time: Dict[str, float] = {}
 
@@ -399,18 +400,30 @@ class FaRealControl(Component):
         if msg is None:
             return
         if msg.command == robots.PAUSE:
+            if getattr(self, "_pending_resume_after_initial_pose", False):
+                self._cancel_pending_initial_pose_resume("pause command")
             if self._teleop_active:
                 self._enter_pause("pause command")
         elif msg.command == robots.RESUME:
-            if self._teleop_active:
+            if self._teleop_active or getattr(self, "_pending_resume_after_initial_pose", False):
                 return
-            self._teleop_active = True
+            resume_started_at_s = time.time()
             self._needs_reset = True
             self._real_reset_ready = self.control_backend == "mujoco"
             self._latest_targets = {robots.LEFT: None, robots.RIGHT: None}
             self._latest_target_keys = {robots.LEFT: None, robots.RIGHT: None}
             self._active_arm_goals = {robots.LEFT: None, robots.RIGHT: None}
             self._arm_goal_dirty = {robots.LEFT: False, robots.RIGHT: False}
+            self._hand_init_ready = {robots.LEFT: False, robots.RIGHT: False}
+            self._accept_cartesian_targets_after_s = {
+                robots.LEFT: resume_started_at_s,
+                robots.RIGHT: resume_started_at_s,
+            }
+            if not self._initial_pose_ready():
+                self._pending_resume_after_initial_pose = True
+                logger.info("FA resume requested; waiting initial pose before enabling teleop")
+                return
+            self._teleop_active = True
             snapshot = self._resume_hold_snapshot()
             if snapshot is not None:
                 # Resume should seed the next IK solve from the actual arm state,
@@ -420,15 +433,32 @@ class FaRealControl(Component):
                     self._pause_hold_command = self._builder.build(snapshot.left_arm, snapshot.right_arm, snapshot.neck)
             self._resume_hold_until_target = self.config.safety_hold_arm_on_pause and self._pause_hold_command is not None
 
+    def _cancel_pending_initial_pose_resume(self, reason: str) -> None:
+        self._pending_resume_after_initial_pose = False
+        self._resume_hold_until_target = False
+        self._pause_hold_command = None
+        self._teleop_active = False
+        self._hand_init_ready = {robots.LEFT: False, robots.RIGHT: False}
+        logger.info("FA pending teleop resume cancelled: %s", reason)
+
     def _initial_pose_ready(self, now_s: Optional[float] = None) -> bool:
-        if self._initial_pose_done:
+        if getattr(self, "_initial_pose_done", True):
             return True
-        if self._initial_pose_started_at_s is None:
+        if getattr(self, "_initial_pose_started_at_s", None) is None:
             return False
         now = time.time() if now_s is None else float(now_s)
         if now - self._initial_pose_started_at_s < self.config.initial_pose_duration_s:
             return False
         self._initial_pose_done = True
+        if getattr(self, "_pending_resume_after_initial_pose", False):
+            self._pending_resume_after_initial_pose = False
+            self._teleop_active = True
+            target_after_s = time.time()
+            self._accept_cartesian_targets_after_s = {
+                robots.LEFT: target_after_s,
+                robots.RIGHT: target_after_s,
+            }
+            logger.info("FA initial pose ready; teleop resume enabled, waiting operator reset/Hand_Init_H")
         self._log_teleop_ready_once()
         return True
 
@@ -442,6 +472,8 @@ class FaRealControl(Component):
         if not self._startup_initial_hand_armed:
             return
         if not self._initial_pose_done:
+            return
+        if not self._teleop_active:
             return
         action = self.config.initial_hand_ros_action
         if action is None or self.control_backend not in ("real", "real_with_mujoco"):
@@ -506,24 +538,10 @@ class FaRealControl(Component):
         )
 
     def _republish_initial_pose_if_needed(self) -> None:
-        command = getattr(self, "_last_published_upper_command", None)
-        if command is None:
-            return
-        now = time.time()
-        period_s = 1.0 / max(1.0, float(self.config.pause_hold_heartbeat_hz))
-        if now - getattr(self, "_last_initial_pose_publish_time_s", 0.0) < period_s:
-            return
-        if not self._publish_min_snap_target_command(
-            command,
-            self.config.initial_pose_duration_s,
-            self.config.initial_pose_max_velocity_rad_s,
-            self.config.initial_pose_max_acceleration_rad_s2,
-            warning_key="initial_pose_min_snap_unavailable",
-            warning_message="FA initial pose min-snap target publisher unavailable",
-            force=True,
-        ):
-            return
-        self._last_initial_pose_publish_time_s = now
+        # Do not periodically resend the same initial pose target. The external
+        # min-snap node treats every target as a new trajectory; repeated sends
+        # reset the trajectory and show up as visible stutter.
+        return
 
     def _initial_pose_requires_fresh_joint_state(self) -> bool:
         return self.control_backend in ("mujoco", "real", "real_with_mujoco")
@@ -536,6 +554,12 @@ class FaRealControl(Component):
         self._latest_target_keys = {robots.LEFT: None, robots.RIGHT: None}
         self._active_arm_goals = {robots.LEFT: None, robots.RIGHT: None}
         self._arm_goal_dirty = {robots.LEFT: False, robots.RIGHT: False}
+        self._hand_init_ready = {robots.LEFT: False, robots.RIGHT: False}
+        pause_started_at_s = time.time()
+        self._accept_cartesian_targets_after_s = {
+            robots.LEFT: pause_started_at_s,
+            robots.RIGHT: pause_started_at_s,
+        }
         snapshot = self._pause_hold_snapshot()
         if snapshot is not None:
             # The paused pose becomes the safe reference for the next resume.
@@ -546,13 +570,13 @@ class FaRealControl(Component):
         self._resume_hold_until_target = False
 
     def _pause_hold_snapshot(self) -> Optional[FaJointStateSnapshot]:
-        if self.control_backend in ("real", "real_with_mujoco") and not self._real_joint_state_fresh():
+        if not self._real_joint_state_fresh():
             self._warn_safety("pause_joint_state_stale", "pause hold skipped: /joint_states is stale")
             return None
         return self._current_joint_snapshot()
 
     def _resume_hold_snapshot(self) -> Optional[FaJointStateSnapshot]:
-        if self.control_backend in ("real", "real_with_mujoco") and not self._real_joint_state_fresh():
+        if not self._real_joint_state_fresh():
             self._warn_safety("resume_joint_state_stale", "resume hold uses previous pause target: /joint_states is stale")
             return None
         return self._current_joint_snapshot()
@@ -567,6 +591,8 @@ class FaRealControl(Component):
             self._limiter.reset(snapshot.upper_joints)
 
     def _publish_pause_hold_if_needed(self, force: bool = False, reason: str = "pause hold") -> None:
+        if not force:
+            return
         if (
             (self._teleop_active and not getattr(self, "_resume_hold_until_target", False))
             or not self.config.safety_hold_arm_on_pause
@@ -574,9 +600,6 @@ class FaRealControl(Component):
         ):
             return
         now = time.time()
-        period = 1.0 / max(0.1, float(self.config.pause_hold_heartbeat_hz))
-        if not force and now - self._last_pause_hold_publish_time < period:
-            return
         command = FaUpperPositionCommand(now, self._pause_hold_command.values)
         if self._publish_upper_command_outputs(
             command,
@@ -594,6 +617,12 @@ class FaRealControl(Component):
                 "reset held until FA startup initial pose is ready",
             )
             return
+        if not self._teleop_active:
+            self._warn_safety(
+                "reset_teleop_inactive",
+                "reset held until FA teleop resume is enabled after initial pose",
+            )
+            return
         for hand_side, subscriber, publish_port in (
             (robots.RIGHT, self._right_reset_subscriber, self._right_endeff_publish_port),
             (robots.LEFT, self._left_reset_subscriber, self._left_endeff_publish_port),
@@ -603,10 +632,12 @@ class FaRealControl(Component):
             self._publish_current_endeff_homo(hand_side, publish_port)
 
     def _publish_current_endeff_homo(self, hand_side: str, publish_port: int) -> None:
-        snapshot = self._current_joint_snapshot()
-        real_fresh = self._real_joint_state_fresh()
-        if snapshot is None or (self.control_backend == "real" and not real_fresh):
+        if not self._real_joint_state_fresh():
             self._warn_safety("reset_joint_state_stale", f"reset refused for {hand_side}: joint state stale")
+            return
+        snapshot = self._current_joint_snapshot()
+        if snapshot is None:
+            self._warn_safety("reset_joint_state_missing", f"reset refused for {hand_side}: missing joint state")
             return
         arm_joints = snapshot.left_arm if hand_side == robots.LEFT else snapshot.right_arm
         homo = self._ik_client.compute_fk(hand_side, arm_joints)
@@ -622,7 +653,17 @@ class FaRealControl(Component):
             CartesianState(timestamp_s=time.time(), h_matrix=tuple(tuple(float(v) for v in row) for row in homo)),
         )
         self._needs_reset = False
-        self._real_reset_ready = real_fresh or self.control_backend == "mujoco"
+        self._real_reset_ready = True
+        self._hand_init_ready[hand_side] = True
+        if not hasattr(self, "_accept_cartesian_targets_after_s"):
+            self._accept_cartesian_targets_after_s = {robots.LEFT: 0.0, robots.RIGHT: 0.0}
+        # After a pause/resume edge, stale Cartesian targets may still be the
+        # latest ZMQ sample. Only consume targets produced after this fresh
+        # Hand_Init_H response.
+        self._accept_cartesian_targets_after_s[hand_side] = time.time()
+        self._latest_targets[hand_side] = None
+        self._latest_target_keys[hand_side] = None
+        self._last_ik_cartesian_targets[hand_side] = None
         self._sync_ik_reference_from_snapshot(snapshot, reset_limiter=True)
         self._active_arm_goals = {
             robots.LEFT: np.asarray(snapshot.left_arm, dtype=np.float64),
@@ -637,6 +678,25 @@ class FaRealControl(Component):
                 continue
             if msg.hand_side != hand_side:
                 self._warn_safety(f"{hand_side}_wrong_target_side", f"wrong target side: {msg.hand_side}")
+                continue
+            if not self._hand_init_ready.get(hand_side, False):
+                self._warn_safety(
+                    f"{hand_side}_hand_init_pending",
+                    f"{hand_side} target held until Hand_Init_H reset completes",
+                )
+                continue
+            min_target_timestamp_s = float(
+                getattr(self, "_accept_cartesian_targets_after_s", {}).get(hand_side, 0.0)
+            )
+            target_timestamp_s = float(getattr(msg, "timestamp_s", 0.0) or 0.0)
+            if min_target_timestamp_s > 0.0 and target_timestamp_s <= min_target_timestamp_s:
+                self._warn_safety(
+                    f"{hand_side}_stale_after_hand_init_target",
+                    (
+                        f"{hand_side} target held until a fresh post-Hand_Init_H frame arrives "
+                        f"(target_ts={target_timestamp_s:.6f}, min_ts={min_target_timestamp_s:.6f})"
+                    ),
+                )
                 continue
             # A fresh operator target means the post-resume rebaseline finished;
             # stop replaying the paused hold so this target owns the arm command.
@@ -717,10 +777,7 @@ class FaRealControl(Component):
     def _publish_upper_command_if_safe(self) -> None:
         if not self._teleop_active:
             return
-        if self.control_backend == "real" and not self._real_joint_state_fresh():
-            self._warn_safety("joint_state_stale", "FA command rejected: /joint_states stale")
-            return
-        if self.control_backend == "real_with_mujoco" and not self._real_joint_state_fresh():
+        if not self._real_joint_state_fresh():
             self._warn_safety("joint_state_stale", "FA command rejected: /joint_states stale")
             return
         snapshot = self._current_joint_snapshot()
@@ -728,6 +785,16 @@ class FaRealControl(Component):
             self._warn_safety("joint_state_missing", "FA command rejected: missing joint state")
             return
         self._update_active_arm_goals(snapshot)
+        dirty_without_hand_init = [
+            side for side, dirty in getattr(self, "_arm_goal_dirty", {}).items()
+            if dirty and not self._hand_init_ready.get(side, False)
+        ]
+        if dirty_without_hand_init:
+            self._warn_safety(
+                "hand_init_pending",
+                f"FA command held until Hand_Init_H reset completes for {dirty_without_hand_init}",
+            )
+            return
         if not any(getattr(self, "_arm_goal_dirty", {}).values()):
             return
         active_goals = getattr(self, "_active_arm_goals", {robots.LEFT: None, robots.RIGHT: None})
@@ -783,7 +850,8 @@ class FaRealControl(Component):
                 self._latest_target_keys[hand_side] = target_key
                 continue
             current_arm = snapshot.left_arm if hand_side == robots.LEFT else snapshot.right_arm
-            ik = self._ik_client.solve(hand_side, target, current_arm)
+            ik_seed = last_safe if last_safe is not None else np.asarray(current_arm, dtype=np.float64)
+            ik = self._ik_client.solve(hand_side, target, ik_seed)
             if not ik.success:
                 self._warn_safety(f"{hand_side}_ik_fail", f"{hand_side} IK failed: {ik.message}")
                 last = self._last_safe_arm_targets[hand_side]
@@ -793,9 +861,7 @@ class FaRealControl(Component):
                 solution_limited = False
             else:
                 solved = np.asarray(ik.q_target, dtype=np.float64)
-                reference = self._last_safe_arm_targets[hand_side]
-                if reference is None:
-                    reference = np.asarray(current_arm, dtype=np.float64)
+                reference = ik_seed
                 if self._ik_error_exceeds_quality_limit(ik):
                     self._active_arm_goals[hand_side] = np.asarray(reference, dtype=np.float64)
                     self._arm_goal_dirty[hand_side] = False
@@ -809,24 +875,20 @@ class FaRealControl(Component):
                     )
                     continue
                 max_jump = float(np.max(np.abs(solved - reference)))
-                solution_limited = False
                 if self.config.max_ik_solution_jump_rad > 0.0 and max_jump > self.config.max_ik_solution_jump_rad:
-                    jump_limit = float(getattr(self.config, "ik_solution_jump_clip_rad", self.config.max_ik_solution_jump_rad))
-                    if jump_limit <= 0.0:
-                        jump_limit = float(self.config.max_ik_solution_jump_rad)
-                    solved = np.asarray(reference, dtype=np.float64) + np.clip(
-                        solved - np.asarray(reference, dtype=np.float64),
-                        -jump_limit,
-                        jump_limit,
-                    )
-                    solution_limited = True
+                    self._active_arm_goals[hand_side] = np.asarray(reference, dtype=np.float64)
+                    self._arm_goal_dirty[hand_side] = False
+                    self._latest_target_keys[hand_side] = target_key
                     self._warn_safety(
                         f"{hand_side}_ik_solution_jump",
-                        f"{hand_side} IK solution jump clipped: {max_jump:.3f} rad to {jump_limit:.3f} rad",
+                        (
+                            f"{hand_side} IK solution held: solution_jump={max_jump:.3f}rad "
+                            f"limit={self.config.max_ik_solution_jump_rad:.3f}rad"
+                        ),
                     )
+                    continue
                 self._last_safe_arm_targets[hand_side] = solved.copy()
-                if not solution_limited:
-                    self._last_ik_cartesian_targets[hand_side] = target
+                self._last_ik_cartesian_targets[hand_side] = target
                 self._arm_goal_dirty[hand_side] = True
             self._active_arm_goals[hand_side] = np.asarray(solved, dtype=np.float64)
             self._latest_target_keys[hand_side] = target_key

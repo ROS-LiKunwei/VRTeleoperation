@@ -710,7 +710,12 @@ def test_fa_resume_holds_pause_pose_until_first_valid_target():
     assert published[-1][2] is True
     assert published[-1][3]["force_min_snap_publish"] is True
 
-    target = SimpleNamespace(hand_side=robots.LEFT, hand_command=None)
+    controller._hand_init_ready = {robots.LEFT: True, robots.RIGHT: False}
+    target = SimpleNamespace(
+        hand_side=robots.LEFT,
+        hand_command=None,
+        timestamp_s=controller._accept_cartesian_targets_after_s[robots.LEFT] + 1.0,
+    )
     controller._left_target_subscriber = FakeTargetSubscriber(target)
     controller._right_target_subscriber = FakeTargetSubscriber()
     controller._publish_hand_command_on_edge = lambda hand_side, hand_command: None
@@ -721,12 +726,50 @@ def test_fa_resume_holds_pause_pose_until_first_valid_target():
     assert controller._latest_targets[robots.LEFT] is target
 
 
+def test_fa_resume_requires_fresh_target_after_hand_init():
+    class FakeTargetSubscriber:
+        def __init__(self, message=None):
+            self.message = message
+
+        def recv_keypoints(self):
+            message = self.message
+            self.message = None
+            return message
+
+    controller = FaRealControl.__new__(FaRealControl)
+    controller._hand_init_ready = {robots.LEFT: True, robots.RIGHT: False}
+    controller._accept_cartesian_targets_after_s = {robots.LEFT: 100.0, robots.RIGHT: 0.0}
+    controller._latest_targets = {robots.LEFT: None, robots.RIGHT: None}
+    controller._latest_target_keys = {robots.LEFT: None, robots.RIGHT: None}
+    controller._resume_hold_until_target = True
+    warnings = []
+    controller._warn_safety = lambda key, message: warnings.append((key, message))
+    controller._publish_hand_command_on_edge = lambda hand_side, hand_command: None
+    stale_target = SimpleNamespace(hand_side=robots.LEFT, hand_command=None, timestamp_s=99.0)
+    controller._left_target_subscriber = FakeTargetSubscriber(stale_target)
+    controller._right_target_subscriber = FakeTargetSubscriber()
+
+    controller._receive_cartesian_targets()
+
+    assert controller._latest_targets[robots.LEFT] is None
+    assert controller._resume_hold_until_target
+    assert warnings[-1][0] == "left_stale_after_hand_init_target"
+
+    fresh_target = SimpleNamespace(hand_side=robots.LEFT, hand_command=None, timestamp_s=101.0)
+    controller._left_target_subscriber = FakeTargetSubscriber(fresh_target)
+
+    controller._receive_cartesian_targets()
+
+    assert controller._latest_targets[robots.LEFT] is fresh_target
+    assert not controller._resume_hold_until_target
+
+
 def test_fa_real_control_holds_large_ik_solution_jump():
     controller = FaRealControl.__new__(FaRealControl)
     controller.config = FaRealControlConfig(max_ik_solution_jump_rad=1.0)
     controller._teleop_active = True
     controller.control_backend = "mujoco"
-    controller._real_joint_state_fresh = lambda: False
+    controller._real_joint_state_fresh = lambda: True
     controller._warn_safety_messages = []
     controller._warn_safety = lambda key, message: controller._warn_safety_messages.append((key, message))
     snapshot = FaJointStateSnapshot(
@@ -755,10 +798,48 @@ def test_fa_real_control_holds_large_ik_solution_jump():
 
     controller._publish_upper_command_if_safe()
 
-    assert published
-    assert published[0].right_arm == pytest.approx(tuple([0.1] * 7))
+    assert published == []
     assert controller._last_safe_arm_targets[robots.RIGHT] == pytest.approx(np.asarray([0.1] * 7))
     assert controller._warn_safety_messages[0][0] == "right_ik_solution_jump"
+    assert "held" in controller._warn_safety_messages[0][1]
+
+
+def test_fa_real_control_uses_last_safe_as_ik_seed_for_recovery():
+    controller = FaRealControl.__new__(FaRealControl)
+    controller.config = FaRealControlConfig(max_ik_solution_jump_rad=1.0)
+    snapshot = FaJointStateSnapshot(
+        timestamp_s=1.0,
+        left_arm=tuple([0.0] * 7),
+        right_arm=tuple([2.0] * 7),
+        neck=(0.0, 0.0),
+    )
+    target = SimpleNamespace(
+        hand_side=robots.RIGHT,
+        timestamp_s=123.0,
+        position_m=(0.0, 0.0, 0.0),
+        orientation_xyzw=(0.0, 0.0, 0.0, 1.0),
+    )
+    last_safe = np.asarray([0.1] * 7, dtype=np.float64)
+    controller._latest_targets = {robots.LEFT: None, robots.RIGHT: target}
+    controller._latest_target_keys = {robots.LEFT: None, robots.RIGHT: None}
+    controller._active_arm_goals = {robots.LEFT: None, robots.RIGHT: None}
+    controller._arm_goal_dirty = {robots.LEFT: False, robots.RIGHT: False}
+    controller._last_safe_arm_targets = {robots.LEFT: None, robots.RIGHT: last_safe.copy()}
+    controller._last_ik_cartesian_targets = {robots.LEFT: None, robots.RIGHT: None}
+    seed_calls = []
+
+    def solve(hand_side, target, current_arm):
+        seed_calls.append(np.asarray(current_arm, dtype=np.float64).copy())
+        return FaArmIkResult(success=True, q_target=tuple([0.15] * 7), has_solution=True)
+
+    controller._ik_client = SimpleNamespace(solve=solve)
+    controller._warn_safety = lambda key, message: (_ for _ in ()).throw(AssertionError(message))
+
+    controller._update_active_arm_goals(snapshot)
+
+    np.testing.assert_allclose(seed_calls[0], last_safe)
+    assert controller._arm_goal_dirty[robots.RIGHT] is True
+    assert controller._last_safe_arm_targets[robots.RIGHT] == pytest.approx(np.asarray([0.15] * 7))
 
 
 def test_fa_command_publish_reuses_active_goal_without_repeating_ik_for_same_target():
