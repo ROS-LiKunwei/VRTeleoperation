@@ -74,6 +74,7 @@ class FaUpperPositionSafetyConfig:
     joint_upper_limits_rad: Tuple[float, ...] = field(default_factory=lambda: tuple([3.14] * 16))
     max_joint_velocity_rad_s: Tuple[float, ...] = field(default_factory=lambda: tuple([3.0] * 16))
     max_joint_jump_rad: float = 0.5
+    max_rate_limit_dt_s: float = 0.02
     max_translation_step_m: float = 0.30
     max_rotation_step_rad: float = 0.5
     workspace_limits: dict[str, Tuple[float, float]] = field(
@@ -156,6 +157,10 @@ class FaCommandLimiter:
                 clipped = last + np.clip(clipped - last, -max_joint_jump, max_joint_jump)
                 reason_parts.append(f"joint jump limited: {float(np.max(jump)):.3f} rad")
             dt = max(1e-3, now - (self._last_publish_time_s or now))
+            max_rate_limit_dt = float(self.config.max_rate_limit_dt_s)
+            if max_rate_limit_dt > 0.0 and dt > max_rate_limit_dt:
+                dt = max_rate_limit_dt
+                reason_parts.append("joint velocity dt capped")
             max_delta = np.asarray(self.config.max_joint_velocity_rad_s, dtype=np.float64) * dt
             limited = last + np.clip(clipped - last, -max_delta, max_delta)
             if not np.allclose(limited, clipped, atol=1e-12):

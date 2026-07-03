@@ -5,6 +5,7 @@ from __future__ import annotations
 import abc
 import csv
 import importlib
+import logging
 import os
 import sys
 import threading
@@ -19,8 +20,7 @@ import numpy as np
 from beavr.teleop.components.interface.robots.fa_command_builder import FA_ARM_JOINT_COUNT
 from beavr.teleop.components.operator.operator_types import CartesianTarget
 
-_ACCEPTABLE_POSITION_THRESHOLD_M = 0.05
-_ACCEPTABLE_ORIENTATION_THRESHOLD_RAD = 0.5
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -32,6 +32,15 @@ class FaArmIkConfig:
     max_iters: int = 200
     max_joint_step_rad: float = 1.0
     eps: float = 1e-3
+    skip_svd_fallback: bool = False
+    position_weight: float = 1.0
+    orientation_weight: float = 1.0
+    acceptable_position_error_m: float = 0.05
+    acceptable_orientation_error_rad: float = 0.5
+    comfort_nullspace_log_enabled: bool = True
+    comfort_nullspace_weight: float = 0.08
+    comfort_left_arm_positions_rad: tuple[float, ...] | None = None
+    comfort_right_arm_positions_rad: tuple[float, ...] | None = None
     log_enabled: bool = True
     log_dir: str = ""
 
@@ -43,6 +52,35 @@ class FaArmIkConfig:
         object.__setattr__(self, "max_iters", max(1, int(self.max_iters)))
         object.__setattr__(self, "max_joint_step_rad", max(0.0, float(self.max_joint_step_rad)))
         object.__setattr__(self, "eps", max(1e-9, float(self.eps)))
+        object.__setattr__(self, "position_weight", max(0.0, float(self.position_weight)))
+        object.__setattr__(self, "orientation_weight", max(0.0, float(self.orientation_weight)))
+        object.__setattr__(
+            self,
+            "acceptable_position_error_m",
+            max(0.0, float(self.acceptable_position_error_m)),
+        )
+        object.__setattr__(
+            self,
+            "acceptable_orientation_error_rad",
+            max(0.0, float(self.acceptable_orientation_error_rad)),
+        )
+        object.__setattr__(
+            self,
+            "comfort_nullspace_weight",
+            max(0.0, float(self.comfort_nullspace_weight)),
+        )
+        if self.comfort_left_arm_positions_rad is not None:
+            object.__setattr__(
+                self,
+                "comfort_left_arm_positions_rad",
+                tuple(float(v) for v in _as_arm_q(self.comfort_left_arm_positions_rad)),
+            )
+        if self.comfort_right_arm_positions_rad is not None:
+            object.__setattr__(
+                self,
+                "comfort_right_arm_positions_rad",
+                tuple(float(v) for v in _as_arm_q(self.comfort_right_arm_positions_rad)),
+            )
 
 
 @dataclass(frozen=True)
@@ -92,6 +130,19 @@ class FaPybindIkClient(FaArmIkClientBase):
                 "IK_7DOF_INSTALL_PREFIX to the deployed install/ik_7dof directory."
             ) from exc
         self._solver = module.FaIkSolver(config.urdf_file, config.srdf_file)
+        self._log_comfort_nullspace_config_once()
+
+    def _log_comfort_nullspace_config_once(self) -> None:
+        if not self.config.comfort_nullspace_log_enabled:
+            return
+        left = _comfort_reference_for_side(self.config, "left")
+        right = _comfort_reference_for_side(self.config, "right")
+        logger.info(
+            "FA IK comfort nullspace diagnostics enabled: weight=%.6f left_q_ref=%s right_q_ref=%s",
+            self.config.comfort_nullspace_weight,
+            _format_q_for_log(left),
+            _format_q_for_log(right),
+        )
 
     def solve(self, hand_side: str, target: CartesianTarget, current_arm_q: Sequence[float]) -> FaArmIkResult:
         current = _as_arm_q(current_arm_q)
@@ -104,6 +155,11 @@ class FaPybindIkClient(FaArmIkClientBase):
             self.config.reference_frame,
             self.config.max_iters,
             self.config.eps,
+            self.config.skip_svd_fallback,
+            self.config.position_weight,
+            self.config.orientation_weight,
+            self.config.acceptable_position_error_m,
+            self.config.acceptable_orientation_error_rad,
         )
         q_target = out.get("q_target") or ()
         try:
@@ -116,8 +172,8 @@ class FaPybindIkClient(FaArmIkClientBase):
         position_error = float(out.get("position_error", np.inf))
         orientation_error = float(out.get("orientation_error", np.inf))
         acceptable_solution = (
-            position_error <= _ACCEPTABLE_POSITION_THRESHOLD_M
-            and orientation_error <= _ACCEPTABLE_ORIENTATION_THRESHOLD_RAD
+            position_error <= self.config.acceptable_position_error_m
+            and orientation_error <= self.config.acceptable_orientation_error_rad
         )
         has_solution = has_usable_q_target
         success = has_solution
@@ -177,6 +233,68 @@ def _limit_joint_step(current: np.ndarray, target: np.ndarray, max_step_rad: flo
     return current + delta * (max_step_rad / delta_norm)
 
 
+def _comfort_reference_for_side(config: FaArmIkConfig, hand_side: str) -> np.ndarray | None:
+    values = (
+        config.comfort_left_arm_positions_rad
+        if hand_side == "left"
+        else config.comfort_right_arm_positions_rad
+    )
+    if values is None:
+        return None
+    return _as_arm_q(values)
+
+
+def _comfort_nullspace_metrics(
+    *,
+    config: FaArmIkConfig,
+    hand_side: str,
+    current_arm_q: Sequence[float],
+    q_target: Sequence[float],
+) -> dict[str, float | np.ndarray | None]:
+    q_ref = _comfort_reference_for_side(config, hand_side)
+    if q_ref is None:
+        return {
+            "q_ref": None,
+            "seed_distance": None,
+            "target_distance": None,
+            "seed_cost": None,
+            "target_cost": None,
+            "cost_delta": None,
+            "target_pull": None,
+            "target_pull_norm": None,
+        }
+    current = _as_arm_q(current_arm_q)
+    target = _as_arm_q(q_target)
+    seed_delta = current - q_ref
+    target_delta = target - q_ref
+    weight = float(config.comfort_nullspace_weight)
+    target_pull = -weight * target_delta
+    seed_cost = 0.5 * weight * float(np.dot(seed_delta, seed_delta))
+    target_cost = 0.5 * weight * float(np.dot(target_delta, target_delta))
+    return {
+        "q_ref": q_ref,
+        "seed_distance": float(np.linalg.norm(seed_delta)),
+        "target_distance": float(np.linalg.norm(target_delta)),
+        "seed_cost": seed_cost,
+        "target_cost": target_cost,
+        "cost_delta": target_cost - seed_cost,
+        "target_pull": target_pull,
+        "target_pull_norm": float(np.linalg.norm(target_pull)),
+    }
+
+
+def _format_q_for_log(values: np.ndarray | None) -> str:
+    if values is None:
+        return "unset"
+    return "[" + ", ".join(f"{float(value):.3f}" for value in values) + "]"
+
+
+def _format_optional_float(value) -> str:
+    if value is None:
+        return ""
+    return f"{float(value):.9g}"
+
+
 def _quat_xyzw_to_rotation(quat_xyzw: Sequence[float]) -> np.ndarray:
     q = np.asarray(quat_xyzw, dtype=np.float64)
     if q.shape != (4,) or not np.all(np.isfinite(q)):
@@ -234,6 +352,18 @@ class _FaIkCsvLogger:
         "max_iters",
         "max_joint_step_rad",
         "eps",
+        "skip_svd_fallback",
+        "position_weight",
+        "orientation_weight",
+        "acceptable_position_error_m",
+        "acceptable_orientation_error_rad",
+        "comfort_nullspace_weight",
+        "comfort_seed_distance_rad",
+        "comfort_target_distance_rad",
+        "comfort_seed_cost",
+        "comfort_target_cost",
+        "comfort_cost_delta",
+        "comfort_target_pull_norm",
         "target_x",
         "target_y",
         "target_z",
@@ -262,6 +392,20 @@ class _FaIkCsvLogger:
         "q_target4",
         "q_target5",
         "q_target6",
+        "comfort_q_ref0",
+        "comfort_q_ref1",
+        "comfort_q_ref2",
+        "comfort_q_ref3",
+        "comfort_q_ref4",
+        "comfort_q_ref5",
+        "comfort_q_ref6",
+        "comfort_target_pull0",
+        "comfort_target_pull1",
+        "comfort_target_pull2",
+        "comfort_target_pull3",
+        "comfort_target_pull4",
+        "comfort_target_pull5",
+        "comfort_target_pull6",
     )
 
     def __init__(self, log_dir: str):
@@ -285,6 +429,12 @@ class _FaIkCsvLogger:
         result: FaArmIkResult,
     ) -> None:
         now_s = time.time()
+        comfort = _comfort_nullspace_metrics(
+            config=config,
+            hand_side=hand_side,
+            current_arm_q=current_arm_q,
+            q_target=q_target,
+        )
         row = {
             "wall_time_s": f"{now_s:.6f}",
             "wall_time_iso": datetime.fromtimestamp(now_s).isoformat(timespec="milliseconds"),
@@ -296,6 +446,18 @@ class _FaIkCsvLogger:
             "max_iters": int(config.max_iters),
             "max_joint_step_rad": f"{float(config.max_joint_step_rad):.9g}",
             "eps": f"{float(config.eps):.9g}",
+            "skip_svd_fallback": int(config.skip_svd_fallback),
+            "position_weight": f"{float(config.position_weight):.9g}",
+            "orientation_weight": f"{float(config.orientation_weight):.9g}",
+            "acceptable_position_error_m": f"{float(config.acceptable_position_error_m):.9g}",
+            "acceptable_orientation_error_rad": f"{float(config.acceptable_orientation_error_rad):.9g}",
+            "comfort_nullspace_weight": f"{float(config.comfort_nullspace_weight):.9g}",
+            "comfort_seed_distance_rad": _format_optional_float(comfort["seed_distance"]),
+            "comfort_target_distance_rad": _format_optional_float(comfort["target_distance"]),
+            "comfort_seed_cost": _format_optional_float(comfort["seed_cost"]),
+            "comfort_target_cost": _format_optional_float(comfort["target_cost"]),
+            "comfort_cost_delta": _format_optional_float(comfort["cost_delta"]),
+            "comfort_target_pull_norm": _format_optional_float(comfort["target_pull_norm"]),
             "success": int(result.success),
             "has_solution": int(result.has_solution),
             "position_error_m": f"{result.position_error:.9g}",
@@ -312,6 +474,14 @@ class _FaIkCsvLogger:
             row[f"current_q{idx}"] = f"{float(value):.9g}"
         for idx, value in enumerate(q_target):
             row[f"q_target{idx}"] = f"{float(value):.9g}"
+        q_ref = comfort["q_ref"]
+        if q_ref is not None:
+            for idx, value in enumerate(q_ref):
+                row[f"comfort_q_ref{idx}"] = f"{float(value):.9g}"
+        target_pull = comfort["target_pull"]
+        if target_pull is not None:
+            for idx, value in enumerate(target_pull):
+                row[f"comfort_target_pull{idx}"] = f"{float(value):.9g}"
         with self._lock:
             self._writer.writerow(row)
             self._file.flush()

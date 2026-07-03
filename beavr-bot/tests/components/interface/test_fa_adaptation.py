@@ -2,6 +2,8 @@ import csv
 import numpy as np
 import pytest
 import sys
+import threading
+import time
 from types import SimpleNamespace
 
 from beavr.lerobot.common.robot_devices.robots.configs import FaAdapterConfig
@@ -17,8 +19,10 @@ from beavr.teleop.components.interface.robots.fa_command_builder import (
     FA_NECK_JOINT_NAMES,
     FA_RIGHT_ARM_JOINT_NAMES,
     FA_UPPER_COMMAND_LENGTH,
+    FaCommandLimiter,
     FaJointStateCache,
     FaJointStateSnapshot,
+    FaUpperPositionSafetyConfig,
     FaUpperPositionCommand,
     FaUpperPositionCommandBuilder,
 )
@@ -279,7 +283,11 @@ def test_fa_ik_result_requires_7d_and_pybind_client_calls_solver(monkeypatch, tm
             self.urdf_file = urdf_file
             self.srdf_file = srdf_file
 
-        def solve_arm_ik(self, translation, rotation, arm_side, initial_q, reference_frame, max_iters, eps):
+        def solve_arm_ik(
+            self, translation, rotation, arm_side, initial_q, reference_frame, max_iters, eps,
+            skip_svd_fallback=False, position_weight=1.0, orientation_weight=1.0,
+            acceptable_position_error=0.05, acceptable_orientation_error=0.05
+        ):
             assert np.allclose(translation, [0.1, 0.2, 0.3])
             assert np.allclose(rotation, np.eye(3))
             assert arm_side == robots.LEFT
@@ -287,6 +295,11 @@ def test_fa_ik_result_requires_7d_and_pybind_client_calls_solver(monkeypatch, tm
             assert reference_frame == "pelvis"
             assert max_iters == 9
             assert eps == pytest.approx(1e-4)
+            assert skip_svd_fallback is True
+            assert position_weight == pytest.approx(1.0)
+            assert orientation_weight == pytest.approx(0.45)
+            assert acceptable_position_error == pytest.approx(0.04)
+            assert acceptable_orientation_error == pytest.approx(0.5)
             return {
                 "success": True,
                 "has_solution": True,
@@ -307,12 +320,17 @@ def test_fa_ik_result_requires_7d_and_pybind_client_calls_solver(monkeypatch, tm
     client = FaPybindIkClient(
         FaArmIkConfig(
             urdf_file="/home/likunwei/dataCollection/beavr-bot/robots/fa_description/urdf/fa_robot.urdf",
-            module_name="fake_ik_7dof_pybind",
-            max_iters=9,
-            eps=1e-4,
-            log_dir=str(tmp_path),
+                module_name="fake_ik_7dof_pybind",
+                max_iters=9,
+                max_joint_step_rad=0.0,
+                eps=1e-4,
+                skip_svd_fallback=True,
+                orientation_weight=0.45,
+                acceptable_position_error_m=0.04,
+                acceptable_orientation_error_rad=0.5,
+                log_dir=str(tmp_path),
+            )
         )
-    )
     target = CartesianTarget(
         timestamp_s=1.0,
         hand_side=robots.LEFT,
@@ -345,7 +363,11 @@ def test_fa_ik_accepts_approximate_solution_when_position_and_orientation_within
         def __init__(self, urdf_file, srdf_file=""):
             pass
 
-        def solve_arm_ik(self, translation, rotation, arm_side, initial_q, reference_frame, max_iters, eps):
+        def solve_arm_ik(
+            self, translation, rotation, arm_side, initial_q, reference_frame, max_iters, eps,
+            skip_svd_fallback=False, position_weight=1.0, orientation_weight=1.0,
+            acceptable_position_error=0.05, acceptable_orientation_error=0.05
+        ):
             return {
                 "success": False,
                 "has_solution": True,
@@ -361,6 +383,7 @@ def test_fa_ik_accepts_approximate_solution_when_position_and_orientation_within
         FaArmIkConfig(
             urdf_file="/tmp/fa.urdf",
             module_name="fake_approx_ik_7dof_pybind",
+            max_joint_step_rad=0.0,
             log_enabled=False,
         )
     )
@@ -394,7 +417,11 @@ def test_fa_ik_uses_best_approximation_when_position_or_orientation_exceeds_thre
         def __init__(self, urdf_file, srdf_file=""):
             pass
 
-        def solve_arm_ik(self, translation, rotation, arm_side, initial_q, reference_frame, max_iters, eps):
+        def solve_arm_ik(
+            self, translation, rotation, arm_side, initial_q, reference_frame, max_iters, eps,
+            skip_svd_fallback=False, position_weight=1.0, orientation_weight=1.0,
+            acceptable_position_error=0.05, acceptable_orientation_error=0.05
+        ):
             return {
                 "success": False,
                 "has_solution": True,
@@ -410,6 +437,7 @@ def test_fa_ik_uses_best_approximation_when_position_or_orientation_exceeds_thre
         FaArmIkConfig(
             urdf_file="/tmp/fa.urdf",
             module_name="fake_reject_ik_7dof_pybind",
+            max_joint_step_rad=0.0,
             log_enabled=False,
         )
     )
@@ -434,7 +462,11 @@ def test_fa_ik_rejects_when_no_usable_q_target(monkeypatch):
         def __init__(self, urdf_file, srdf_file=""):
             pass
 
-        def solve_arm_ik(self, translation, rotation, arm_side, initial_q, reference_frame, max_iters, eps):
+        def solve_arm_ik(
+            self, translation, rotation, arm_side, initial_q, reference_frame, max_iters, eps,
+            skip_svd_fallback=False, position_weight=1.0, orientation_weight=1.0,
+            acceptable_position_error=0.05, acceptable_orientation_error=0.05
+        ):
             return {
                 "success": False,
                 "has_solution": False,
@@ -450,6 +482,7 @@ def test_fa_ik_rejects_when_no_usable_q_target(monkeypatch):
         FaArmIkConfig(
             urdf_file="/tmp/fa.urdf",
             module_name="fake_reject_ik_7dof_pybind",
+            max_joint_step_rad=0.0,
             log_enabled=False,
         )
     )
@@ -842,12 +875,436 @@ def test_fa_real_control_uses_last_safe_as_ik_seed_for_recovery():
     assert controller._last_safe_arm_targets[robots.RIGHT] == pytest.approx(np.asarray([0.15] * 7))
 
 
+def test_fa_multi_seed_uses_escape_seed_when_primary_seed_is_bad_branch():
+    controller = FaRealControl.__new__(FaRealControl)
+    escape_seed = tuple([0.3] * 7)
+    controller.config = FaRealControlConfig(
+        max_ik_solution_jump_rad=1.0,
+        ik_max_position_error_m=0.08,
+        ik_max_orientation_error_rad=0.2,
+        ik_multi_seed_enabled=True,
+        ik_escape_right_arm_positions_rad=escape_seed,
+    )
+    snapshot = FaJointStateSnapshot(
+        timestamp_s=1.0,
+        left_arm=tuple([0.0] * 7),
+        right_arm=tuple([0.0] * 7),
+        neck=(0.0, 0.0),
+    )
+    target = CartesianTarget(
+        timestamp_s=123.0,
+        hand_side=robots.RIGHT,
+        frame_id="base",
+        position_m=(0.4, -0.3, 0.2),
+        orientation_xyzw=(0.0, 0.0, 0.0, 1.0),
+    )
+    controller._latest_targets = {robots.LEFT: None, robots.RIGHT: target}
+    controller._latest_target_keys = {robots.LEFT: None, robots.RIGHT: None}
+    controller._active_arm_goals = {robots.LEFT: None, robots.RIGHT: None}
+    controller._arm_goal_dirty = {robots.LEFT: False, robots.RIGHT: False}
+    controller._last_safe_arm_targets = {robots.LEFT: None, robots.RIGHT: np.asarray([0.0] * 7)}
+    controller._last_ik_cartesian_targets = {robots.LEFT: None, robots.RIGHT: None}
+    controller._ik_problem_counts = {robots.LEFT: 0, robots.RIGHT: 0}
+    controller._arm_escape_active = {robots.LEFT: False, robots.RIGHT: False}
+    seed_calls = []
+
+    def solve(hand_side, solve_target, current_arm):
+        seed = np.asarray(current_arm, dtype=np.float64)
+        seed_calls.append(seed.copy())
+        if np.allclose(seed, escape_seed):
+            return FaArmIkResult(
+                success=True,
+                q_target=tuple([0.35] * 7),
+                has_solution=True,
+                position_error=0.01,
+                orientation_error=0.02,
+            )
+        return FaArmIkResult(
+            success=True,
+            q_target=tuple([0.1] * 7),
+            has_solution=True,
+            position_error=0.2,
+            orientation_error=0.4,
+        )
+
+    controller._ik_client = SimpleNamespace(solve=solve)
+    controller._warn_safety = lambda key, message: (_ for _ in ()).throw(AssertionError(message))
+
+    controller._update_active_arm_goals(snapshot)
+    deadline = time.time() + 0.5
+    while time.time() < deadline and controller._active_arm_goals[robots.RIGHT] is None:
+        controller._apply_completed_arm_ik_updates()
+        time.sleep(0.005)
+
+    assert any(np.allclose(seed, escape_seed) for seed in seed_calls)
+    assert controller._active_arm_goals[robots.RIGHT] == pytest.approx(np.asarray([0.35] * 7))
+    assert controller._arm_goal_dirty[robots.RIGHT] is True
+    assert controller._ik_problem_counts[robots.RIGHT] == 0
+
+
+def test_fa_escape_mode_triggers_after_consecutive_ik_problems_and_clears_on_reach():
+    controller = FaRealControl.__new__(FaRealControl)
+    escape_target = np.asarray([0.2] * 7, dtype=np.float64)
+    controller.config = FaRealControlConfig(
+        ik_escape_enabled=True,
+        ik_escape_trigger_count=2,
+        ik_escape_target_tolerance_rad=0.04,
+        ik_escape_right_arm_positions_rad=tuple(escape_target),
+    )
+    controller._ik_problem_counts = {robots.LEFT: 0, robots.RIGHT: 0}
+    controller._arm_escape_active = {robots.LEFT: False, robots.RIGHT: False}
+    warnings = []
+    controller._warn_safety = lambda key, message: warnings.append((key, message))
+
+    problem_update = lambda: fa_real_control_module._ArmIkUpdate(
+        hand_side=robots.RIGHT,
+        target_key=("timestamp", 1.0),
+        active_goal=np.asarray([0.0] * 7),
+        dirty=False,
+        counts_as_ik_problem=True,
+    )
+    controller._record_arm_ik_outcome(problem_update())
+    controller._record_arm_ik_outcome(problem_update())
+
+    assert controller._arm_escape_active[robots.RIGHT] is True
+    assert warnings[-1][0] == "right_ik_escape_trigger"
+
+    snapshot = FaJointStateSnapshot(
+        timestamp_s=1.0,
+        left_arm=tuple([0.0] * 7),
+        right_arm=tuple([0.0] * 7),
+        neck=(0.0, 0.0),
+    )
+    target = CartesianTarget(
+        timestamp_s=2.0,
+        hand_side=robots.RIGHT,
+        frame_id="base",
+        position_m=(0.4, -0.3, 0.2),
+        orientation_xyzw=(0.0, 0.0, 0.0, 1.0),
+    )
+    controller._latest_targets = {robots.LEFT: None, robots.RIGHT: target}
+    controller._latest_target_keys = {robots.LEFT: None, robots.RIGHT: None}
+    controller._active_arm_goals = {robots.LEFT: None, robots.RIGHT: None}
+    controller._arm_goal_dirty = {robots.LEFT: False, robots.RIGHT: False}
+    controller._last_safe_arm_targets = {robots.LEFT: None, robots.RIGHT: np.asarray([0.0] * 7)}
+    controller._last_ik_cartesian_targets = {robots.LEFT: None, robots.RIGHT: None}
+    controller._pending_ik_futures = {}
+    controller._ik_client = SimpleNamespace(
+        solve=lambda hand_side, solve_target, current_arm: (_ for _ in ()).throw(AssertionError("IK should be skipped"))
+    )
+
+    controller._update_active_arm_goals(snapshot)
+
+    assert controller._active_arm_goals[robots.RIGHT] == pytest.approx(escape_target)
+    assert controller._arm_goal_dirty[robots.RIGHT] is True
+    assert controller._latest_target_keys[robots.RIGHT][0] == "escape"
+
+    command = FaUpperPositionCommand(
+        timestamp_s=3.0,
+        values=tuple([0.0] * 7 + list(escape_target) + [0.0, 0.0]),
+    )
+    controller._update_arm_goal_dirty_after_publish(command)
+
+    assert controller._arm_escape_active[robots.RIGHT] is False
+    assert controller._ik_problem_counts[robots.RIGHT] == 0
+    assert controller._arm_goal_dirty[robots.RIGHT] is False
+    assert controller._last_safe_arm_targets[robots.RIGHT] == pytest.approx(escape_target)
+    assert controller._latest_target_keys[robots.RIGHT] is None
+
+
+def test_fa_real_control_backs_off_unreachable_ik_target_to_last_reachable_pose():
+    controller = FaRealControl.__new__(FaRealControl)
+    controller.config = FaRealControlConfig(
+        max_ik_solution_jump_rad=1.0,
+        ik_max_position_error_m=0.08,
+        ik_max_orientation_error_rad=0.2,
+        ik_reachable_fallback_enabled=True,
+        ik_reachable_fallback_iterations=4,
+    )
+    snapshot = FaJointStateSnapshot(
+        timestamp_s=1.0,
+        left_arm=tuple([0.0] * 7),
+        right_arm=tuple([0.0] * 7),
+        neck=(0.0, 0.0),
+    )
+    previous_target = CartesianTarget(
+        timestamp_s=1.0,
+        hand_side=robots.RIGHT,
+        frame_id="base",
+        position_m=(0.0, 0.0, 0.0),
+        orientation_xyzw=(0.0, 0.0, 0.0, 1.0),
+    )
+    current_target = CartesianTarget(
+        timestamp_s=2.0,
+        hand_side=robots.RIGHT,
+        frame_id="base",
+        position_m=(1.0, 0.0, 0.0),
+        orientation_xyzw=(0.0, 0.0, 0.0, 1.0),
+    )
+    last_safe = np.asarray([0.1] * 7, dtype=np.float64)
+    controller._latest_targets = {robots.LEFT: None, robots.RIGHT: current_target}
+    controller._latest_target_keys = {robots.LEFT: None, robots.RIGHT: None}
+    controller._active_arm_goals = {robots.LEFT: None, robots.RIGHT: None}
+    controller._arm_goal_dirty = {robots.LEFT: False, robots.RIGHT: False}
+    controller._last_safe_arm_targets = {robots.LEFT: None, robots.RIGHT: last_safe.copy()}
+    controller._last_ik_cartesian_targets = {robots.LEFT: None, robots.RIGHT: previous_target}
+    warnings = []
+    solve_positions = []
+
+    def solve(hand_side, target, current_arm):
+        solve_positions.append(float(target.position_m[0]))
+        if target.position_m[0] <= 0.5:
+            return FaArmIkResult(
+                success=True,
+                q_target=tuple([0.2] * 7),
+                has_solution=True,
+                position_error=0.02,
+                orientation_error=0.03,
+            )
+        return FaArmIkResult(
+            success=True,
+            q_target=tuple([0.4] * 7),
+            has_solution=True,
+            position_error=0.2,
+            orientation_error=0.3,
+        )
+
+    controller._ik_client = SimpleNamespace(solve=solve)
+    controller._warn_safety = lambda key, message: warnings.append((key, message))
+
+    controller._update_active_arm_goals(snapshot)
+    deadline = time.time() + 0.5
+    while time.time() < deadline and not warnings:
+        controller._apply_completed_arm_ik_updates()
+        time.sleep(0.005)
+
+    assert solve_positions[0] == pytest.approx(1.0)
+    assert any(abs(position - 0.5) < 1e-9 for position in solve_positions)
+    assert controller._arm_goal_dirty[robots.RIGHT] is True
+    assert controller._active_arm_goals[robots.RIGHT] == pytest.approx(np.asarray([0.2] * 7))
+    assert controller._last_safe_arm_targets[robots.RIGHT] == pytest.approx(np.asarray([0.2] * 7))
+    assert controller._last_ik_cartesian_targets[robots.RIGHT].position_m[0] == pytest.approx(0.5)
+    assert warnings[0][0] == "right_ik_reachable_fallback"
+
+
+def test_fa_reachable_fallback_preserves_requested_orientation_before_relaxing():
+    controller = FaRealControl.__new__(FaRealControl)
+    controller.config = FaRealControlConfig(
+        max_ik_solution_jump_rad=1.0,
+        ik_max_position_error_m=0.08,
+        ik_max_orientation_error_rad=0.2,
+        ik_reachable_fallback_enabled=True,
+        ik_reachable_fallback_iterations=4,
+        ik_reachable_fallback_orientation_alphas=(1.0, 0.5),
+    )
+    previous_target = CartesianTarget(
+        timestamp_s=1.0,
+        hand_side=robots.LEFT,
+        frame_id="base",
+        position_m=(0.0, 0.0, 0.0),
+        orientation_xyzw=(0.0, 0.0, 0.0, 1.0),
+    )
+    current_target = CartesianTarget(
+        timestamp_s=2.0,
+        hand_side=robots.LEFT,
+        frame_id="base",
+        position_m=(1.0, 0.0, 0.0),
+        orientation_xyzw=(0.0, 0.0, 1.0, 0.0),
+    )
+    attempted = []
+
+    class FakeIkClient:
+        def solve(self, hand_side, target, current_arm):
+            attempted.append(target)
+            position_x = float(target.position_m[0])
+            orientation_is_current = np.allclose(target.orientation_xyzw, current_target.orientation_xyzw)
+            if position_x <= 0.5 and orientation_is_current:
+                return FaArmIkResult(
+                    success=True,
+                    q_target=tuple([0.2] * 7),
+                    has_solution=True,
+                    position_error=0.02,
+                    orientation_error=0.03,
+                )
+            return FaArmIkResult(
+                success=True,
+                q_target=tuple([0.4] * 7),
+                has_solution=True,
+                position_error=0.2,
+                orientation_error=0.3,
+            )
+
+    result = controller._solve_reachable_ik_fallback(
+        robots.LEFT,
+        previous_target,
+        current_target,
+        np.asarray([0.1] * 7, dtype=np.float64),
+        FakeIkClient(),
+    )
+
+    assert result is not None
+    _, fallback_target, alpha = result
+    assert alpha == pytest.approx(0.5)
+    assert fallback_target.position_m[0] == pytest.approx(0.5)
+    assert fallback_target.orientation_xyzw == pytest.approx(current_target.orientation_xyzw)
+    assert any(np.allclose(target.orientation_xyzw, current_target.orientation_xyzw) for target in attempted)
+
+
+def test_fa_returning_target_accepts_approximate_ik_to_escape_reach_limit():
+    controller = FaRealControl.__new__(FaRealControl)
+    controller.config = FaRealControlConfig(
+        max_ik_solution_jump_rad=1.0,
+        ik_max_position_error_m=0.08,
+        ik_max_orientation_error_rad=0.2,
+        ik_reachable_fallback_enabled=True,
+        ik_return_recovery_enabled=True,
+        ik_return_recovery_min_retreat_m=0.02,
+        ik_return_recovery_max_position_error_m=0.35,
+        ik_return_recovery_max_orientation_error_rad=1.0,
+    )
+    snapshot = FaJointStateSnapshot(
+        timestamp_s=1.0,
+        left_arm=tuple([0.0] * 7),
+        right_arm=tuple([0.0] * 7),
+        neck=(0.0, 0.0),
+    )
+    previous_target = CartesianTarget(
+        timestamp_s=1.0,
+        hand_side=robots.RIGHT,
+        frame_id="base",
+        position_m=(0.75, -0.40, 0.34),
+        orientation_xyzw=(0.0, 0.0, 0.0, 1.0),
+    )
+    returning_target = CartesianTarget(
+        timestamp_s=2.0,
+        hand_side=robots.RIGHT,
+        frame_id="base",
+        position_m=(0.62, -0.36, 0.34),
+        orientation_xyzw=(0.0, 0.0, 0.0, 1.0),
+    )
+    last_safe = np.asarray([0.1] * 7, dtype=np.float64)
+    controller._latest_targets = {robots.LEFT: None, robots.RIGHT: returning_target}
+    controller._latest_target_keys = {robots.LEFT: None, robots.RIGHT: None}
+    controller._active_arm_goals = {robots.LEFT: None, robots.RIGHT: None}
+    controller._arm_goal_dirty = {robots.LEFT: False, robots.RIGHT: False}
+    controller._last_safe_arm_targets = {robots.LEFT: None, robots.RIGHT: last_safe.copy()}
+    controller._last_ik_cartesian_targets = {robots.LEFT: None, robots.RIGHT: previous_target}
+    warnings = []
+
+    def solve(hand_side, target, current_arm):
+        return FaArmIkResult(
+            success=True,
+            q_target=tuple([0.25] * 7),
+            has_solution=True,
+            position_error=0.22,
+            orientation_error=0.55,
+        )
+
+    controller._ik_client = SimpleNamespace(solve=solve)
+    controller._warn_safety = lambda key, message: warnings.append((key, message))
+
+    controller._update_active_arm_goals(snapshot)
+    deadline = time.time() + 0.5
+    while time.time() < deadline and not warnings:
+        controller._apply_completed_arm_ik_updates()
+        time.sleep(0.005)
+
+    assert controller._arm_goal_dirty[robots.RIGHT] is True
+    assert controller._active_arm_goals[robots.RIGHT] == pytest.approx(np.asarray([0.25] * 7))
+    assert controller._last_safe_arm_targets[robots.RIGHT] == pytest.approx(np.asarray([0.25] * 7))
+    assert controller._last_ik_cartesian_targets[robots.RIGHT] is returning_target
+    assert warnings[0][0] == "right_ik_return_recovery"
+
+
+def test_fa_reachable_fallback_uses_current_fk_when_no_previous_cartesian_target():
+    controller = FaRealControl.__new__(FaRealControl)
+    controller.config = FaRealControlConfig(
+        max_ik_solution_jump_rad=1.0,
+        ik_max_position_error_m=0.08,
+        ik_max_orientation_error_rad=0.2,
+        ik_reachable_fallback_enabled=True,
+        ik_reachable_fallback_iterations=4,
+        ik_reachable_fallback_orientation_alphas=(1.0,),
+    )
+    target = CartesianTarget(
+        timestamp_s=2.0,
+        hand_side=robots.LEFT,
+        frame_id="base",
+        position_m=(1.0, 0.0, 0.0),
+        orientation_xyzw=(0.0, 0.0, 0.0, 1.0),
+    )
+    calls = []
+
+    class FakeIkClient:
+        def compute_fk(self, hand_side, current_arm_q):
+            homo = np.eye(4)
+            homo[:3, 3] = (0.0, 0.0, 0.0)
+            return homo
+
+        def solve(self, hand_side, solve_target, current_arm):
+            calls.append(float(solve_target.position_m[0]))
+            if float(solve_target.position_m[0]) <= 0.5:
+                return FaArmIkResult(
+                    success=True,
+                    q_target=tuple([0.2] * 7),
+                    has_solution=True,
+                    position_error=0.02,
+                    orientation_error=0.03,
+                )
+            return FaArmIkResult(
+                success=True,
+                q_target=tuple([0.4] * 7),
+                has_solution=True,
+                position_error=0.2,
+                orientation_error=0.3,
+            )
+
+    fake_ik = FakeIkClient()
+    controller._ik_client = fake_ik
+    controller._ik_clients = {robots.LEFT: fake_ik, robots.RIGHT: fake_ik}
+    update = controller._solve_arm_ik_update(
+        robots.LEFT,
+        target,
+        ("timestamp", 2.0),
+        None,
+        np.asarray([0.1] * 7, dtype=np.float64),
+        np.asarray([0.1] * 7, dtype=np.float64),
+        np.asarray([0.1] * 7, dtype=np.float64),
+    )
+
+    assert update.dirty is True
+    assert update.active_goal == pytest.approx(np.asarray([0.2] * 7))
+    assert update.last_ik_target.position_m[0] == pytest.approx(0.5)
+    assert any(abs(position - 0.5) < 1e-9 for position in calls)
+
+
+def test_fa_command_limiter_caps_rate_limit_dt_after_control_loop_stall():
+    limiter = FaCommandLimiter(
+        FaUpperPositionSafetyConfig(
+            max_joint_velocity_rad_s=tuple([1.2] * FA_UPPER_COMMAND_LENGTH),
+            max_joint_jump_rad=0.5,
+            max_rate_limit_dt_s=0.02,
+        )
+    )
+    limiter.reset([0.0] * FA_UPPER_COMMAND_LENGTH)
+    command = FaUpperPositionCommand(
+        timestamp_s=100.0,
+        values=tuple([0.4] * FA_UPPER_COMMAND_LENGTH),
+    )
+
+    limited, reason = limiter.limit(command, now_s=limiter.last_command.timestamp_s + 0.5)
+
+    assert limited is not None
+    assert max(abs(value) for value in limited.values) == pytest.approx(0.024)
+    assert "joint velocity dt capped" in reason
+
+
 def test_fa_command_publish_reuses_active_goal_without_repeating_ik_for_same_target():
     controller = FaRealControl.__new__(FaRealControl)
     controller.config = FaRealControlConfig()
     controller._teleop_active = True
     controller.control_backend = "mujoco"
-    controller._real_joint_state_fresh = lambda: False
+    controller._real_joint_state_fresh = lambda: True
     controller._warn_safety = lambda key, message: None
     snapshot = FaJointStateSnapshot(
         timestamp_s=1.0,
@@ -861,6 +1318,7 @@ def test_fa_command_publish_reuses_active_goal_without_repeating_ik_for_same_tar
     controller._latest_target_keys = {robots.LEFT: None, robots.RIGHT: None}
     controller._active_arm_goals = {robots.LEFT: None, robots.RIGHT: None}
     controller._last_safe_arm_targets = {robots.LEFT: None, robots.RIGHT: None}
+    controller._hand_init_ready = {robots.LEFT: True, robots.RIGHT: True}
     solve_calls = []
 
     def solve(hand_side, target, current_arm):
@@ -871,14 +1329,206 @@ def test_fa_command_publish_reuses_active_goal_without_repeating_ik_for_same_tar
     controller._builder = FaUpperPositionCommandBuilder()
     controller._limiter = SimpleNamespace(limit=lambda command, now_s=None: (command, ""))
     published = []
-    controller._publish_upper_command_outputs = lambda command, require_real_reset: published.append(command) or True
+    def publish(command, require_real_reset):
+        controller._last_min_snap_target_command = command
+        published.append(command)
+        return True
+    controller._publish_upper_command_outputs = publish
+
+    controller._publish_upper_command_if_safe()
+    controller._publish_upper_command_if_safe()
+
+    assert solve_calls == [(robots.RIGHT, 123.0)]
+    assert len(published) == 1
+    assert published[-1].right_arm == pytest.approx(tuple([0.2] * 7))
+    assert controller._arm_goal_dirty[robots.RIGHT] is False
+
+
+def test_fa_command_publish_keeps_chasing_rate_limited_active_goal_without_repeating_ik():
+    controller = FaRealControl.__new__(FaRealControl)
+    controller.config = FaRealControlConfig(min_snap_target_epsilon_rad=0.002)
+    controller._teleop_active = True
+    controller.control_backend = "mujoco"
+    controller._real_joint_state_fresh = lambda: True
+    controller._warn_safety = lambda key, message: None
+    snapshot = FaJointStateSnapshot(
+        timestamp_s=1.0,
+        left_arm=tuple([0.0] * 7),
+        right_arm=tuple([0.0] * 7),
+        neck=(0.0, 0.0),
+    )
+    controller._current_joint_snapshot = lambda: snapshot
+    target = SimpleNamespace(hand_side=robots.RIGHT, timestamp_s=123.0)
+    controller._latest_targets = {robots.LEFT: None, robots.RIGHT: target}
+    controller._latest_target_keys = {robots.LEFT: None, robots.RIGHT: None}
+    controller._active_arm_goals = {robots.LEFT: None, robots.RIGHT: None}
+    controller._arm_goal_dirty = {robots.LEFT: False, robots.RIGHT: False}
+    controller._last_safe_arm_targets = {robots.LEFT: None, robots.RIGHT: None}
+    controller._last_ik_cartesian_targets = {robots.LEFT: None, robots.RIGHT: None}
+    controller._hand_init_ready = {robots.LEFT: True, robots.RIGHT: True}
+    solve_calls = []
+
+    def solve(hand_side, target, current_arm):
+        solve_calls.append((hand_side, target.timestamp_s))
+        return FaArmIkResult(success=True, q_target=tuple([0.2] * 7), has_solution=True)
+
+    class FakeRateLimiter:
+        def __init__(self):
+            self.calls = 0
+
+        def limit(self, command, now_s=None):
+            self.calls += 1
+            right = [0.024 * self.calls] * 7
+            limited = FaUpperPositionCommand(command.timestamp_s, tuple([0.0] * 7 + right + [0.0, 0.0]))
+            return limited, "joint velocity limited"
+
+    controller._ik_client = SimpleNamespace(solve=solve)
+    controller._builder = FaUpperPositionCommandBuilder()
+    controller._limiter = FakeRateLimiter()
+    published = []
+
+    def publish(command, require_real_reset):
+        controller._last_min_snap_target_command = command
+        published.append(command)
+        return True
+
+    controller._publish_upper_command_outputs = publish
 
     controller._publish_upper_command_if_safe()
     controller._publish_upper_command_if_safe()
 
     assert solve_calls == [(robots.RIGHT, 123.0)]
     assert len(published) == 2
-    assert published[-1].right_arm == pytest.approx(tuple([0.2] * 7))
+    assert published[0].right_arm == pytest.approx(tuple([0.024] * 7))
+    assert published[1].right_arm == pytest.approx(tuple([0.048] * 7))
+    assert controller._arm_goal_dirty[robots.RIGHT] is True
+
+
+def test_fa_arm_ik_workers_allow_right_result_while_left_is_still_solving():
+    controller = FaRealControl.__new__(FaRealControl)
+    controller.config = FaRealControlConfig(max_ik_solution_jump_rad=1.0)
+    snapshot = FaJointStateSnapshot(
+        timestamp_s=1.0,
+        left_arm=tuple([0.0] * 7),
+        right_arm=tuple([0.0] * 7),
+        neck=(0.0, 0.0),
+    )
+    left_target = CartesianTarget(
+        timestamp_s=101.0,
+        hand_side=robots.LEFT,
+        frame_id="base",
+        position_m=(0.1, 0.0, 0.0),
+        orientation_xyzw=(0.0, 0.0, 0.0, 1.0),
+    )
+    right_target = CartesianTarget(
+        timestamp_s=102.0,
+        hand_side=robots.RIGHT,
+        frame_id="base",
+        position_m=(0.2, 0.0, 0.0),
+        orientation_xyzw=(0.0, 0.0, 0.0, 1.0),
+    )
+    controller._latest_targets = {robots.LEFT: left_target, robots.RIGHT: right_target}
+    controller._latest_target_keys = {robots.LEFT: None, robots.RIGHT: None}
+    controller._active_arm_goals = {robots.LEFT: None, robots.RIGHT: None}
+    controller._arm_goal_dirty = {robots.LEFT: False, robots.RIGHT: False}
+    controller._last_safe_arm_targets = {robots.LEFT: None, robots.RIGHT: None}
+    controller._last_ik_cartesian_targets = {robots.LEFT: None, robots.RIGHT: None}
+    controller._warn_safety = lambda key, message: None
+    release_left = threading.Event()
+    calls = []
+
+    class BlockingLeftIkClient:
+        def solve(self, hand_side, target, current_arm):
+            calls.append(hand_side)
+            if hand_side == robots.LEFT:
+                release_left.wait(timeout=1.0)
+                return FaArmIkResult(success=True, q_target=tuple([0.1] * 7), has_solution=True)
+            return FaArmIkResult(success=True, q_target=tuple([0.2] * 7), has_solution=True)
+
+    fake_client = BlockingLeftIkClient()
+    controller._ik_client = fake_client
+    controller._ik_clients = {robots.LEFT: fake_client, robots.RIGHT: fake_client}
+
+    try:
+        controller._update_active_arm_goals(snapshot)
+        deadline = time.time() + 0.5
+        while time.time() < deadline and controller._active_arm_goals[robots.RIGHT] is None:
+            controller._apply_completed_arm_ik_updates()
+            time.sleep(0.005)
+
+        assert controller._active_arm_goals[robots.RIGHT] == pytest.approx(np.asarray([0.2] * 7))
+        assert controller._arm_goal_dirty[robots.RIGHT] is True
+        assert controller._active_arm_goals[robots.LEFT] is None
+        assert set(calls) == {robots.LEFT, robots.RIGHT}
+    finally:
+        release_left.set()
+        executor = getattr(controller, "_ik_executor", None)
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=True)
+
+
+def test_fa_arm_ik_worker_applies_result_when_latest_target_moved_one_frame():
+    controller = FaRealControl.__new__(FaRealControl)
+    controller.config = FaRealControlConfig(max_ik_solution_jump_rad=1.0)
+    snapshot = FaJointStateSnapshot(
+        timestamp_s=1.0,
+        left_arm=tuple([0.0] * 7),
+        right_arm=tuple([0.0] * 7),
+        neck=(0.0, 0.0),
+    )
+    first_target = CartesianTarget(
+        timestamp_s=201.0,
+        hand_side=robots.RIGHT,
+        frame_id="base",
+        position_m=(0.2, 0.0, 0.0),
+        orientation_xyzw=(0.0, 0.0, 0.0, 1.0),
+    )
+    next_target = CartesianTarget(
+        timestamp_s=202.0,
+        hand_side=robots.RIGHT,
+        frame_id="base",
+        position_m=(0.21, 0.0, 0.0),
+        orientation_xyzw=(0.0, 0.0, 0.0, 1.0),
+    )
+    controller._latest_targets = {robots.LEFT: None, robots.RIGHT: first_target}
+    controller._latest_target_keys = {robots.LEFT: None, robots.RIGHT: None}
+    controller._active_arm_goals = {robots.LEFT: None, robots.RIGHT: None}
+    controller._arm_goal_dirty = {robots.LEFT: False, robots.RIGHT: False}
+    controller._last_safe_arm_targets = {robots.LEFT: None, robots.RIGHT: None}
+    controller._last_ik_cartesian_targets = {robots.LEFT: None, robots.RIGHT: None}
+    controller._warn_safety = lambda key, message: None
+    release_right = threading.Event()
+    calls = []
+
+    class BlockingRightIkClient:
+        def solve(self, hand_side, target, current_arm):
+            calls.append((hand_side, target.timestamp_s))
+            release_right.wait(timeout=1.0)
+            return FaArmIkResult(success=True, q_target=tuple([0.2] * 7), has_solution=True)
+
+    fake_client = BlockingRightIkClient()
+    controller._ik_client = fake_client
+    controller._ik_clients = {robots.LEFT: fake_client, robots.RIGHT: fake_client}
+
+    try:
+        controller._update_active_arm_goals(snapshot)
+        controller._latest_targets[robots.RIGHT] = next_target
+        release_right.set()
+        deadline = time.time() + 0.5
+        while time.time() < deadline and controller._active_arm_goals[robots.RIGHT] is None:
+            controller._apply_completed_arm_ik_updates()
+            time.sleep(0.005)
+
+        assert controller._active_arm_goals[robots.RIGHT] == pytest.approx(np.asarray([0.2] * 7))
+        assert controller._arm_goal_dirty[robots.RIGHT] is True
+        assert controller._latest_target_keys[robots.RIGHT] == ("timestamp", 201.0)
+        controller._update_active_arm_goals(snapshot)
+        assert calls[0] == (robots.RIGHT, 201.0)
+    finally:
+        release_right.set()
+        executor = getattr(controller, "_ik_executor", None)
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=True)
 
 
 def test_fa_mujoco_mirror_accepts_16d_command_and_uses_linear_interpolation():

@@ -16,7 +16,7 @@ MonoBehaviour:
   handTracking: 1
   adaptiveHand: 1
   highFrequencyHand: 1
-  openMRC: 1
+  openMRC: 0
   faceTracking: 0
   lipsyncTracking: 0
   eyeTracking: 0
@@ -29,7 +29,7 @@ MonoBehaviour:
   bodyTracking: 0
   adaptiveResolution: 0
   stageMode: 0
-  videoSeeThrough: 1
+  videoSeeThrough: 0
   spatialAnchor: 0
   sceneCapture: 0
   sharedAnchor: 0
@@ -42,7 +42,7 @@ MonoBehaviour:
   qualitySharpening: 0
   fixedFoveatedSharpening: 0
   selfAdaptiveSharpening: 0
-  handTrackingSupportType: 0
+  handTrackingSupportType: 1
   arFoundation: 0
   mrSafeguard: 0
   enableRecommendMSAA: 0

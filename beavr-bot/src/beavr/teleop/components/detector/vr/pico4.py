@@ -87,6 +87,9 @@ class PICO4VRHandDetector(Component):
         hand_config: Union[str, str] = robots.RIGHT,
         right_hand_port: Optional[int] = None,
         left_hand_port: Optional[int] = None,
+        enable_receive_frequency_logging: bool = False,
+        enable_receive_sample_logging: bool = False,
+        enable_publish_debug_logging: bool = False,
     ):
         """
         初始化PICO4 VR手部追踪探测器组件。
@@ -131,11 +134,15 @@ class PICO4VRHandDetector(Component):
         self._last_success_receive_time = {}
         self._last_pause_command_log_time = 0.0
         self._last_pause_data: Optional[bytes] = None
+        self._last_resume_command_time_s = 0.0
+        self._pause_low_debounce_after_resume_s = 0.8
+        self._raw_hand_stall_warning_s = 2.0
+        self._last_raw_hand_stall_log_time = {}
         self._freq_calc_interval = 1.0  # 1秒计算一次频率
         self._frame_index = 0  # 帧索引，用于匹配三个环节的数据
-        self.enable_receive_frequency_logging = True
-        self.enable_receive_sample_logging = False
-        self.enable_publish_debug_logging = False
+        self.enable_receive_frequency_logging = bool(enable_receive_frequency_logging)
+        self.enable_receive_sample_logging = bool(enable_receive_sample_logging)
+        self.enable_publish_debug_logging = bool(enable_publish_debug_logging)
         self._last_timing_log_time = {}
 
     def _configure_hand_ports(self, right_hand_port: Optional[int], left_hand_port: Optional[int]):
@@ -158,9 +165,18 @@ class PICO4VRHandDetector(Component):
             self.hand_ports[robots.LEFT] = left_hand_port
 
     def _pause_command_for_edge(self, pause_data: bytes) -> Optional[str]:
+        now_s = time.time()
         if pause_data == b"High":
             command = robots.RESUME
+            self._last_resume_command_time_s = now_s
         elif pause_data == b"Low":
+            if now_s - self._last_resume_command_time_s < self._pause_low_debounce_after_resume_s:
+                logger.info(
+                    "PICO4: ignoring Low pause edge %.0fms after resume to avoid reset interruption",
+                    (now_s - self._last_resume_command_time_s) * 1000.0,
+                )
+                self._last_pause_data = pause_data
+                return None
             command = robots.PAUSE
         else:
             logger.debug("PICO4: ignoring unknown pause payload raw=%r", pause_data)
@@ -386,6 +402,23 @@ class PICO4VRHandDetector(Component):
 
         port = self._port_for_socket(socket_name)
         logger.debug(f"PICO4: 暂未收到Unity原始数据 socket={socket_name} host={self.host} port={port}")
+        if socket_name not in ("RightHand", "LeftHand"):
+            return
+        last_success = self._last_success_receive_time.get(socket_name)
+        if last_success is None:
+            return
+        gap_s = current_time - last_success
+        last_stall_log = self._last_raw_hand_stall_log_time.get(socket_name, 0.0)
+        if gap_s >= self._raw_hand_stall_warning_s and current_time - last_stall_log >= 2.0:
+            self._last_raw_hand_stall_log_time[socket_name] = current_time
+            logger.warning(
+                "[Diag][PICO_RAW_HAND_STALL] socket=%s gap_s=%.2f host=%s port=%s "
+                "Unity/PICO stopped sending raw hand frames or network link dropped",
+                socket_name,
+                gap_s,
+                self.host,
+                port,
+            )
 
     def _receive_data(self, socket_name):
         """

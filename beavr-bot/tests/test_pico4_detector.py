@@ -111,13 +111,19 @@ def test_invalid_all_zero_keypoints_are_rejected():
     assert "重合" in reason or "占位帧" in reason
 
 
-def test_pause_command_is_edge_triggered():
+def test_pause_command_is_edge_triggered(monkeypatch):
     detector = _detector()
+    now = [100.0]
+    monkeypatch.setattr("beavr.teleop.components.detector.vr.pico4.time.time", lambda: now[0])
 
     assert detector._pause_command_for_edge(b"Low") == robots.PAUSE
     assert detector._pause_command_for_edge(b"Low") is None
     assert detector._pause_command_for_edge(b"High") == robots.RESUME
     assert detector._pause_command_for_edge(b"High") is None
+    now[0] += 0.2
+    assert detector._pause_command_for_edge(b"Low") is None
+    now[0] += detector._pause_low_debounce_after_resume_s + 0.01
+    detector._last_pause_data = b"High"
     assert detector._pause_command_for_edge(b"Low") == robots.PAUSE
 
 

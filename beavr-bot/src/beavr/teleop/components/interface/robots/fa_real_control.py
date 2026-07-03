@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from concurrent.futures import Future, ThreadPoolExecutor
 import logging
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Dict, Optional, Sequence
 
@@ -113,6 +114,32 @@ class FaRealControlConfig:
     min_snap_target_epsilon_rad: float = 0.002
     ik_cartesian_position_deadband_m: float = 0.012
     ik_cartesian_orientation_deadband_rad: float = 0.06
+    ik_reachable_fallback_enabled: bool = True
+    ik_reachable_fallback_iterations: int = 6
+    ik_reachable_fallback_min_alpha: float = 0.05
+    ik_reachable_fallback_orientation_alphas: tuple[float, ...] = (1.0, 0.75, 0.5)
+    ik_return_recovery_enabled: bool = True
+    ik_return_recovery_min_retreat_m: float = 0.015
+    ik_return_recovery_max_position_error_m: float = 0.35
+    ik_return_recovery_max_orientation_error_rad: float = 1.0
+    ik_multi_seed_enabled: bool = True
+    ik_escape_enabled: bool = True
+    ik_escape_trigger_count: int = 3
+    ik_escape_target_tolerance_rad: float = 0.04
+    ik_escape_local_enabled: bool = True
+    ik_escape_local_elbow_target_rad: float = -1.05
+    ik_escape_local_max_joint_delta_rad: float = 0.25
+    ik_singularity_output_filter_enabled: bool = True
+    ik_singularity_filter_enter_problem_count: int = 2
+    ik_singularity_filter_exit_problem_count: int = 0
+    ik_singularity_filter_elbow_enter_rad: float = -1.20
+    ik_singularity_filter_elbow_exit_rad: float = -1.05
+    ik_singularity_filter_elbow_upper_enter_rad: float = 0.12
+    ik_singularity_filter_elbow_upper_exit_rad: float = -0.05
+    ik_singularity_output_filter_alpha: float = 0.85
+    ik_singularity_output_filter_max_step_rad: float = 0.08
+    ik_escape_left_arm_positions_rad: Optional[tuple[float, ...]] = None
+    ik_escape_right_arm_positions_rad: Optional[tuple[float, ...]] = None
     initial_pose_enabled: bool = False
     initial_left_arm_positions_rad: Optional[tuple[float, ...]] = None
     initial_right_arm_positions_rad: Optional[tuple[float, ...]] = None
@@ -135,6 +162,46 @@ class FaRealControlConfig:
         self.min_snap_target_epsilon_rad = max(0.0, float(self.min_snap_target_epsilon_rad))
         self.ik_cartesian_position_deadband_m = max(0.0, float(self.ik_cartesian_position_deadband_m))
         self.ik_cartesian_orientation_deadband_rad = max(0.0, float(self.ik_cartesian_orientation_deadband_rad))
+        self.ik_reachable_fallback_iterations = max(1, int(self.ik_reachable_fallback_iterations))
+        self.ik_reachable_fallback_min_alpha = min(1.0, max(0.0, float(self.ik_reachable_fallback_min_alpha)))
+        orientation_alphas = tuple(
+            min(1.0, max(0.0, float(value)))
+            for value in self.ik_reachable_fallback_orientation_alphas
+        )
+        if 1.0 not in orientation_alphas:
+            orientation_alphas = (1.0, *orientation_alphas)
+        self.ik_reachable_fallback_orientation_alphas = tuple(dict.fromkeys(orientation_alphas))
+        self.ik_return_recovery_min_retreat_m = max(0.0, float(self.ik_return_recovery_min_retreat_m))
+        self.ik_return_recovery_max_position_error_m = max(
+            0.0, float(self.ik_return_recovery_max_position_error_m)
+        )
+        self.ik_return_recovery_max_orientation_error_rad = max(
+            0.0, float(self.ik_return_recovery_max_orientation_error_rad)
+        )
+        self.ik_escape_trigger_count = max(1, int(self.ik_escape_trigger_count))
+        self.ik_escape_target_tolerance_rad = max(1e-6, float(self.ik_escape_target_tolerance_rad))
+        self.ik_escape_local_elbow_target_rad = float(self.ik_escape_local_elbow_target_rad)
+        self.ik_escape_local_max_joint_delta_rad = max(0.0, float(self.ik_escape_local_max_joint_delta_rad))
+        self.ik_singularity_filter_enter_problem_count = max(
+            1, int(self.ik_singularity_filter_enter_problem_count)
+        )
+        self.ik_singularity_filter_exit_problem_count = max(
+            0, int(self.ik_singularity_filter_exit_problem_count)
+        )
+        self.ik_singularity_filter_elbow_enter_rad = float(self.ik_singularity_filter_elbow_enter_rad)
+        self.ik_singularity_filter_elbow_exit_rad = float(self.ik_singularity_filter_elbow_exit_rad)
+        self.ik_singularity_filter_elbow_upper_enter_rad = float(
+            self.ik_singularity_filter_elbow_upper_enter_rad
+        )
+        self.ik_singularity_filter_elbow_upper_exit_rad = float(
+            self.ik_singularity_filter_elbow_upper_exit_rad
+        )
+        self.ik_singularity_output_filter_alpha = min(
+            0.98, max(0.0, float(self.ik_singularity_output_filter_alpha))
+        )
+        self.ik_singularity_output_filter_max_step_rad = max(
+            0.0, float(self.ik_singularity_output_filter_max_step_rad)
+        )
         self.initial_pose_duration_s = max(1e-3, float(self.initial_pose_duration_s))
         self.initial_pose_max_velocity_rad_s = max(1e-6, float(self.initial_pose_max_velocity_rad_s))
         self.initial_pose_max_acceleration_rad_s2 = max(1e-6, float(self.initial_pose_max_acceleration_rad_s2))
@@ -151,6 +218,20 @@ class FaRealControlConfig:
                     "initial_right_arm_positions_rad",
                 )
             )
+        self.ik_escape_left_arm_positions_rad = (
+            None if self.ik_escape_left_arm_positions_rad is None
+            else tuple(float(v) for v in self._validate_initial_arm_pose(
+                self.ik_escape_left_arm_positions_rad,
+                "ik_escape_left_arm_positions_rad",
+            ))
+        )
+        self.ik_escape_right_arm_positions_rad = (
+            None if self.ik_escape_right_arm_positions_rad is None
+            else tuple(float(v) for v in self._validate_initial_arm_pose(
+                self.ik_escape_right_arm_positions_rad,
+                "ik_escape_right_arm_positions_rad",
+            ))
+        )
 
     @staticmethod
     def _validate_initial_arm_pose(values: Optional[Sequence[float]], label: str) -> np.ndarray:
@@ -160,6 +241,20 @@ class FaRealControlConfig:
         if array.shape != (FA_ARM_JOINT_COUNT,) or not np.all(np.isfinite(array)):
             raise ValueError(f"{label} must contain {FA_ARM_JOINT_COUNT} finite values")
         return array
+
+
+@dataclass
+class _ArmIkUpdate:
+    hand_side: str
+    target_key: tuple
+    active_goal: Optional[np.ndarray]
+    dirty: bool
+    last_safe: Optional[np.ndarray] = None
+    last_ik_target: Optional[CartesianTarget] = None
+    warn_key: Optional[str] = None
+    warn_message: Optional[str] = None
+    consume_target: bool = True
+    counts_as_ik_problem: bool = False
 
 
 class FaRos2Bridge:
@@ -335,6 +430,13 @@ class FaRealControl(Component):
         # command mirror instead of as a real-control FK fallback.
         self._kinematics = None
         self._ik_client = ik_client or self._make_default_ik_client()
+        self._ik_clients: Dict[str, FaArmIkClientBase] = (
+            {robots.LEFT: ik_client, robots.RIGHT: ik_client}
+            if ik_client is not None
+            else {robots.LEFT: self._make_default_ik_client(), robots.RIGHT: self._ik_client}
+        )
+        self._ik_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="fa_arm_ik")
+        self._pending_ik_futures: Dict[str, Future] = {}
         self._builder = FaUpperPositionCommandBuilder(self.config.upper)
         self._limiter = FaCommandLimiter(self.config.upper)
 
@@ -349,6 +451,10 @@ class FaRealControl(Component):
         self._accept_cartesian_targets_after_s: Dict[str, float] = {robots.LEFT: 0.0, robots.RIGHT: 0.0}
         self._last_safe_arm_targets: Dict[str, Optional[np.ndarray]] = {robots.LEFT: None, robots.RIGHT: None}
         self._last_ik_cartesian_targets: Dict[str, Optional[CartesianTarget]] = {robots.LEFT: None, robots.RIGHT: None}
+        self._ik_problem_counts: Dict[str, int] = {robots.LEFT: 0, robots.RIGHT: 0}
+        self._arm_escape_active: Dict[str, bool] = {robots.LEFT: False, robots.RIGHT: False}
+        self._ik_output_filter_active: Dict[str, bool] = {robots.LEFT: False, robots.RIGHT: False}
+        self._ik_output_filter_goals: Dict[str, Optional[np.ndarray]] = {robots.LEFT: None, robots.RIGHT: None}
         self._pause_hold_command: Optional[FaUpperPositionCommand] = None
         self._resume_hold_until_target = False
         self._pending_resume_after_initial_pose = False
@@ -414,6 +520,7 @@ class FaRealControl(Component):
             self._latest_target_keys = {robots.LEFT: None, robots.RIGHT: None}
             self._active_arm_goals = {robots.LEFT: None, robots.RIGHT: None}
             self._arm_goal_dirty = {robots.LEFT: False, robots.RIGHT: False}
+            self._reset_ik_recovery_state()
             self._hand_init_ready = {robots.LEFT: False, robots.RIGHT: False}
             self._accept_cartesian_targets_after_s = {
                 robots.LEFT: resume_started_at_s,
@@ -554,6 +661,7 @@ class FaRealControl(Component):
         self._latest_target_keys = {robots.LEFT: None, robots.RIGHT: None}
         self._active_arm_goals = {robots.LEFT: None, robots.RIGHT: None}
         self._arm_goal_dirty = {robots.LEFT: False, robots.RIGHT: False}
+        self._reset_ik_recovery_state()
         self._hand_init_ready = {robots.LEFT: False, robots.RIGHT: False}
         pause_started_at_s = time.time()
         self._accept_cartesian_targets_after_s = {
@@ -587,8 +695,85 @@ class FaRealControl(Component):
             robots.RIGHT: np.asarray(snapshot.right_arm, dtype=np.float64).copy(),
         }
         self._last_ik_cartesian_targets = {robots.LEFT: None, robots.RIGHT: None}
+        self._reset_ik_recovery_state()
         if reset_limiter:
             self._limiter.reset(snapshot.upper_joints)
+
+    def _reset_ik_recovery_state(self, hand_side: Optional[str] = None) -> None:
+        if not hasattr(self, "_ik_problem_counts"):
+            self._ik_problem_counts = {robots.LEFT: 0, robots.RIGHT: 0}
+        if not hasattr(self, "_arm_escape_active"):
+            self._arm_escape_active = {robots.LEFT: False, robots.RIGHT: False}
+        if not hasattr(self, "_ik_output_filter_active"):
+            self._ik_output_filter_active = {robots.LEFT: False, robots.RIGHT: False}
+        if not hasattr(self, "_ik_output_filter_goals"):
+            self._ik_output_filter_goals = {robots.LEFT: None, robots.RIGHT: None}
+        sides = (robots.LEFT, robots.RIGHT) if hand_side is None else (hand_side,)
+        for side in sides:
+            self._ik_problem_counts[side] = 0
+            self._arm_escape_active[side] = False
+            self._ik_output_filter_active[side] = False
+            self._ik_output_filter_goals[side] = None
+
+    def _arm_escape_target(self, hand_side: str) -> Optional[np.ndarray]:
+        if hand_side == robots.LEFT:
+            configured = self.config.ik_escape_left_arm_positions_rad
+            initial = self.config.initial_left_arm_positions_rad
+        else:
+            configured = self.config.ik_escape_right_arm_positions_rad
+            initial = self.config.initial_right_arm_positions_rad
+        values = configured if configured is not None else initial
+        if values is None:
+            return None
+        target = np.asarray(values, dtype=np.float64)
+        if target.shape != (FA_ARM_JOINT_COUNT,) or not np.all(np.isfinite(target)):
+            return None
+        return target.copy()
+
+    def _local_arm_escape_target(self, hand_side: str, current_arm: Sequence[float]) -> Optional[np.ndarray]:
+        if not self.config.ik_escape_local_enabled:
+            return self._arm_escape_target(hand_side)
+        try:
+            base = np.asarray(current_arm, dtype=np.float64).copy()
+        except (TypeError, ValueError):
+            return self._arm_escape_target(hand_side)
+        if base.shape != (FA_ARM_JOINT_COUNT,) or not np.all(np.isfinite(base)):
+            return self._arm_escape_target(hand_side)
+
+        target = base.copy()
+        elbow_idx = 3
+        desired_elbow = float(self.config.ik_escape_local_elbow_target_rad)
+        max_delta = float(self.config.ik_escape_local_max_joint_delta_rad)
+        if max_delta > 0.0:
+            desired_elbow = float(np.clip(desired_elbow, base[elbow_idx] - max_delta, base[elbow_idx] + max_delta))
+        target[elbow_idx] = desired_elbow
+        return target
+
+    def _record_arm_ik_outcome(self, update: _ArmIkUpdate) -> None:
+        if not hasattr(self, "_ik_problem_counts"):
+            self._ik_problem_counts = {robots.LEFT: 0, robots.RIGHT: 0}
+        if not hasattr(self, "_arm_escape_active"):
+            self._arm_escape_active = {robots.LEFT: False, robots.RIGHT: False}
+        if update.counts_as_ik_problem:
+            count = int(self._ik_problem_counts.get(update.hand_side, 0)) + 1
+            self._ik_problem_counts[update.hand_side] = count
+            if (
+                self.config.ik_escape_enabled
+                and count >= self.config.ik_escape_trigger_count
+                and not self._arm_escape_active.get(update.hand_side, False)
+                and self._arm_escape_target(update.hand_side) is not None
+            ):
+                self._arm_escape_active[update.hand_side] = True
+                self._warn_safety(
+                    f"{update.hand_side}_ik_escape_trigger",
+                    (
+                        f"{update.hand_side} IK escape mode triggered after "
+                        f"{count} consecutive IK problem frames"
+                    ),
+                )
+            return
+        self._ik_problem_counts[update.hand_side] = 0
+        self._arm_escape_active[update.hand_side] = False
 
     def _publish_pause_hold_if_needed(self, force: bool = False, reason: str = "pause hold") -> None:
         if not force:
@@ -664,6 +849,7 @@ class FaRealControl(Component):
         self._latest_targets[hand_side] = None
         self._latest_target_keys[hand_side] = None
         self._last_ik_cartesian_targets[hand_side] = None
+        self._reset_ik_recovery_state(hand_side)
         self._sync_ik_reference_from_snapshot(snapshot, reset_limiter=True)
         self._active_arm_goals = {
             robots.LEFT: np.asarray(snapshot.left_arm, dtype=np.float64),
@@ -822,9 +1008,40 @@ class FaRealControl(Component):
             return
         published = self._publish_upper_command_outputs(limited, require_real_reset=True)
         if published and getattr(self, "_last_min_snap_target_command", None) is limited:
+            self._update_arm_goal_dirty_after_publish(limited)
+
+    def _update_arm_goal_dirty_after_publish(self, command: FaUpperPositionCommand) -> None:
+        active_goals = getattr(self, "_active_arm_goals", {robots.LEFT: None, robots.RIGHT: None})
+        if not hasattr(self, "_arm_goal_dirty"):
             self._arm_goal_dirty = {robots.LEFT: False, robots.RIGHT: False}
+        tolerance = max(1e-6, float(self.config.min_snap_target_epsilon_rad))
+        for hand_side, commanded in (
+            (robots.LEFT, np.asarray(command.left_arm, dtype=np.float64)),
+            (robots.RIGHT, np.asarray(command.right_arm, dtype=np.float64)),
+        ):
+            if not self._arm_goal_dirty.get(hand_side, False):
+                continue
+            goal = active_goals.get(hand_side)
+            if goal is None:
+                self._arm_goal_dirty[hand_side] = False
+                continue
+            remaining = float(np.max(np.abs(commanded - np.asarray(goal, dtype=np.float64))))
+            if self._arm_escape_active.get(hand_side, False):
+                escape_tolerance = max(tolerance, float(self.config.ik_escape_target_tolerance_rad))
+                escaped = remaining <= escape_tolerance
+                self._arm_goal_dirty[hand_side] = not escaped
+                if escaped:
+                    self._arm_escape_active[hand_side] = False
+                    self._ik_problem_counts[hand_side] = 0
+                    self._last_safe_arm_targets[hand_side] = np.asarray(goal, dtype=np.float64).copy()
+                    self._last_ik_cartesian_targets[hand_side] = None
+                    self._latest_target_keys[hand_side] = None
+                    logger.info("%s IK escape complete; resuming Cartesian IK", hand_side)
+                continue
+            self._arm_goal_dirty[hand_side] = remaining > tolerance
 
     def _update_active_arm_goals(self, snapshot: FaJointStateSnapshot) -> None:
+        self._ensure_arm_ik_workers()
         if not hasattr(self, "_latest_target_keys"):
             self._latest_target_keys = {robots.LEFT: None, robots.RIGHT: None}
         if not hasattr(self, "_active_arm_goals"):
@@ -833,12 +1050,35 @@ class FaRealControl(Component):
             self._arm_goal_dirty = {robots.LEFT: False, robots.RIGHT: False}
         if not hasattr(self, "_last_ik_cartesian_targets"):
             self._last_ik_cartesian_targets = {robots.LEFT: None, robots.RIGHT: None}
+        if not hasattr(self, "_pending_ik_futures"):
+            self._pending_ik_futures = {}
+        if not hasattr(self, "_arm_escape_active"):
+            self._arm_escape_active = {robots.LEFT: False, robots.RIGHT: False}
+        self._apply_completed_arm_ik_updates()
         for hand_side in (robots.LEFT, robots.RIGHT):
             target = self._latest_targets[hand_side]
             if target is None:
                 continue
             target_key = self._cartesian_target_key(target)
+            if self._arm_escape_active.get(hand_side, False):
+                current_arm = snapshot.left_arm if hand_side == robots.LEFT else snapshot.right_arm
+                escape_seed = self._last_safe_arm_targets.get(hand_side)
+                escape_base = escape_seed if escape_seed is not None else current_arm
+                escape_target = self._local_arm_escape_target(hand_side, escape_base)
+                if escape_target is None:
+                    self._arm_escape_active[hand_side] = False
+                else:
+                    pending = self._pending_ik_futures.pop(hand_side, None)
+                    if pending is not None:
+                        pending.cancel()
+                    self._active_arm_goals[hand_side] = escape_target
+                    self._arm_goal_dirty[hand_side] = True
+                    self._latest_target_keys[hand_side] = ("escape", target_key)
+                    continue
             if target_key == self._latest_target_keys.get(hand_side):
+                continue
+            pending = self._pending_ik_futures.get(hand_side)
+            if pending is not None and not pending.done():
                 continue
             last_safe = self._last_safe_arm_targets[hand_side]
             last_ik_target = self._last_ik_cartesian_targets[hand_side]
@@ -850,48 +1090,482 @@ class FaRealControl(Component):
                 self._latest_target_keys[hand_side] = target_key
                 continue
             current_arm = snapshot.left_arm if hand_side == robots.LEFT else snapshot.right_arm
-            ik_seed = last_safe if last_safe is not None else np.asarray(current_arm, dtype=np.float64)
-            ik = self._ik_client.solve(hand_side, target, ik_seed)
+            current_arm_array = np.asarray(current_arm, dtype=np.float64)
+            ik_seed = last_safe if last_safe is not None else current_arm_array
+            self._pending_ik_futures[hand_side] = self._ik_executor.submit(
+                self._solve_arm_ik_update,
+                hand_side,
+                target,
+                target_key,
+                last_ik_target,
+                np.asarray(ik_seed, dtype=np.float64).copy(),
+                current_arm_array.copy(),
+                None if last_safe is None else np.asarray(last_safe, dtype=np.float64).copy(),
+            )
+        self._apply_completed_arm_ik_updates()
+
+    def _ensure_arm_ik_workers(self) -> None:
+        if not hasattr(self, "_ik_clients"):
+            self._ik_clients = {robots.LEFT: self._ik_client, robots.RIGHT: self._ik_client}
+        if not hasattr(self, "_ik_executor"):
+            self._ik_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="fa_arm_ik")
+        if not hasattr(self, "_pending_ik_futures"):
+            self._pending_ik_futures = {}
+
+    def _apply_completed_arm_ik_updates(self) -> None:
+        for hand_side, future in list(getattr(self, "_pending_ik_futures", {}).items()):
+            if not future.done():
+                continue
+            self._pending_ik_futures.pop(hand_side, None)
+            try:
+                update = future.result()
+            except Exception as exc:
+                self._warn_safety(f"{hand_side}_ik_worker_fail", f"{hand_side} IK worker failed: {exc}")
+                continue
+            current_target = self._latest_targets.get(hand_side)
+            if current_target is None:
+                continue
+            if update.warn_key is not None and update.warn_message is not None:
+                self._warn_safety(update.warn_key, update.warn_message)
+            self._record_arm_ik_outcome(update)
+            if not update.consume_target:
+                continue
+            active_goal, last_safe = self._filter_arm_ik_output_if_needed(
+                hand_side,
+                update.active_goal,
+                update.last_safe,
+            )
+            self._active_arm_goals[hand_side] = (
+                None if active_goal is None else np.asarray(active_goal, dtype=np.float64)
+            )
+            self._arm_goal_dirty[hand_side] = bool(update.dirty)
+            self._latest_target_keys[hand_side] = update.target_key
+            if last_safe is not None:
+                self._last_safe_arm_targets[hand_side] = np.asarray(last_safe, dtype=np.float64).copy()
+            if update.last_ik_target is not None:
+                self._last_ik_cartesian_targets[hand_side] = update.last_ik_target
+
+    def _filter_arm_ik_output_if_needed(
+        self,
+        hand_side: str,
+        active_goal: Optional[np.ndarray],
+        last_safe: Optional[np.ndarray],
+    ) -> tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        if not self.config.ik_singularity_output_filter_enabled or active_goal is None:
+            return active_goal, last_safe
+        if not hasattr(self, "_ik_output_filter_active"):
+            self._ik_output_filter_active = {robots.LEFT: False, robots.RIGHT: False}
+        if not hasattr(self, "_ik_output_filter_goals"):
+            self._ik_output_filter_goals = {robots.LEFT: None, robots.RIGHT: None}
+
+        goal = np.asarray(active_goal, dtype=np.float64)
+        if goal.shape != (FA_ARM_JOINT_COUNT,) or not np.all(np.isfinite(goal)):
+            return active_goal, last_safe
+
+        problem_count = int(getattr(self, "_ik_problem_counts", {}).get(hand_side, 0))
+        elbow = float(goal[3])
+        active = bool(self._ik_output_filter_active.get(hand_side, False))
+        enter = (
+            problem_count >= self.config.ik_singularity_filter_enter_problem_count
+            or elbow <= self.config.ik_singularity_filter_elbow_enter_rad
+            or elbow >= self.config.ik_singularity_filter_elbow_upper_enter_rad
+        )
+        exit_ready = (
+            problem_count <= self.config.ik_singularity_filter_exit_problem_count
+            and elbow >= self.config.ik_singularity_filter_elbow_exit_rad
+            and elbow <= self.config.ik_singularity_filter_elbow_upper_exit_rad
+        )
+
+        if not active and enter:
+            active = True
+            self._ik_output_filter_active[hand_side] = True
+            previous = self._last_published_arm_goal(hand_side)
+            if previous is None:
+                previous = getattr(self, "_active_arm_goals", {}).get(hand_side)
+            self._ik_output_filter_goals[hand_side] = (
+                None if previous is None else np.asarray(previous, dtype=np.float64).copy()
+            )
+            self._warn_safety(
+                f"{hand_side}_ik_output_filter_enter",
+                (
+                    f"{hand_side} IK output filter enabled near singular/extended arm: "
+                    f"elbow={elbow:.3f} problem_count={problem_count}"
+                ),
+            )
+        elif active and exit_ready:
+            active = False
+            self._ik_output_filter_active[hand_side] = False
+            self._ik_output_filter_goals[hand_side] = None
+            self._warn_safety(
+                f"{hand_side}_ik_output_filter_exit",
+                (
+                    f"{hand_side} IK output filter disabled after recovery: "
+                    f"elbow={elbow:.3f} problem_count={problem_count}"
+                ),
+            )
+
+        if not active:
+            return active_goal, last_safe
+
+        previous = self._ik_output_filter_goals.get(hand_side)
+        if previous is None or previous.shape != (FA_ARM_JOINT_COUNT,) or not np.all(np.isfinite(previous)):
+            previous = goal
+        alpha = float(self.config.ik_singularity_output_filter_alpha)
+        filtered = alpha * previous + (1.0 - alpha) * goal
+        max_step = float(self.config.ik_singularity_output_filter_max_step_rad)
+        if max_step > 0.0:
+            filtered = previous + np.clip(filtered - previous, -max_step, max_step)
+        self._ik_output_filter_goals[hand_side] = filtered.copy()
+        filtered_last_safe = filtered.copy() if last_safe is not None else last_safe
+        return filtered, filtered_last_safe
+
+    def _last_published_arm_goal(self, hand_side: str) -> Optional[np.ndarray]:
+        command = getattr(self, "_last_published_upper_command", None)
+        if command is None:
+            return None
+        arm = command.left_arm if hand_side == robots.LEFT else command.right_arm
+        values = np.asarray(arm, dtype=np.float64)
+        if values.shape != (FA_ARM_JOINT_COUNT,) or not np.all(np.isfinite(values)):
+            return None
+        return values.copy()
+
+    def _arm_ik_seed_candidates(
+        self,
+        hand_side: str,
+        primary_seed: np.ndarray,
+        current_arm: np.ndarray,
+    ) -> list[np.ndarray]:
+        seeds = [np.asarray(primary_seed, dtype=np.float64)]
+        if self.config.ik_multi_seed_enabled:
+            seeds.append(np.asarray(current_arm, dtype=np.float64))
+            escape_target = self._local_arm_escape_target(hand_side, current_arm)
+            if escape_target is not None:
+                seeds.append(escape_target)
+        unique: list[np.ndarray] = []
+        for seed in seeds:
+            if seed.shape != (FA_ARM_JOINT_COUNT,) or not np.all(np.isfinite(seed)):
+                continue
+            if any(np.allclose(seed, previous, atol=1e-6, rtol=0.0) for previous in unique):
+                continue
+            unique.append(seed.copy())
+        return unique or [np.asarray(primary_seed, dtype=np.float64).copy()]
+
+    def _solution_jump_exceeds_limit(self, solved: np.ndarray, reference: np.ndarray) -> tuple[bool, float]:
+        max_jump = float(np.max(np.abs(np.asarray(solved, dtype=np.float64) - np.asarray(reference, dtype=np.float64))))
+        return self.config.max_ik_solution_jump_rad > 0.0 and max_jump > self.config.max_ik_solution_jump_rad, max_jump
+
+    @staticmethod
+    def _ik_result_score(ik) -> float:
+        return float(ik.position_error) + 0.25 * float(ik.orientation_error)
+
+    def _solve_best_arm_ik(
+        self,
+        hand_side: str,
+        target: CartesianTarget,
+        primary_seed: np.ndarray,
+        current_arm: np.ndarray,
+        ik_client: FaArmIkClientBase,
+    ):
+        candidates = []
+        for seed in self._arm_ik_seed_candidates(hand_side, primary_seed, current_arm):
+            ik = ik_client.solve(hand_side, target, seed)
             if not ik.success:
-                self._warn_safety(f"{hand_side}_ik_fail", f"{hand_side} IK failed: {ik.message}")
-                last = self._last_safe_arm_targets[hand_side]
-                if last is None:
-                    continue
-                solved = last
-                solution_limited = False
-            else:
-                solved = np.asarray(ik.q_target, dtype=np.float64)
-                reference = ik_seed
-                if self._ik_error_exceeds_quality_limit(ik):
-                    self._active_arm_goals[hand_side] = np.asarray(reference, dtype=np.float64)
-                    self._arm_goal_dirty[hand_side] = False
-                    self._latest_target_keys[hand_side] = target_key
-                    self._warn_safety(
-                        f"{hand_side}_ik_quality_hold",
-                        (
-                            f"{hand_side} IK solution held: position_error={ik.position_error:.3f}m "
+                continue
+            solved = np.asarray(ik.q_target, dtype=np.float64)
+            jump_exceeds, max_jump = self._solution_jump_exceeds_limit(solved, primary_seed)
+            quality_exceeds = self._ik_error_exceeds_quality_limit(ik)
+            candidates.append(
+                {
+                    "ik": ik,
+                    "seed": seed,
+                    "solved": solved,
+                    "quality_exceeds": quality_exceeds,
+                    "jump_exceeds": jump_exceeds,
+                    "max_jump": max_jump,
+                    "score": self._ik_result_score(ik),
+                }
+            )
+        if not candidates:
+            return None, None
+        accepted = [
+            item for item in candidates
+            if not item["quality_exceeds"] and not item["jump_exceeds"]
+        ]
+        if accepted:
+            return min(accepted, key=lambda item: (item["score"], item["max_jump"])), min(
+                candidates, key=lambda item: item["score"]
+            )
+        return None, min(candidates, key=lambda item: item["score"])
+
+    def _solve_arm_ik_update(
+        self,
+        hand_side: str,
+        target: CartesianTarget,
+        target_key: tuple,
+        last_ik_target: Optional[CartesianTarget],
+        ik_seed: np.ndarray,
+        current_arm: np.ndarray,
+        last_safe: Optional[np.ndarray],
+    ) -> _ArmIkUpdate:
+        ik_client = getattr(self, "_ik_clients", {}).get(hand_side, self._ik_client)
+        accepted, best = self._solve_best_arm_ik(hand_side, target, ik_seed, current_arm, ik_client)
+        if accepted is not None:
+            ik = accepted["ik"]
+            solved = np.asarray(accepted["solved"], dtype=np.float64)
+            return _ArmIkUpdate(
+                hand_side=hand_side,
+                target_key=target_key,
+                active_goal=solved,
+                dirty=True,
+                last_safe=solved.copy(),
+                last_ik_target=target,
+            )
+        if best is None:
+            if last_safe is None:
+                return _ArmIkUpdate(
+                    hand_side=hand_side,
+                    target_key=target_key,
+                    active_goal=None,
+                    dirty=False,
+                    consume_target=False,
+                    warn_key=f"{hand_side}_ik_fail",
+                    warn_message=f"{hand_side} IK failed for all seed candidates",
+                    counts_as_ik_problem=True,
+                )
+            return _ArmIkUpdate(
+                hand_side=hand_side,
+                target_key=target_key,
+                active_goal=last_safe.copy(),
+                dirty=False,
+                warn_key=f"{hand_side}_ik_fail",
+                warn_message=f"{hand_side} IK failed for all seed candidates",
+                counts_as_ik_problem=True,
+            )
+
+        ik = best["ik"]
+        solved = np.asarray(best["solved"], dtype=np.float64)
+        reference = ik_seed
+        if self._ik_error_exceeds_quality_limit(ik):
+            fallback_start = last_ik_target or self._cartesian_target_from_fk(
+                hand_side, target, reference, ik_client
+            )
+            if self._cartesian_target_is_returning_from_reach(fallback_start, target) and (
+                self._ik_within_return_recovery_limit(ik)
+            ):
+                max_jump = float(np.max(np.abs(solved - reference)))
+                if self.config.max_ik_solution_jump_rad <= 0.0 or max_jump <= self.config.max_ik_solution_jump_rad:
+                    return _ArmIkUpdate(
+                        hand_side=hand_side,
+                        target_key=target_key,
+                        active_goal=solved,
+                        dirty=True,
+                        last_safe=solved.copy(),
+                        last_ik_target=target,
+                        warn_key=f"{hand_side}_ik_return_recovery",
+                        warn_message=(
+                            f"{hand_side} IK accepted returning approximate solution: "
+                            f"position_error={ik.position_error:.3f}m "
                             f"orientation_error={ik.orientation_error:.3f}rad"
                         ),
                     )
+            fallback = self._solve_reachable_ik_fallback(
+                hand_side, fallback_start, target, reference, ik_client
+            )
+            if fallback is not None:
+                fallback_ik, fallback_target, alpha = fallback
+                solved = np.asarray(fallback_ik.q_target, dtype=np.float64)
+                return _ArmIkUpdate(
+                    hand_side=hand_side,
+                    target_key=target_key,
+                    active_goal=solved,
+                    dirty=True,
+                    last_safe=solved.copy(),
+                    last_ik_target=fallback_target,
+                    warn_key=f"{hand_side}_ik_reachable_fallback",
+                    warn_message=(
+                        f"{hand_side} IK target backed off: alpha={alpha:.3f} "
+                        f"position_error={fallback_ik.position_error:.3f}m "
+                        f"orientation_error={fallback_ik.orientation_error:.3f}rad"
+                    ),
+                    counts_as_ik_problem=True,
+                )
+            return _ArmIkUpdate(
+                hand_side=hand_side,
+                target_key=target_key,
+                active_goal=np.asarray(reference, dtype=np.float64),
+                dirty=False,
+                warn_key=f"{hand_side}_ik_quality_hold",
+                warn_message=(
+                    f"{hand_side} IK solution held: position_error={ik.position_error:.3f}m "
+                    f"orientation_error={ik.orientation_error:.3f}rad"
+                ),
+                counts_as_ik_problem=True,
+            )
+
+        jump_exceeds, max_jump = self._solution_jump_exceeds_limit(solved, reference)
+        if jump_exceeds:
+            return _ArmIkUpdate(
+                hand_side=hand_side,
+                target_key=target_key,
+                active_goal=np.asarray(reference, dtype=np.float64),
+                dirty=False,
+                warn_key=f"{hand_side}_ik_solution_jump",
+                warn_message=(
+                    f"{hand_side} IK solution held: solution_jump={max_jump:.3f}rad "
+                    f"limit={self.config.max_ik_solution_jump_rad:.3f}rad"
+                ),
+                counts_as_ik_problem=True,
+            )
+        return _ArmIkUpdate(
+            hand_side=hand_side,
+            target_key=target_key,
+            active_goal=solved,
+            dirty=True,
+            last_safe=solved.copy(),
+            last_ik_target=target,
+        )
+
+    def _cartesian_target_from_fk(
+        self,
+        hand_side: str,
+        template: CartesianTarget,
+        current_arm_q: Sequence[float],
+        ik_client: FaArmIkClientBase,
+    ) -> Optional[CartesianTarget]:
+        homo = ik_client.compute_fk(hand_side, current_arm_q)
+        if homo is None:
+            return None
+        matrix = np.asarray(homo, dtype=np.float64)
+        if matrix.shape != (4, 4) or not np.all(np.isfinite(matrix)):
+            return None
+        return replace(
+            template,
+            position_m=tuple(float(v) for v in matrix[:3, 3]),
+            orientation_xyzw=tuple(float(v) for v in self._rotation_to_quaternion_xyzw(matrix[:3, :3])),
+        )
+
+    def _solve_reachable_ik_fallback(
+        self,
+        hand_side: str,
+        previous_target: Optional[CartesianTarget],
+        current_target: CartesianTarget,
+        reference: np.ndarray,
+        ik_client: Optional[FaArmIkClientBase] = None,
+    ) -> Optional[tuple[object, CartesianTarget, float]]:
+        if not self.config.ik_reachable_fallback_enabled or previous_target is None:
+            return None
+        ik_client = ik_client or getattr(self, "_ik_clients", {}).get(hand_side, self._ik_client)
+        best = None
+        for orientation_alpha in self.config.ik_reachable_fallback_orientation_alphas:
+            low = 0.0
+            high = 1.0
+            for _ in range(self.config.ik_reachable_fallback_iterations):
+                alpha = 0.5 * (low + high)
+                if alpha < self.config.ik_reachable_fallback_min_alpha:
+                    break
+                candidate = self._interpolate_cartesian_target(
+                    previous_target,
+                    current_target,
+                    alpha,
+                    orientation_alpha=orientation_alpha,
+                )
+                ik = ik_client.solve(hand_side, candidate, reference)
+                if not ik.success or self._ik_error_exceeds_quality_limit(ik):
+                    high = alpha
                     continue
+                solved = np.asarray(ik.q_target, dtype=np.float64)
                 max_jump = float(np.max(np.abs(solved - reference)))
                 if self.config.max_ik_solution_jump_rad > 0.0 and max_jump > self.config.max_ik_solution_jump_rad:
-                    self._active_arm_goals[hand_side] = np.asarray(reference, dtype=np.float64)
-                    self._arm_goal_dirty[hand_side] = False
-                    self._latest_target_keys[hand_side] = target_key
-                    self._warn_safety(
-                        f"{hand_side}_ik_solution_jump",
-                        (
-                            f"{hand_side} IK solution held: solution_jump={max_jump:.3f}rad "
-                            f"limit={self.config.max_ik_solution_jump_rad:.3f}rad"
-                        ),
-                    )
+                    high = alpha
                     continue
-                self._last_safe_arm_targets[hand_side] = solved.copy()
-                self._last_ik_cartesian_targets[hand_side] = target
-                self._arm_goal_dirty[hand_side] = True
-            self._active_arm_goals[hand_side] = np.asarray(solved, dtype=np.float64)
-            self._latest_target_keys[hand_side] = target_key
+                best = (ik, candidate, alpha)
+                low = alpha
+            if best is not None:
+                return best
+        return best
+
+    def _interpolate_cartesian_target(
+        self,
+        previous: CartesianTarget,
+        current: CartesianTarget,
+        alpha: float,
+        orientation_alpha: Optional[float] = None,
+    ) -> CartesianTarget:
+        alpha = min(1.0, max(0.0, float(alpha)))
+        orientation_alpha = alpha if orientation_alpha is None else min(1.0, max(0.0, float(orientation_alpha)))
+        prev_pos = np.asarray(previous.position_m, dtype=np.float64)
+        curr_pos = np.asarray(current.position_m, dtype=np.float64)
+        position = tuple((prev_pos + (curr_pos - prev_pos) * alpha).tolist())
+        orientation = tuple(
+            self._slerp_quaternion_xyzw(previous.orientation_xyzw, current.orientation_xyzw, orientation_alpha).tolist()
+        )
+        return replace(current, position_m=position, orientation_xyzw=orientation)
+
+    @staticmethod
+    def _slerp_quaternion_xyzw(
+        previous_xyzw: Sequence[float],
+        current_xyzw: Sequence[float],
+        alpha: float,
+    ) -> np.ndarray:
+        previous = np.asarray(previous_xyzw, dtype=np.float64)
+        current = np.asarray(current_xyzw, dtype=np.float64)
+        previous_norm = float(np.linalg.norm(previous))
+        current_norm = float(np.linalg.norm(current))
+        if previous_norm <= 0.0 or current_norm <= 0.0:
+            return current if current_norm > 0.0 else np.asarray((0.0, 0.0, 0.0, 1.0), dtype=np.float64)
+        previous = previous / previous_norm
+        current = current / current_norm
+        dot = float(np.dot(previous, current))
+        if dot < 0.0:
+            current = -current
+            dot = -dot
+        dot = min(1.0, max(-1.0, dot))
+        if dot > 0.9995:
+            out = previous + alpha * (current - previous)
+            return out / np.linalg.norm(out)
+        theta_0 = float(np.arccos(dot))
+        sin_theta_0 = float(np.sin(theta_0))
+        theta = theta_0 * alpha
+        scale_previous = float(np.sin(theta_0 - theta)) / sin_theta_0
+        scale_current = float(np.sin(theta)) / sin_theta_0
+        return scale_previous * previous + scale_current * current
+
+    @staticmethod
+    def _rotation_to_quaternion_xyzw(rotation: np.ndarray) -> np.ndarray:
+        matrix = np.asarray(rotation, dtype=np.float64)
+        trace = float(np.trace(matrix))
+        if trace > 0.0:
+            scale = float(np.sqrt(trace + 1.0) * 2.0)
+            qw = 0.25 * scale
+            qx = (matrix[2, 1] - matrix[1, 2]) / scale
+            qy = (matrix[0, 2] - matrix[2, 0]) / scale
+            qz = (matrix[1, 0] - matrix[0, 1]) / scale
+        else:
+            diag = np.diag(matrix)
+            idx = int(np.argmax(diag))
+            if idx == 0:
+                scale = float(np.sqrt(1.0 + matrix[0, 0] - matrix[1, 1] - matrix[2, 2]) * 2.0)
+                qw = (matrix[2, 1] - matrix[1, 2]) / scale
+                qx = 0.25 * scale
+                qy = (matrix[0, 1] + matrix[1, 0]) / scale
+                qz = (matrix[0, 2] + matrix[2, 0]) / scale
+            elif idx == 1:
+                scale = float(np.sqrt(1.0 + matrix[1, 1] - matrix[0, 0] - matrix[2, 2]) * 2.0)
+                qw = (matrix[0, 2] - matrix[2, 0]) / scale
+                qx = (matrix[0, 1] + matrix[1, 0]) / scale
+                qy = 0.25 * scale
+                qz = (matrix[1, 2] + matrix[2, 1]) / scale
+            else:
+                scale = float(np.sqrt(1.0 + matrix[2, 2] - matrix[0, 0] - matrix[1, 1]) * 2.0)
+                qw = (matrix[1, 0] - matrix[0, 1]) / scale
+                qx = (matrix[0, 2] + matrix[2, 0]) / scale
+                qy = (matrix[1, 2] + matrix[2, 1]) / scale
+                qz = 0.25 * scale
+        quat = np.asarray((qx, qy, qz, qw), dtype=np.float64)
+        norm = float(np.linalg.norm(quat))
+        if norm <= 0.0 or not np.isfinite(norm):
+            return np.asarray((0.0, 0.0, 0.0, 1.0), dtype=np.float64)
+        return quat / norm
 
     def _ik_error_exceeds_quality_limit(self, ik: FaArmIkResult) -> bool:
         return (
@@ -901,6 +1575,33 @@ class FaRealControl(Component):
             self.config.ik_max_orientation_error_rad > 0.0
             and float(ik.orientation_error) > self.config.ik_max_orientation_error_rad
         )
+
+    def _ik_within_return_recovery_limit(self, ik: FaArmIkResult) -> bool:
+        if not self.config.ik_return_recovery_enabled:
+            return False
+        return (
+            self.config.ik_return_recovery_max_position_error_m <= 0.0
+            or float(ik.position_error) <= self.config.ik_return_recovery_max_position_error_m
+        ) and (
+            self.config.ik_return_recovery_max_orientation_error_rad <= 0.0
+            or float(ik.orientation_error) <= self.config.ik_return_recovery_max_orientation_error_rad
+        )
+
+    def _cartesian_target_is_returning_from_reach(
+        self,
+        previous: Optional[CartesianTarget],
+        current: CartesianTarget,
+    ) -> bool:
+        if not self.config.ik_return_recovery_enabled or previous is None:
+            return False
+        retreat = float(self.config.ik_return_recovery_min_retreat_m)
+        previous_pos = np.asarray(previous.position_m, dtype=np.float64)
+        current_pos = np.asarray(current.position_m, dtype=np.float64)
+        if previous_pos.shape != (3,) or current_pos.shape != (3,):
+            return False
+        forward_retreat = float(previous_pos[0] - current_pos[0])
+        radial_retreat = float(np.linalg.norm(previous_pos) - np.linalg.norm(current_pos))
+        return forward_retreat >= retreat or radial_retreat >= retreat
 
     def _cartesian_target_within_ik_deadband(self, current: CartesianTarget, previous: CartesianTarget) -> bool:
         position_delta = np.asarray(current.position_m, dtype=np.float64) - np.asarray(
@@ -1024,6 +1725,9 @@ class FaRealControl(Component):
         logger.warning(message)
 
     def close(self):
+        executor = getattr(self, "_ik_executor", None)
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
         self._ros2.close()
         for subscriber in getattr(self, "_subscribers", []):
             try:

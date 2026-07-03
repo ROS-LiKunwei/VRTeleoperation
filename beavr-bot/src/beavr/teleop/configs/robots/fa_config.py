@@ -111,6 +111,7 @@ class FaRealControlCfg:
                 ),
                 max_joint_velocity_rad_s=tuple([1.2] * FA_UPPER_COMMAND_LENGTH),
                 max_joint_jump_rad=0.5,
+                max_rate_limit_dt_s=0.02,
                 max_translation_step_m=0.30,
                 max_rotation_step_rad=0.5,
             ),
@@ -119,17 +120,41 @@ class FaRealControlCfg:
             safety_hold_arm_on_pause=True,
             pause_hold_heartbeat_hz=20.0,
             allow_mujoco_mirror_without_joint_state=True,
-            max_ik_solution_jump_rad=0.5,
+            max_ik_solution_jump_rad=0.7,
             ik_solution_jump_clip_rad=0.3,
-            ik_max_position_error_m=0.08,
-            ik_max_orientation_error_rad=0.2,
-            min_snap_expected_duration_s=0.2,
-            min_snap_max_velocity_rad_s=0.6,
-            min_snap_max_acceleration_rad_s2=3.0,
+            ik_max_position_error_m=0.18,
+            ik_max_orientation_error_rad=0.65,
+            min_snap_expected_duration_s=0.14,
+            min_snap_max_velocity_rad_s=0.9,
+            min_snap_max_acceleration_rad_s2=5.0,
             min_snap_target_publish_hz=60.0,
             min_snap_target_epsilon_rad=0.002,
-            ik_cartesian_position_deadband_m=0.01,
-            ik_cartesian_orientation_deadband_rad=0.06,
+            ik_cartesian_position_deadband_m=0.003,
+            ik_cartesian_orientation_deadband_rad=0.02,
+            ik_reachable_fallback_enabled=True,
+            ik_reachable_fallback_iterations=7,
+            ik_reachable_fallback_min_alpha=0.01,
+            ik_reachable_fallback_orientation_alphas=(1.0, 0.75, 0.5),
+            ik_return_recovery_enabled=True,
+            ik_return_recovery_min_retreat_m=0.015,
+            ik_return_recovery_max_position_error_m=0.35,
+            ik_return_recovery_max_orientation_error_rad=1.0,
+            ik_multi_seed_enabled=True,
+            ik_escape_enabled=True,
+            ik_escape_trigger_count=3,
+            ik_escape_target_tolerance_rad=0.04,
+            ik_escape_local_enabled=True,
+            ik_escape_local_elbow_target_rad=-1.05,
+            ik_escape_local_max_joint_delta_rad=0.25,
+            ik_singularity_output_filter_enabled=True,
+            ik_singularity_filter_enter_problem_count=2,
+            ik_singularity_filter_exit_problem_count=0,
+            ik_singularity_filter_elbow_enter_rad=-1.20,
+            ik_singularity_filter_elbow_exit_rad=-1.05,
+            ik_singularity_filter_elbow_upper_enter_rad=0.12,
+            ik_singularity_filter_elbow_upper_exit_rad=-0.05,
+            ik_singularity_output_filter_alpha=0.85,
+            ik_singularity_output_filter_max_step_rad=0.08,
             initial_pose_enabled=True,
             initial_left_arm_positions_rad=(-1.05, 0.76, -0.62, -1.03, -0.68, 0.0, -0.35),
             initial_right_arm_positions_rad=(-1.05, -0.76, 0.62, -1.03, 0.68, 0.0, 0.35),
@@ -142,7 +167,7 @@ class FaRealControlCfg:
                 right_joint_names=FA_RIGHT_ARM_JOINT_NAMES,
                 left_endeff_body="left_hand_base_link",
                 right_endeff_body="right_hand_base_link",
-                max_iter=8,
+                max_iter=1000,
                 dls_damping=0.1,
             ),
             ik=FaArmIkConfig(
@@ -153,6 +178,15 @@ class FaRealControlCfg:
                 max_iters=200,
                 max_joint_step_rad=1.0,
                 eps=0.01,
+                skip_svd_fallback=True,
+                position_weight=1.0,
+                orientation_weight=1.0,
+                acceptable_position_error_m=0.04,
+                acceptable_orientation_error_rad=0.5,
+                comfort_nullspace_log_enabled=True,
+                comfort_nullspace_weight=0.08,
+                comfort_left_arm_positions_rad=(-0.5, 0.5, -0.5, -0.5, 0.5, 0.0, 0.0),
+                comfort_right_arm_positions_rad=(-0.5, 0.5, 0.5, -0.5, 0.5, 0.0, 0.0),
             ),
         )
     )
@@ -192,15 +226,18 @@ class FaOperatorCfg:
     stream_oculus: bool = True
     endeff_publish_port: int = ports.XARM_ENDEFF_SUBSCRIBE_PORT + SYSMO32_RIGHT_PORT_OFFSET
     endeff_subscribe_port: int = ports.XARM_ENDEFF_PUBLISH_PORT + SYSMO32_RIGHT_PORT_OFFSET
-    moving_average_limit: int = 3
+    moving_average_limit: int = 1
     arm_resolution_port: int = ports.KEYPOINT_STREAM_PORT
     use_filter: bool = False
     teleoperation_state_port: int = ports.XARM_TELEOPERATION_STATE_PORT
     hand_frame_timeout_s: float = 1.0
     rotation_delta_frame: str = "base"
-    post_resume_stable_position_epsilon_m: float = 0.008
-    post_resume_stable_orientation_epsilon_rad: float = 0.08
-    post_resume_stable_dwell_s: float = 1.0
+    translation_scale: float = 1.0
+    high_resolution_translation_scale: float = 1.0
+    low_resolution_translation_scale: float = 1.0
+    post_resume_stable_position_epsilon_m: float = 0.03
+    post_resume_stable_orientation_epsilon_rad: float = 0.20
+    post_resume_stable_dwell_s: float = 0.2
     logging_config: dict[str, Any] = field(
         default_factory=lambda: {
             "enabled": False,
@@ -228,6 +265,9 @@ class FaOperatorCfg:
             hand_side=self.hand_side,
             hand_frame_timeout_s=self.hand_frame_timeout_s,
             rotation_delta_frame=self.rotation_delta_frame,
+            translation_scale=self.translation_scale,
+            high_resolution_translation_scale=self.high_resolution_translation_scale,
+            low_resolution_translation_scale=self.low_resolution_translation_scale,
             post_resume_stable_position_epsilon_m=self.post_resume_stable_position_epsilon_m,
             post_resume_stable_orientation_epsilon_rad=self.post_resume_stable_orientation_epsilon_rad,
             post_resume_stable_dwell_s=self.post_resume_stable_dwell_s,
@@ -298,7 +338,7 @@ class FaConfig:
                     hand_side=robots.RIGHT,
                     host=network.HOST_ADDRESS,
                     keypoint_sub_port=ports.KEYPOINT_STREAM_PORT,
-                    moving_average_limit=3,
+                    moving_average_limit=1,
                 )
             )
         if self.laterality in (Laterality.LEFT, Laterality.BIMANUAL):
@@ -307,7 +347,7 @@ class FaConfig:
                     hand_side=robots.LEFT,
                     host=network.HOST_ADDRESS,
                     keypoint_sub_port=ports.KEYPOINT_STREAM_PORT,
-                    moving_average_limit=3,
+                    moving_average_limit=1,
                 )
             )
 

@@ -39,6 +39,9 @@ class FaOperator(XArmOperator):
         hand_side: str = "right",
         hand_frame_timeout_s: float = 0.5,
         rotation_delta_frame: str = "base",
+        translation_scale: float = 0.8,
+        high_resolution_translation_scale: float = 0.8,
+        low_resolution_translation_scale: float = 0.6,
         post_resume_stable_position_epsilon_m: float = 0.008,
         post_resume_stable_orientation_epsilon_rad: float = 0.08,
         post_resume_stable_dwell_s: float = 1.0,
@@ -71,3 +74,26 @@ class FaOperator(XArmOperator):
             post_resume_stable_orientation_epsilon_rad=post_resume_stable_orientation_epsilon_rad,
             post_resume_stable_dwell_s=post_resume_stable_dwell_s,
         )
+        self.resolution_scale = float(translation_scale)
+        self._fa_high_resolution_translation_scale = float(high_resolution_translation_scale)
+        self._fa_low_resolution_translation_scale = float(low_resolution_translation_scale)
+
+    def _get_resolution_scale_mode(self) -> float:
+        if not self._arm_resolution_subscriber:
+            return self.resolution_scale
+
+        data = self._arm_resolution_subscriber.recv_keypoints()
+        if data is None:
+            return self.resolution_scale
+
+        try:
+            from beavr.teleop.configs.constants import robots
+
+            scale_mode = data.value
+            if scale_mode == robots.ARM_HIGH_RESOLUTION:
+                self.resolution_scale = self._fa_high_resolution_translation_scale
+            elif scale_mode == robots.ARM_LOW_RESOLUTION:
+                self.resolution_scale = self._fa_low_resolution_translation_scale
+            return self.resolution_scale
+        except Exception:
+            return self.resolution_scale

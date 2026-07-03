@@ -340,6 +340,9 @@ class UnifiedPICO4VRHandDetectorCfg:
     teleop_state_pub_port: int = ports.XARM_TELEOPERATION_STATE_PORT
     hand_config: str = robots.RIGHT
     hand_side: str = robots.RIGHT  # 用于标识目的
+    enable_receive_frequency_logging: bool = False
+    enable_receive_sample_logging: bool = False
+    enable_publish_debug_logging: bool = False
 
     def __post_init__(self):
         """验证端口配置。"""
@@ -372,6 +375,9 @@ class UnifiedPICO4VRHandDetectorCfg:
             "teleop_reset_port": self.teleop_reset_port,
             "teleop_state_pub_port": self.teleop_state_pub_port,
             "hand_config": self.hand_config,
+            "enable_receive_frequency_logging": self.enable_receive_frequency_logging,
+            "enable_receive_sample_logging": self.enable_receive_sample_logging,
+            "enable_publish_debug_logging": self.enable_publish_debug_logging,
         }
 
         # 根据配置设置适当的手部端口
