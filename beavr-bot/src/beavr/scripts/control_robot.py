@@ -131,8 +131,11 @@ import json
 import logging
 import multiprocessing  # Needed for process types (用于启动独立进程来处理遥操作等，避免阻塞主进程)
 import os
+import select
 import sys
+import termios
 import time
+import tty
 from dataclasses import asdict
 from pathlib import Path
 from pprint import pformat
@@ -174,6 +177,58 @@ from beavr.lerobot.configs import parser
 # 用于存储遥操作相关的多进程列表，在运行时会被填充
 _teleop_processes: list[multiprocessing.Process] | None = None  # Populated at runtime
 
+_FA_REPLAY_PREP_TARGET_A = (
+    0.0,
+    1.40,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    -1.40,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+)
+_FA_REPLAY_PREP_TARGET_B = (
+    -1.05,
+    0.76,
+    -0.62,
+    -1.03,
+    -0.68,
+    0.0,
+    -0.35,
+    -1.05,
+    -0.76,
+    0.62,
+    -1.03,
+    0.68,
+    0.0,
+    0.35,
+)
+_FA_REPLAY_PREP_TARGET_C = (
+    0.0,
+    0.1,
+    0.0,
+    -0.0,
+    0.0,
+    0.0,
+    0.0,
+    -0.0,
+    -0.1,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+)
+_FA_REPLAY_PREP_MOVE_DURATION_S = 4.0
+_FA_REPLAY_TARGET_REACHED_TOLERANCE_RAD = 0.03
+_FA_REPLAY_TARGET_REACHED_STABLE_SAMPLES = 3
+
 
 class _FaDatasetReplayPublisher:
     """Publish FA dataset replay actions recorded as 7+7+2 joint/state vectors.
@@ -190,16 +245,22 @@ class _FaDatasetReplayPublisher:
         try:
             import rclpy
             from min_snap.msg import MinSnapTarget
+            from sensor_msgs.msg import JointState
             from std_msgs.msg import Int32
         except Exception as exc:
             raise RuntimeError(
-                "FA dataset replay requires a sourced ROS2 environment with min_snap.msg.MinSnapTarget "
-                "and std_msgs.msg.Int32 available. Run replay from a shell that has sourced both:\n"
+                "FA dataset replay requires a sourced ROS2 environment with min_snap.msg.MinSnapTarget, "
+                "sensor_msgs.msg.JointState, and std_msgs.msg.Int32 available. "
+                "Run replay from a shell that has sourced both:\n"
                 "  source /opt/ros/humble/setup.bash\n"
                 "  source /home/likunwei/humanoid_ws/install/setup.bash\n"
                 "Then start control_robot.py from the same shell."
             ) from exc
 
+        from beavr.teleop.components.interface.robots.fa_command_builder import (
+            FA_LEFT_ARM_JOINT_NAMES,
+            FA_RIGHT_ARM_JOINT_NAMES,
+        )
         from beavr.teleop.components.interface.robots.fa_real_control import FaRealControlConfig
         from beavr.teleop.configs.constants import robots
 
@@ -210,6 +271,8 @@ class _FaDatasetReplayPublisher:
         self._robots = robots
         self._msg_type = Int32
         self._min_snap_msg_type = MinSnapTarget
+        self._arm_joint_names = tuple(FA_LEFT_ARM_JOINT_NAMES + FA_RIGHT_ARM_JOINT_NAMES)
+        self._latest_joint_state: dict[str, float] = {}
         config = FaRealControlConfig()
         topics = config.ros2
         # 双臂 joint-space 目标走 humanoid_ws/min_snap，和 FA real-control 内部发布路径保持一致。
@@ -224,6 +287,12 @@ class _FaDatasetReplayPublisher:
         )
         self._right_hand_pub = self._node.create_publisher(
             Int32, topics.right_hand_topic, topics.hand_command_queue_size
+        )
+        self._node.create_subscription(
+            JointState,
+            topics.joint_state_topic,
+            self._on_joint_state,
+            10,
         )
         self._open_ros_action = int(config.hand_open_ros_action)
         self._grasp_ros_action = int(config.hand_grasp_ros_action)
@@ -241,14 +310,7 @@ class _FaDatasetReplayPublisher:
             )
 
         # action layout: [left_arm_7, right_arm_7, left_hand_state, right_hand_state]
-        arm_msg = self._min_snap_msg_type()
-        arm_msg.left_arm_target_rad = [float(value) for value in action_np[:7]]
-        arm_msg.right_arm_target_rad = [float(value) for value in action_np[7:14]]
-        arm_msg.expected_duration_s = float(self._expected_duration_s)
-        arm_msg.max_velocity_rad_s = float(self._max_velocity_rad_s)
-        arm_msg.max_acceleration_rad_s2 = float(self._max_acceleration_rad_s2)
-        self._min_snap_pub.publish(arm_msg)
-
+        self.publish_arm_target(action_np[:14])
         self._publish_hand(self._robots.LEFT, action_np[14])
         self._publish_hand(self._robots.RIGHT, action_np[15])
         self._rclpy.spin_once(self._node, timeout_sec=0.0)
@@ -261,9 +323,105 @@ class _FaDatasetReplayPublisher:
         else:
             self._right_hand_pub.publish(msg)
 
+    def _on_joint_state(self, msg) -> None:
+        self._latest_joint_state = {
+            name: float(position) for name, position in zip(msg.name, msg.position, strict=False)
+        }
+
     def _gripper_state_to_ros_action(self, gripper_state: float) -> int:
         # 数据集里 0 表示打开，1 表示握紧；ROS 侧使用 FA 配置里的真实动作编号。
         return self._grasp_ros_action if float(gripper_state) >= 0.5 else self._open_ros_action
+
+    def current_arm_position(self) -> np.ndarray | None:
+        if not all(name in self._latest_joint_state for name in self._arm_joint_names):
+            return None
+        return np.asarray(
+            [self._latest_joint_state[name] for name in self._arm_joint_names],
+            dtype=np.float64,
+        )
+
+    def _target_max_error(self, target: np.ndarray) -> float | None:
+        current = self.current_arm_position()
+        if current is None:
+            return None
+        return float(np.max(np.abs(current - target)))
+
+    def publish_arm_target(self, target, *, expected_duration_s: float | None = None) -> None:
+        target_np = np.asarray(target, dtype=np.float64).flatten()
+        if target_np.size != 14:
+            raise ValueError(f"FA min-snap target must contain 14 arm joint values, got {target_np.size}")
+
+        arm_msg = self._min_snap_msg_type()
+        arm_msg.left_arm_target_rad = [float(value) for value in target_np[:7]]
+        arm_msg.right_arm_target_rad = [float(value) for value in target_np[7:14]]
+        arm_msg.expected_duration_s = float(
+            self._expected_duration_s if expected_duration_s is None else expected_duration_s
+        )
+        arm_msg.max_velocity_rad_s = float(self._max_velocity_rad_s)
+        arm_msg.max_acceleration_rad_s2 = float(self._max_acceleration_rad_s2)
+        self._min_snap_pub.publish(arm_msg)
+        self._rclpy.spin_once(self._node, timeout_sec=0.0)
+
+    def move_arm_target(
+        self,
+        target,
+        *,
+        duration_s: float,
+        tolerance_rad: float = _FA_REPLAY_TARGET_REACHED_TOLERANCE_RAD,
+        stable_samples: int = _FA_REPLAY_TARGET_REACHED_STABLE_SAMPLES,
+        label: str = "target",
+    ) -> np.ndarray:
+        target_np = np.asarray(target, dtype=np.float64).flatten()
+        precheck_error = None
+        for _ in range(stable_samples):
+            self._rclpy.spin_once(self._node, timeout_sec=0.02)
+            precheck_error = self._target_max_error(target_np)
+            if precheck_error is None or precheck_error > tolerance_rad:
+                break
+        else:
+            logging.info(
+                "FA replay arm target %s already reached; max_error=%.4frad <= %.4frad",
+                label,
+                float(precheck_error or 0.0),
+                tolerance_rad,
+            )
+            return target_np
+
+        logging.info("Publishing FA replay arm target %s via min_snap", label)
+        self.publish_arm_target(target_np, expected_duration_s=duration_s)
+        reached_samples = 0
+        last_wait_log_s = 0.0
+        while True:
+            self._rclpy.spin_once(self._node, timeout_sec=0.02)
+            current = self.current_arm_position()
+            if current is None:
+                now_s = time.time()
+                if now_s - last_wait_log_s >= 1.0:
+                    last_wait_log_s = now_s
+                    logging.info("Waiting FA replay arm target %s: no complete /joint_states yet", label)
+                continue
+            max_error = float(np.max(np.abs(current - target_np)))
+            if max_error <= tolerance_rad:
+                reached_samples += 1
+                if reached_samples >= stable_samples:
+                    logging.info(
+                        "FA replay arm target %s reached; max_error=%.4frad <= %.4frad",
+                        label,
+                        max_error,
+                        tolerance_rad,
+                    )
+                    return target_np
+            else:
+                reached_samples = 0
+                now_s = time.time()
+                if now_s - last_wait_log_s >= 1.0:
+                    last_wait_log_s = now_s
+                    logging.info(
+                        "Waiting FA replay arm target %s: max_error=%.4frad > %.4frad",
+                        label,
+                        max_error,
+                        tolerance_rad,
+                    )
 
     def close(self) -> None:
         self._node.destroy_node()
@@ -352,6 +510,45 @@ def _load_local_v30_replay_actions(root: str | Path | None, episode: int):
     if "action" not in data_df.columns:
         raise ValueError(f"Local v3.0 episode file has no action column: {dataset_root / data_path}")
     return list(data_df["action"]), int(info["fps"])
+
+
+def _wait_for_replay_start_key() -> None:
+    print("Dataset replay is ready. Press r/R to start motion.")
+    if not sys.stdin.isatty():
+        while True:
+            value = input().strip()
+            if value.lower() == "r":
+                return
+            print("Press r/R to start motion.")
+
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    try:
+        tty.setcbreak(fd)
+        while True:
+            readable, _, _ = select.select([sys.stdin], [], [], 0.1)
+            if not readable:
+                continue
+            char = sys.stdin.read(1)
+            if char.lower() == "r":
+                print("Replay start confirmed.")
+                return
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+
+def _run_fa_replay_arm_sequence(
+    fa_replay_publisher: _FaDatasetReplayPublisher,
+    targets: tuple[tuple[str, tuple[float, ...]], ...],
+) -> np.ndarray | None:
+    current_position = None
+    for label, target in targets:
+        current_position = fa_replay_publisher.move_arm_target(
+            target,
+            duration_s=_FA_REPLAY_PREP_MOVE_DURATION_S,
+            label=label,
+        )
+    return current_position
 
 
 class _RecordTerminalLogFilter(logging.Filter):
@@ -720,16 +917,27 @@ def replay(
         replay_fps = cfg.fps or dataset_fps
 
     fa_replay_publisher = None
+    is_fa_bimanual_replay = False
     if num_frames > 0:
         first_action_item = actions[0]
         first_action = first_action_item["action"] if isinstance(first_action_item, dict) else first_action_item
         if _is_fa_bimanual_replay_action(robot, first_action):
+            is_fa_bimanual_replay = True
             # Initialize ROS publishers before opening cameras/robot adapters so a missing ROS environment
             # fails early and does not briefly connect hardware resources.
             fa_replay_publisher = _FaDatasetReplayPublisher(replay_fps)
 
     if not robot.is_connected:
         robot.connect()
+
+    if is_fa_bimanual_replay:
+        assert fa_replay_publisher is not None
+        _wait_for_replay_start_key()
+        logging.info("Moving FA replay arm targets A -> B before dataset replay.")
+        _run_fa_replay_arm_sequence(
+            fa_replay_publisher,
+            (("A", _FA_REPLAY_PREP_TARGET_A), ("B", _FA_REPLAY_PREP_TARGET_B)),
+        )
 
     log_say("Replaying episode", cfg.play_sounds, blocking=True)
     # 按帧率逐帧发送动作
@@ -741,6 +949,7 @@ def replay(
             # v2.1/HF dataset returns {"action": ...}; local v3.0 helper returns the raw action vector.
             action = action_item["action"] if isinstance(action_item, dict) else action_item
             if _is_fa_bimanual_replay_action(robot, action):
+                assert fa_replay_publisher is not None
                 fa_replay_publisher.publish(action)
             else:
                 robot.send_action(action) # 将当前帧的动作发送给机器人
@@ -751,6 +960,18 @@ def replay(
 
             dt_s = time.perf_counter() - start_episode_t
             log_control_info(robot, dt_s, fps=replay_fps)
+
+        if is_fa_bimanual_replay:
+            logging.info("Dataset replay finished. Moving FA replay arm targets B -> A -> C.")
+            _run_fa_replay_arm_sequence(
+                fa_replay_publisher,
+                (
+                    ("B", _FA_REPLAY_PREP_TARGET_B),
+                    ("A", _FA_REPLAY_PREP_TARGET_A),
+                    ("C", _FA_REPLAY_PREP_TARGET_C),
+                ),
+            )
+            logging.info("FA replay sequence complete.")
     finally:
         if fa_replay_publisher is not None:
             fa_replay_publisher.close()

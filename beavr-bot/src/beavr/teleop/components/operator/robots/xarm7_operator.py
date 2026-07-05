@@ -190,6 +190,8 @@ class XArmOperator(Operator):
         self._last_hand_frame_timestamp_s: float = 0.0
         self.hand_frame_timeout_s = float(hand_frame_timeout_s)
         self._last_teleop_command_timestamp_s: float = 0.0
+        self._last_teleop_command: Optional[str] = None
+        self._last_processed_resume_command_timestamp_s: float = 0.0
         self._ignore_hand_frames_before_s: float = 0.0
         self._last_invalid_hand_frame_log_time: float = 0.0
         self._last_reset_pose_wait_log_time: float = 0.0
@@ -208,6 +210,8 @@ class XArmOperator(Operator):
         self._post_resume_stable_position_epsilon_m = float(post_resume_stable_position_epsilon_m)
         self._post_resume_stable_orientation_epsilon_rad = float(post_resume_stable_orientation_epsilon_rad)
         self._post_resume_stable_dwell_s = max(0.0, float(post_resume_stable_dwell_s))
+        self._post_resume_zero_deadband_active = False
+        self._post_resume_zero_deadband_log_time = 0.0
 
         # Filter setup
         self.use_filter = use_filter  # 是否使用滤波器
@@ -380,12 +384,14 @@ class XArmOperator(Operator):
         self._last_hand_frame_timestamp_s = 0.0
         self.hand_moving_h = None
         self.comp_filter = None
+        self._post_resume_zero_deadband_active = False
+        self._post_resume_zero_deadband_log_time = 0.0
         self._post_reset_hand_rebaseline_frames = []
         self._post_reset_hand_rebaseline_first_frame_time_s = None
         self._arm_transformed_keypoint_subscriber.recv_keypoints()
 
     def _rebaseline_hand_after_reset_if_needed(self) -> bool:
-        """Use several fresh post-reset hand frames before refreshing hand_init."""
+        """Use the first fresh post-reset hand frame as the new hand baseline."""
         min_timestamp_s = getattr(self, "_post_reset_hand_rebaseline_after_s", None)
         if min_timestamp_s is None:
             return False
@@ -393,27 +399,8 @@ class XArmOperator(Operator):
         if moving_hand_frame is None:
             self._log_reset_hand_wait()
             return True
-        if not hasattr(self, "_post_reset_hand_rebaseline_frames"):
-            self._post_reset_hand_rebaseline_frames = []
-        now_s = time.time()
-        if getattr(self, "_post_reset_hand_rebaseline_first_frame_time_s", None) is None:
-            self._post_reset_hand_rebaseline_first_frame_time_s = now_s
-        self._post_reset_hand_rebaseline_frames.append(np.asarray(moving_hand_frame, dtype=np.float64).copy())
-        required_frames = max(1, int(getattr(self, "_reset_hand_settle_frames", 1)))
-        if len(self._post_reset_hand_rebaseline_frames) < required_frames:
-            self._log_reset_hand_wait()
-            return True
-        if not self._post_resume_hand_frames_are_stable(self._post_reset_hand_rebaseline_frames):
-            self._post_reset_hand_rebaseline_frames = [self._post_reset_hand_rebaseline_frames[-1]]
-            self._post_reset_hand_rebaseline_first_frame_time_s = now_s
-            self._log_reset_hand_wait()
-            return True
-        stable_dwell_s = float(getattr(self, "_post_resume_stable_dwell_s", 0.0))
-        stable_elapsed_s = now_s - float(self._post_reset_hand_rebaseline_first_frame_time_s or now_s)
-        if stable_elapsed_s < stable_dwell_s:
-            self._log_reset_hand_wait()
-            return True
-        baseline_frame = self._post_reset_hand_rebaseline_frames[-1]
+
+        baseline_frame = np.asarray(moving_hand_frame, dtype=np.float64).copy()
         try:
             self.hand_init_h = self._turn_frame_to_homo_mat(baseline_frame)
             self.hand_init_t = copy(self.hand_init_h[:3, 3])
@@ -422,22 +409,17 @@ class XArmOperator(Operator):
             logger.error(f"ERROR ({self.operator_name}): Failed to rebaseline hand frame after reset: {e}")
             return True
         self.comp_filter = None
+        self._post_resume_zero_deadband_active = True
+        self._post_resume_zero_deadband_log_time = 0.0
         self._post_reset_hand_rebaseline_after_s = None
         self._post_reset_hand_rebaseline_frames = []
         self._post_reset_hand_rebaseline_first_frame_time_s = None
-        if not self._refresh_robot_init_pose_after_hand_baseline():
-            self.hand_init_h = None
-            self.hand_init_t = None
-            self.hand_moving_h = None
-            self._post_reset_hand_rebaseline_after_s = time.time()
-            return True
         logger.info(
             f"{self.operator_name} post-reset Hand init H:\n{self.hand_init_h}"
         )
         logger.info(
-            f"{self.operator_name}: post-reset hand baseline refreshed; "
-            f"stable for {stable_elapsed_s:.2f}s over {required_frames}+ fresh frames; "
-            "suppressing this frame so resume starts from the comfortable hand pose"
+            f"{self.operator_name}: post-reset hand baseline refreshed from first fresh resume frame; "
+            "suppressing this frame so paused hand motion is not replayed"
         )
         return True
 
@@ -766,6 +748,7 @@ class XArmOperator(Operator):
             # Expect SessionCommand
             if data.command == robots.PAUSE:
                 self._last_teleop_command_timestamp_s = float(data.timestamp_s)
+                self._last_teleop_command = data.command
                 logger.info(
                     "[Diag][OP_TELEOP_STATE_RX] operator=%s command=%s timestamp_s=%.6f",
                     self.operator_name,
@@ -775,6 +758,7 @@ class XArmOperator(Operator):
                 return robots.ARM_TELEOP_STOP
             elif data.command == robots.RESUME:
                 self._last_teleop_command_timestamp_s = float(data.timestamp_s)
+                self._last_teleop_command = data.command
                 logger.info(
                     "[Diag][OP_TELEOP_STATE_RX] operator=%s command=%s timestamp_s=%.6f",
                     self.operator_name,
@@ -957,6 +941,12 @@ class XArmOperator(Operator):
         resume_edge = (
             self.arm_teleop_state == robots.ARM_TELEOP_STOP and new_arm_teleop_state == robots.ARM_TELEOP_CONT
         )
+        fresh_resume_command = (
+            self._requires_resume_for_hand_init
+            and new_arm_teleop_state == robots.ARM_TELEOP_CONT
+            and self._last_teleop_command == robots.RESUME
+            and self._last_teleop_command_timestamp_s > self._last_processed_resume_command_timestamp_s
+        )
 
         if new_arm_teleop_state == robots.ARM_TELEOP_STOP:
             if self.arm_teleop_state != robots.ARM_TELEOP_STOP:
@@ -970,16 +960,17 @@ class XArmOperator(Operator):
             self._clear_hand_tracking_cache()
             return
 
-        needs_reset = self.is_first_frame or resume_edge  # 检查是否需要重置
+        needs_reset = self.is_first_frame or resume_edge or fresh_resume_command  # 检查是否需要重置
 
         if needs_reset:
-            if resume_edge:
+            if resume_edge or fresh_resume_command:
+                self._last_processed_resume_command_timestamp_s = self._last_teleop_command_timestamp_s
                 self._ignore_hand_frames_before_s = max(
                     time.time(),
                     self._last_teleop_command_timestamp_s,
                 )
                 logger.info(
-                    f"{self.operator_name}: resume edge detected, rebaseline hand/robot "
+                    f"{self.operator_name}: resume command detected, rebaseline hand/robot "
                     f"with frames newer than {self._ignore_hand_frames_before_s:.6f}"
                 )
             elif self.is_first_frame:
@@ -1003,7 +994,8 @@ class XArmOperator(Operator):
                 return  # Exit if reset failed
             if self._requires_resume_for_hand_init:
                 logger.info(
-                    f"{self.operator_name}: reset complete; waiting fresh post-resume hand frames for Hand init H"
+                    f"{self.operator_name}: reset complete; waiting first fresh post-resume hand frame "
+                    "for Hand init H"
                 )
                 self._post_reset_hand_rebaseline_after_s = time.time()
                 self._post_reset_hand_rebaseline_frames = []
@@ -1056,6 +1048,35 @@ class XArmOperator(Operator):
             self.is_first_frame = True
             return
 
+        hand_translation_delta_vr = self.hand_moving_h[:3, 3] - self.hand_init_h[:3, 3]
+        if getattr(self, "_post_resume_zero_deadband_active", False):
+            rotation_delta_vr = self.project_to_rotation_matrix(h_ht_hi[:3, :3])
+            translation_delta_m = float(np.linalg.norm(hand_translation_delta_vr))
+            orientation_delta_rad = float(Rotation.from_matrix(rotation_delta_vr).magnitude())
+            position_epsilon = float(getattr(self, "_post_resume_stable_position_epsilon_m", 0.008))
+            orientation_epsilon = float(getattr(self, "_post_resume_stable_orientation_epsilon_rad", 0.08))
+            if translation_delta_m <= position_epsilon and orientation_delta_rad <= orientation_epsilon:
+                h_ht_hi = np.eye(4)
+                hand_translation_delta_vr = np.zeros(3, dtype=np.float64)
+                now_s = time.time()
+                if now_s - getattr(self, "_post_resume_zero_deadband_log_time", 0.0) >= 1.0:
+                    self._post_resume_zero_deadband_log_time = now_s
+                    logger.info(
+                        "%s: post-resume zero deadband holding init pose "
+                        "pos_delta=%.4fm ori_delta=%.4frad",
+                        self.operator_name,
+                        translation_delta_m,
+                        orientation_delta_rad,
+                    )
+            else:
+                self._post_resume_zero_deadband_active = False
+                logger.info(
+                    "%s: post-resume zero deadband released pos_delta=%.4fm ori_delta=%.4frad",
+                    self.operator_name,
+                    translation_delta_m,
+                    orientation_delta_rad,
+                )
+
         # 6. 坐标系空间重定向 Apply Coordinate Transformations
         try:
             h_robot_to_vr = self.h_r_v
@@ -1066,7 +1087,7 @@ class XArmOperator(Operator):
             relative_affine_in_robot_frame = np.eye(4)
             relative_affine_in_robot_frame[:3, :3] = r_vr_to_robot @ hand_rotation_delta_vr @ r_robot_to_vr
             relative_affine_in_robot_frame[:3, 3] = (
-                r_vr_to_robot @ (self.hand_moving_h[:3, 3] - self.hand_init_h[:3, 3]) * self.resolution_scale
+                r_vr_to_robot @ hand_translation_delta_vr * self.resolution_scale
             )
 
         except np.linalg.LinAlgError:

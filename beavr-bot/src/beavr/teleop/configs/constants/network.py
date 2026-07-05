@@ -6,7 +6,7 @@
 # NOTE: Keep this in sync with your active environment config (e.g. configs/environment/dev.yaml)
 HOST_ADDRESS = "192.168.1.134"
 
-# Robot IP addresses
+# Robot IP addressesif
 LEFT_XARM_IP = "192.168.1.237"
 RIGHT_XARM_IP = "192.168.1.197"
 LEFT_ARM_IP = "192.168.86.216"  # For Left XArm

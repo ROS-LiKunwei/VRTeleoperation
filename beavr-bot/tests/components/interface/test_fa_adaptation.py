@@ -799,7 +799,7 @@ def test_fa_resume_requires_fresh_target_after_hand_init():
 
 def test_fa_real_control_holds_large_ik_solution_jump():
     controller = FaRealControl.__new__(FaRealControl)
-    controller.config = FaRealControlConfig(max_ik_solution_jump_rad=1.0)
+    controller.config = FaRealControlConfig(max_ik_solution_jump_rad=1.0, ik_solution_jump_clip_rad=0.0)
     controller._teleop_active = True
     controller.control_backend = "mujoco"
     controller._real_joint_state_fresh = lambda: True
@@ -831,10 +831,53 @@ def test_fa_real_control_holds_large_ik_solution_jump():
 
     controller._publish_upper_command_if_safe()
 
-    assert published == []
+    assert len(published) == 1
+    assert published[-1].right_arm == pytest.approx(tuple([0.0] * 7))
     assert controller._last_safe_arm_targets[robots.RIGHT] == pytest.approx(np.asarray([0.1] * 7))
     assert controller._warn_safety_messages[0][0] == "right_ik_solution_jump"
     assert "held" in controller._warn_safety_messages[0][1]
+
+
+def test_fa_real_control_clips_large_ik_solution_jump_when_enabled():
+    controller = FaRealControl.__new__(FaRealControl)
+    controller.config = FaRealControlConfig(max_ik_solution_jump_rad=0.4, ik_solution_jump_clip_rad=0.1)
+    controller._teleop_active = True
+    controller.control_backend = "mujoco"
+    controller._real_joint_state_fresh = lambda: True
+    warnings = []
+    controller._warn_safety = lambda key, message: warnings.append((key, message))
+    snapshot = FaJointStateSnapshot(
+        timestamp_s=1.0,
+        left_arm=tuple([0.0] * 7),
+        right_arm=tuple([0.0] * 7),
+        neck=(0.0, 0.0),
+    )
+    controller._current_joint_snapshot = lambda: snapshot
+    controller._latest_targets = {robots.LEFT: None, robots.RIGHT: object()}
+    controller._last_safe_arm_targets = {
+        robots.LEFT: None,
+        robots.RIGHT: np.asarray([0.1] * 7, dtype=np.float64),
+    }
+    controller._ik_client = SimpleNamespace(
+        solve=lambda hand_side, target, current_arm: FaArmIkResult(
+            success=True,
+            q_target=tuple([0.8] * 7),
+            has_solution=True,
+            position_error=0.03,
+            orientation_error=0.09,
+        )
+    )
+    published = []
+    controller._builder = FaUpperPositionCommandBuilder()
+    controller._limiter = SimpleNamespace(limit=lambda command, now_s=None: (command, ""))
+    controller._publish_upper_command_outputs = lambda command, require_real_reset: published.append(command) or True
+
+    controller._publish_upper_command_if_safe()
+
+    assert len(published) == 1
+    assert published[-1].right_arm == pytest.approx(tuple([0.2] * 7))
+    assert controller._last_safe_arm_targets[robots.RIGHT] == pytest.approx(np.asarray([0.2] * 7))
+    assert warnings[0][0] == "right_ik_solution_jump_clipped"
 
 
 def test_fa_real_control_uses_last_safe_as_ik_seed_for_recovery():
@@ -1148,6 +1191,134 @@ def test_fa_reachable_fallback_preserves_requested_orientation_before_relaxing()
     assert fallback_target.position_m[0] == pytest.approx(0.5)
     assert fallback_target.orientation_xyzw == pytest.approx(current_target.orientation_xyzw)
     assert any(np.allclose(target.orientation_xyzw, current_target.orientation_xyzw) for target in attempted)
+
+
+def test_fa_reachable_fallback_relaxes_orientation_before_backing_off_position():
+    controller = FaRealControl.__new__(FaRealControl)
+    controller.config = FaRealControlConfig(
+        max_ik_solution_jump_rad=1.0,
+        ik_max_position_error_m=0.08,
+        ik_max_orientation_error_rad=0.2,
+        ik_reachable_fallback_enabled=True,
+        ik_reachable_fallback_iterations=4,
+        ik_reachable_fallback_orientation_alphas=(1.0, 0.0),
+    )
+    previous_target = CartesianTarget(
+        timestamp_s=1.0,
+        hand_side=robots.LEFT,
+        frame_id="base",
+        position_m=(0.0, 0.0, 0.0),
+        orientation_xyzw=(0.0, 0.0, 0.0, 1.0),
+    )
+    current_target = CartesianTarget(
+        timestamp_s=2.0,
+        hand_side=robots.LEFT,
+        frame_id="base",
+        position_m=(1.0, 0.0, 0.0),
+        orientation_xyzw=(0.0, 0.0, 1.0, 0.0),
+    )
+
+    class FakeIkClient:
+        def solve(self, hand_side, target, current_arm):
+            position_x = float(target.position_m[0])
+            orientation_is_relaxed = np.allclose(target.orientation_xyzw, previous_target.orientation_xyzw)
+            if position_x == pytest.approx(1.0) and orientation_is_relaxed:
+                return FaArmIkResult(
+                    success=True,
+                    q_target=tuple([0.2] * 7),
+                    has_solution=True,
+                    position_error=0.02,
+                    orientation_error=0.1,
+                )
+            return FaArmIkResult(
+                success=True,
+                q_target=tuple([0.4] * 7),
+                has_solution=True,
+                position_error=0.2,
+                orientation_error=0.1,
+            )
+
+    result = controller._solve_reachable_ik_fallback(
+        robots.LEFT,
+        previous_target,
+        current_target,
+        np.asarray([0.1] * 7, dtype=np.float64),
+        FakeIkClient(),
+    )
+
+    assert result is not None
+    _, fallback_target, alpha = result
+    assert alpha == pytest.approx(1.0)
+    assert fallback_target.position_m == pytest.approx(current_target.position_m)
+    assert fallback_target.orientation_xyzw == pytest.approx(previous_target.orientation_xyzw)
+
+
+def test_fa_arm_ik_reuses_first_approximate_solution_for_same_target():
+    controller = FaRealControl.__new__(FaRealControl)
+    controller.config = FaRealControlConfig(
+        max_ik_solution_jump_rad=1.0,
+        ik_max_position_error_m=0.08,
+        ik_max_orientation_error_rad=0.3,
+        ik_multi_seed_enabled=False,
+        ik=FaArmIkConfig(
+            urdf_file="",
+            acceptable_position_error_m=0.04,
+            acceptable_orientation_error_rad=0.1,
+        ),
+    )
+    target = CartesianTarget(
+        timestamp_s=10.0,
+        hand_side=robots.LEFT,
+        frame_id="base",
+        position_m=(0.2, 0.0, 0.0),
+        orientation_xyzw=(0.0, 0.0, 0.0, 1.0),
+    )
+
+    class FakeIkClient:
+        def __init__(self):
+            self.calls = 0
+
+        def solve(self, hand_side, target, current_arm):
+            self.calls += 1
+            goal = [0.2] * 7 if self.calls == 1 else [0.6] * 7
+            return FaArmIkResult(
+                success=True,
+                q_target=tuple(goal),
+                has_solution=True,
+                position_error=0.06,
+                orientation_error=0.2,
+                message="using best approximate IK within usable threshold",
+            )
+
+    fake_ik = FakeIkClient()
+    controller._ik_client = fake_ik
+    controller._ik_clients = {robots.LEFT: fake_ik, robots.RIGHT: fake_ik}
+    controller._approx_ik_target_cache = {robots.LEFT: None, robots.RIGHT: None}
+    seed = np.asarray([0.0] * 7, dtype=np.float64)
+
+    first = controller._solve_arm_ik_update(
+        robots.LEFT,
+        target,
+        ("timestamp", 10.0),
+        None,
+        seed.copy(),
+        seed.copy(),
+        seed.copy(),
+    )
+    second = controller._solve_arm_ik_update(
+        robots.LEFT,
+        target,
+        ("timestamp", 10.0),
+        None,
+        seed.copy(),
+        seed.copy(),
+        seed.copy(),
+    )
+
+    assert fake_ik.calls == 1
+    assert first.active_goal == pytest.approx(np.asarray([0.2] * 7))
+    assert second.active_goal == pytest.approx(np.asarray([0.2] * 7))
+    assert second.warn_key == f"{robots.LEFT}_ik_cached_approx"
 
 
 def test_fa_returning_target_accepts_approximate_ik_to_escape_reach_limit():

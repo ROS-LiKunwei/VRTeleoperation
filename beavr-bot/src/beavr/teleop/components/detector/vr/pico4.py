@@ -135,7 +135,7 @@ class PICO4VRHandDetector(Component):
         self._last_pause_command_log_time = 0.0
         self._last_pause_data: Optional[bytes] = None
         self._last_resume_command_time_s = 0.0
-        self._pause_low_debounce_after_resume_s = 0.8
+        self._pause_low_debounce_after_resume_s = 0.1
         self._raw_hand_stall_warning_s = 2.0
         self._last_raw_hand_stall_log_time = {}
         self._freq_calc_interval = 1.0  # 1秒计算一次频率
@@ -175,7 +175,6 @@ class PICO4VRHandDetector(Component):
                     "PICO4: ignoring Low pause edge %.0fms after resume to avoid reset interruption",
                     (now_s - self._last_resume_command_time_s) * 1000.0,
                 )
-                self._last_pause_data = pause_data
                 return None
             command = robots.PAUSE
         else:

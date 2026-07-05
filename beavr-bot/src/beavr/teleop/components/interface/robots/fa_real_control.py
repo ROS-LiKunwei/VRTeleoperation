@@ -107,9 +107,9 @@ class FaRealControlConfig:
     ik_solution_jump_clip_rad: float = 0.3
     ik_max_position_error_m: float = 0.05
     ik_max_orientation_error_rad: float = 0.5
-    min_snap_expected_duration_s: float = 0.016
-    min_snap_max_velocity_rad_s: float = 1.5
-    min_snap_max_acceleration_rad_s2: float = 15.0
+    min_snap_expected_duration_s: float = 0.3
+    min_snap_max_velocity_rad_s: float = 0.8
+    min_snap_max_acceleration_rad_s2: float = 3.0
     min_snap_target_publish_hz: float = 60.0
     min_snap_target_epsilon_rad: float = 0.002
     ik_cartesian_position_deadband_m: float = 0.012
@@ -117,7 +117,7 @@ class FaRealControlConfig:
     ik_reachable_fallback_enabled: bool = True
     ik_reachable_fallback_iterations: int = 6
     ik_reachable_fallback_min_alpha: float = 0.05
-    ik_reachable_fallback_orientation_alphas: tuple[float, ...] = (1.0, 0.75, 0.5)
+    ik_reachable_fallback_orientation_alphas: tuple[float, ...] = (1.0, 0.75, 0.5, 0.0)
     ik_return_recovery_enabled: bool = True
     ik_return_recovery_min_retreat_m: float = 0.015
     ik_return_recovery_max_position_error_m: float = 0.35
@@ -170,6 +170,8 @@ class FaRealControlConfig:
         )
         if 1.0 not in orientation_alphas:
             orientation_alphas = (1.0, *orientation_alphas)
+        if 0.0 not in orientation_alphas:
+            orientation_alphas = (*orientation_alphas, 0.0)
         self.ik_reachable_fallback_orientation_alphas = tuple(dict.fromkeys(orientation_alphas))
         self.ik_return_recovery_min_retreat_m = max(0.0, float(self.ik_return_recovery_min_retreat_m))
         self.ik_return_recovery_max_position_error_m = max(
@@ -451,6 +453,10 @@ class FaRealControl(Component):
         self._accept_cartesian_targets_after_s: Dict[str, float] = {robots.LEFT: 0.0, robots.RIGHT: 0.0}
         self._last_safe_arm_targets: Dict[str, Optional[np.ndarray]] = {robots.LEFT: None, robots.RIGHT: None}
         self._last_ik_cartesian_targets: Dict[str, Optional[CartesianTarget]] = {robots.LEFT: None, robots.RIGHT: None}
+        self._approx_ik_target_cache: Dict[str, Optional[tuple[tuple, np.ndarray, CartesianTarget]]] = {
+            robots.LEFT: None,
+            robots.RIGHT: None,
+        }
         self._ik_problem_counts: Dict[str, int] = {robots.LEFT: 0, robots.RIGHT: 0}
         self._arm_escape_active: Dict[str, bool] = {robots.LEFT: False, robots.RIGHT: False}
         self._ik_output_filter_active: Dict[str, bool] = {robots.LEFT: False, robots.RIGHT: False}
@@ -520,6 +526,7 @@ class FaRealControl(Component):
             self._latest_target_keys = {robots.LEFT: None, robots.RIGHT: None}
             self._active_arm_goals = {robots.LEFT: None, robots.RIGHT: None}
             self._arm_goal_dirty = {robots.LEFT: False, robots.RIGHT: False}
+            self._reset_approx_ik_cache()
             self._reset_ik_recovery_state()
             self._hand_init_ready = {robots.LEFT: False, robots.RIGHT: False}
             self._accept_cartesian_targets_after_s = {
@@ -636,6 +643,7 @@ class FaRealControl(Component):
         self._last_safe_arm_targets = {robots.LEFT: left.copy(), robots.RIGHT: right.copy()}
         self._latest_targets = {robots.LEFT: None, robots.RIGHT: None}
         self._latest_target_keys = {robots.LEFT: None, robots.RIGHT: None}
+        self._reset_approx_ik_cache()
         self._limiter.reset(command.values)
         logger.info(
             "FA initial teleop pose target published: duration=%.2fs max_vel=%.2f max_acc=%.2f",
@@ -661,6 +669,7 @@ class FaRealControl(Component):
         self._latest_target_keys = {robots.LEFT: None, robots.RIGHT: None}
         self._active_arm_goals = {robots.LEFT: None, robots.RIGHT: None}
         self._arm_goal_dirty = {robots.LEFT: False, robots.RIGHT: False}
+        self._reset_approx_ik_cache()
         self._reset_ik_recovery_state()
         self._hand_init_ready = {robots.LEFT: False, robots.RIGHT: False}
         pause_started_at_s = time.time()
@@ -695,6 +704,7 @@ class FaRealControl(Component):
             robots.RIGHT: np.asarray(snapshot.right_arm, dtype=np.float64).copy(),
         }
         self._last_ik_cartesian_targets = {robots.LEFT: None, robots.RIGHT: None}
+        self._reset_approx_ik_cache()
         self._reset_ik_recovery_state()
         if reset_limiter:
             self._limiter.reset(snapshot.upper_joints)
@@ -714,6 +724,13 @@ class FaRealControl(Component):
             self._arm_escape_active[side] = False
             self._ik_output_filter_active[side] = False
             self._ik_output_filter_goals[side] = None
+
+    def _reset_approx_ik_cache(self, hand_side: Optional[str] = None) -> None:
+        if not hasattr(self, "_approx_ik_target_cache"):
+            self._approx_ik_target_cache = {robots.LEFT: None, robots.RIGHT: None}
+        sides = (robots.LEFT, robots.RIGHT) if hand_side is None else (hand_side,)
+        for side in sides:
+            self._approx_ik_target_cache[side] = None
 
     def _arm_escape_target(self, hand_side: str) -> Optional[np.ndarray]:
         if hand_side == robots.LEFT:
@@ -971,6 +988,8 @@ class FaRealControl(Component):
             self._warn_safety("joint_state_missing", "FA command rejected: missing joint state")
             return
         self._update_active_arm_goals(snapshot)
+        if not hasattr(self, "_hand_init_ready"):
+            self._hand_init_ready = {robots.LEFT: True, robots.RIGHT: True}
         dirty_without_hand_init = [
             side for side, dirty in getattr(self, "_arm_goal_dirty", {}).items()
             if dirty and not self._hand_init_ready.get(side, False)
@@ -1036,6 +1055,7 @@ class FaRealControl(Component):
                     self._last_safe_arm_targets[hand_side] = np.asarray(goal, dtype=np.float64).copy()
                     self._last_ik_cartesian_targets[hand_side] = None
                     self._latest_target_keys[hand_side] = None
+                    self._reset_approx_ik_cache(hand_side)
                     logger.info("%s IK escape complete; resuming Cartesian IK", hand_side)
                 continue
             self._arm_goal_dirty[hand_side] = remaining > tolerance
@@ -1054,6 +1074,8 @@ class FaRealControl(Component):
             self._pending_ik_futures = {}
         if not hasattr(self, "_arm_escape_active"):
             self._arm_escape_active = {robots.LEFT: False, robots.RIGHT: False}
+        if not hasattr(self, "_approx_ik_target_cache"):
+            self._approx_ik_target_cache = {robots.LEFT: None, robots.RIGHT: None}
         self._apply_completed_arm_ik_updates()
         for hand_side in (robots.LEFT, robots.RIGHT):
             target = self._latest_targets[hand_side]
@@ -1077,6 +1099,17 @@ class FaRealControl(Component):
                     continue
             if target_key == self._latest_target_keys.get(hand_side):
                 continue
+            cached = self._cached_approx_ik_update(hand_side, target_key)
+            if cached is not None:
+                self._active_arm_goals[hand_side] = cached.copy()
+                self._arm_goal_dirty[hand_side] = True
+                self._latest_target_keys[hand_side] = target_key
+                self._last_safe_arm_targets[hand_side] = cached.copy()
+                cached_entry = self._approx_ik_target_cache[hand_side]
+                if cached_entry is not None:
+                    self._last_ik_cartesian_targets[hand_side] = cached_entry[2]
+                continue
+            self._clear_stale_approx_ik_cache(hand_side, target_key)
             pending = self._pending_ik_futures.get(hand_side)
             if pending is not None and not pending.done():
                 continue
@@ -1308,10 +1341,27 @@ class FaRealControl(Component):
         last_safe: Optional[np.ndarray],
     ) -> _ArmIkUpdate:
         ik_client = getattr(self, "_ik_clients", {}).get(hand_side, self._ik_client)
+        cached = self._cached_approx_ik_update(hand_side, target_key)
+        if cached is not None:
+            cached_entry = self._approx_ik_target_cache[hand_side]
+            cached_target = target if cached_entry is None else cached_entry[2]
+            return _ArmIkUpdate(
+                hand_side=hand_side,
+                target_key=target_key,
+                active_goal=cached.copy(),
+                dirty=True,
+                last_safe=cached.copy(),
+                last_ik_target=cached_target,
+                warn_key=f"{hand_side}_ik_cached_approx",
+                warn_message=f"{hand_side} IK reused cached approximate solution for unchanged target",
+                counts_as_ik_problem=False,
+            )
+        self._clear_stale_approx_ik_cache(hand_side, target_key)
         accepted, best = self._solve_best_arm_ik(hand_side, target, ik_seed, current_arm, ik_client)
         if accepted is not None:
             ik = accepted["ik"]
             solved = np.asarray(accepted["solved"], dtype=np.float64)
+            self._store_approx_ik_cache_if_needed(hand_side, target_key, target, ik, solved)
             return _ArmIkUpdate(
                 hand_side=hand_side,
                 target_key=target_key,
@@ -1321,22 +1371,11 @@ class FaRealControl(Component):
                 last_ik_target=target,
             )
         if best is None:
-            if last_safe is None:
-                return _ArmIkUpdate(
-                    hand_side=hand_side,
-                    target_key=target_key,
-                    active_goal=None,
-                    dirty=False,
-                    consume_target=False,
-                    warn_key=f"{hand_side}_ik_fail",
-                    warn_message=f"{hand_side} IK failed for all seed candidates",
-                    counts_as_ik_problem=True,
-                )
             return _ArmIkUpdate(
                 hand_side=hand_side,
                 target_key=target_key,
-                active_goal=last_safe.copy(),
-                dirty=False,
+                active_goal=np.asarray(current_arm, dtype=np.float64).copy(),
+                dirty=True,
                 warn_key=f"{hand_side}_ik_fail",
                 warn_message=f"{hand_side} IK failed for all seed candidates",
                 counts_as_ik_problem=True,
@@ -1392,8 +1431,8 @@ class FaRealControl(Component):
             return _ArmIkUpdate(
                 hand_side=hand_side,
                 target_key=target_key,
-                active_goal=np.asarray(reference, dtype=np.float64),
-                dirty=False,
+                active_goal=np.asarray(current_arm, dtype=np.float64).copy(),
+                dirty=True,
                 warn_key=f"{hand_side}_ik_quality_hold",
                 warn_message=(
                     f"{hand_side} IK solution held: position_error={ik.position_error:.3f}m "
@@ -1404,11 +1443,33 @@ class FaRealControl(Component):
 
         jump_exceeds, max_jump = self._solution_jump_exceeds_limit(solved, reference)
         if jump_exceeds:
+            clip = float(self.config.ik_solution_jump_clip_rad)
+            if clip > 0.0:
+                clipped = np.asarray(reference, dtype=np.float64) + np.clip(
+                    solved - np.asarray(reference, dtype=np.float64),
+                    -clip,
+                    clip,
+                )
+                return _ArmIkUpdate(
+                    hand_side=hand_side,
+                    target_key=target_key,
+                    active_goal=clipped,
+                    dirty=True,
+                    last_safe=clipped.copy(),
+                    last_ik_target=target,
+                    warn_key=f"{hand_side}_ik_solution_jump_clipped",
+                    warn_message=(
+                        f"{hand_side} IK solution clipped: solution_jump={max_jump:.3f}rad "
+                        f"limit={self.config.max_ik_solution_jump_rad:.3f}rad "
+                        f"clip={clip:.3f}rad"
+                    ),
+                    counts_as_ik_problem=False,
+                )
             return _ArmIkUpdate(
                 hand_side=hand_side,
                 target_key=target_key,
-                active_goal=np.asarray(reference, dtype=np.float64),
-                dirty=False,
+                active_goal=np.asarray(current_arm, dtype=np.float64).copy(),
+                dirty=True,
                 warn_key=f"{hand_side}_ik_solution_jump",
                 warn_message=(
                     f"{hand_side} IK solution held: solution_jump={max_jump:.3f}rad "
@@ -1424,6 +1485,48 @@ class FaRealControl(Component):
             last_safe=solved.copy(),
             last_ik_target=target,
         )
+
+    def _cached_approx_ik_update(self, hand_side: str, target_key: tuple) -> Optional[np.ndarray]:
+        if not hasattr(self, "_approx_ik_target_cache"):
+            self._approx_ik_target_cache = {robots.LEFT: None, robots.RIGHT: None}
+            return None
+        cached = self._approx_ik_target_cache.get(hand_side)
+        if cached is None:
+            return None
+        cached_key, cached_goal, _ = cached
+        if cached_key != target_key:
+            return None
+        return np.asarray(cached_goal, dtype=np.float64).copy()
+
+    def _clear_stale_approx_ik_cache(self, hand_side: str, target_key: tuple) -> None:
+        if not hasattr(self, "_approx_ik_target_cache"):
+            self._approx_ik_target_cache = {robots.LEFT: None, robots.RIGHT: None}
+            return
+        cached = self._approx_ik_target_cache.get(hand_side)
+        if cached is not None and cached[0] != target_key:
+            self._approx_ik_target_cache[hand_side] = None
+
+    def _store_approx_ik_cache_if_needed(
+        self,
+        hand_side: str,
+        target_key: tuple,
+        target: CartesianTarget,
+        ik,
+        solved: np.ndarray,
+    ) -> None:
+        if not hasattr(self, "_approx_ik_target_cache"):
+            self._approx_ik_target_cache = {robots.LEFT: None, robots.RIGHT: None}
+        if self._ik_error_exceeds_quality_limit(ik):
+            return
+        if not self._ik_result_is_approximate(ik):
+            self._approx_ik_target_cache[hand_side] = None
+            return
+        if self._approx_ik_target_cache.get(hand_side) is None:
+            self._approx_ik_target_cache[hand_side] = (
+                target_key,
+                np.asarray(solved, dtype=np.float64).copy(),
+                target,
+            )
 
     def _cartesian_target_from_fk(
         self,
@@ -1457,6 +1560,18 @@ class FaRealControl(Component):
         ik_client = ik_client or getattr(self, "_ik_clients", {}).get(hand_side, self._ik_client)
         best = None
         for orientation_alpha in self.config.ik_reachable_fallback_orientation_alphas:
+            full_position_candidate = self._interpolate_cartesian_target(
+                previous_target,
+                current_target,
+                1.0,
+                orientation_alpha=orientation_alpha,
+            )
+            full_position_ik = ik_client.solve(hand_side, full_position_candidate, reference)
+            if full_position_ik.success and not self._ik_error_exceeds_quality_limit(full_position_ik):
+                solved = np.asarray(full_position_ik.q_target, dtype=np.float64)
+                max_jump = float(np.max(np.abs(solved - reference)))
+                if self.config.max_ik_solution_jump_rad <= 0.0 or max_jump <= self.config.max_ik_solution_jump_rad:
+                    return full_position_ik, full_position_candidate, 1.0
             low = 0.0
             high = 1.0
             for _ in range(self.config.ik_reachable_fallback_iterations):
@@ -1574,6 +1689,29 @@ class FaRealControl(Component):
         ) or (
             self.config.ik_max_orientation_error_rad > 0.0
             and float(ik.orientation_error) > self.config.ik_max_orientation_error_rad
+        )
+
+    def _ik_position_error_exceeds_quality_limit(self, ik: FaArmIkResult) -> bool:
+        return (
+            self.config.ik_max_position_error_m > 0.0
+            and float(ik.position_error) > self.config.ik_max_position_error_m
+        )
+
+    def _ik_orientation_error_exceeds_quality_limit(self, ik: FaArmIkResult) -> bool:
+        return (
+            self.config.ik_max_orientation_error_rad > 0.0
+            and float(ik.orientation_error) > self.config.ik_max_orientation_error_rad
+        )
+
+    def _ik_result_is_approximate(self, ik: FaArmIkResult) -> bool:
+        if "approximate" in str(getattr(ik, "message", "")).lower():
+            return True
+        ik_config = getattr(self.config, "ik", None)
+        if ik_config is None:
+            return False
+        return (
+            float(ik.position_error) > float(getattr(ik_config, "acceptable_position_error_m", 0.0))
+            or float(ik.orientation_error) > float(getattr(ik_config, "acceptable_orientation_error_rad", 0.0))
         )
 
     def _ik_within_return_recovery_limit(self, ik: FaArmIkResult) -> bool:
