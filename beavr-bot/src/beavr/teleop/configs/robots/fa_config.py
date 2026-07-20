@@ -238,6 +238,33 @@ class FaOperatorCfg:
     post_resume_stable_position_epsilon_m: float = 0.03
     post_resume_stable_orientation_epsilon_rad: float = 0.20
     post_resume_stable_dwell_s: float = 0.2
+    right_transformed_keypoints_port: int = ports.KEYPOINT_TRANSFORM_PORT
+    left_transformed_keypoints_port: int = ports.LEFT_KEYPOINT_TRANSFORM_PORT
+    enable_vr_axis_calibration: bool = True
+    require_calibration_each_enable: bool = True
+    calibration_sample_duration_s: float = 0.4
+    calibration_stable_dwell_s: float = 0.3
+    calibration_stable_position_epsilon_m: float = 0.02
+    calibration_ready_return_position_epsilon_m: float = 0.04
+    calibration_ready_return_dwell_s: float = 0.20
+    calibration_min_motion_distance_m: float = 0.06
+    calibration_max_motion_distance_m: float = 0.60
+    calibration_max_axis_abs_dot: float = 0.35
+    calibration_max_left_right_direction_error_deg: float = 20.0
+    calibration_max_left_right_distance_ratio_error: float = 0.35
+    calibration_rotation_orthogonality_tolerance: float = 1e-4
+    calibration_rotation_determinant_tolerance: float = 1e-4
+    calibration_max_timestamp_skew_s: float = 0.15
+    calibration_max_frame_age_s: float = 1.0
+    tracking_origin_jump_detection_enabled: bool = True
+    tracking_origin_jump_translation_m: float = 0.15
+    tracking_origin_jump_rotation_deg: float = 15.0
+    tracking_origin_jump_confirm_frames: int = 2
+    tracking_origin_jump_interhand_change_m: float = 0.04
+    calibration_audio_enabled: bool = True
+    calibration_prompt_port: int = ports.FA_CALIBRATION_PROMPT_PORT
+    calibration_prompt_topic: str = "fa_calibration_prompt"
+    calibration_audio_cooldown_s: float = 2.5
     logging_config: dict[str, Any] = field(
         default_factory=lambda: {
             "enabled": False,
@@ -272,6 +299,33 @@ class FaOperatorCfg:
             post_resume_stable_orientation_epsilon_rad=self.post_resume_stable_orientation_epsilon_rad,
             post_resume_stable_dwell_s=self.post_resume_stable_dwell_s,
             h_r_v=H_R_V_FA,
+            right_transformed_keypoints_port=self.right_transformed_keypoints_port,
+            left_transformed_keypoints_port=self.left_transformed_keypoints_port,
+            enable_vr_axis_calibration=self.enable_vr_axis_calibration,
+            require_calibration_each_enable=self.require_calibration_each_enable,
+            calibration_sample_duration_s=self.calibration_sample_duration_s,
+            calibration_stable_dwell_s=self.calibration_stable_dwell_s,
+            calibration_stable_position_epsilon_m=self.calibration_stable_position_epsilon_m,
+            calibration_ready_return_position_epsilon_m=self.calibration_ready_return_position_epsilon_m,
+            calibration_ready_return_dwell_s=self.calibration_ready_return_dwell_s,
+            calibration_min_motion_distance_m=self.calibration_min_motion_distance_m,
+            calibration_max_motion_distance_m=self.calibration_max_motion_distance_m,
+            calibration_max_axis_abs_dot=self.calibration_max_axis_abs_dot,
+            calibration_max_left_right_direction_error_deg=self.calibration_max_left_right_direction_error_deg,
+            calibration_max_left_right_distance_ratio_error=self.calibration_max_left_right_distance_ratio_error,
+            calibration_rotation_orthogonality_tolerance=self.calibration_rotation_orthogonality_tolerance,
+            calibration_rotation_determinant_tolerance=self.calibration_rotation_determinant_tolerance,
+            calibration_max_timestamp_skew_s=self.calibration_max_timestamp_skew_s,
+            calibration_max_frame_age_s=self.calibration_max_frame_age_s,
+            tracking_origin_jump_detection_enabled=self.tracking_origin_jump_detection_enabled,
+            tracking_origin_jump_translation_m=self.tracking_origin_jump_translation_m,
+            tracking_origin_jump_rotation_deg=self.tracking_origin_jump_rotation_deg,
+            tracking_origin_jump_confirm_frames=self.tracking_origin_jump_confirm_frames,
+            tracking_origin_jump_interhand_change_m=self.tracking_origin_jump_interhand_change_m,
+            calibration_audio_enabled=self.calibration_audio_enabled,
+            calibration_prompt_port=self.calibration_prompt_port,
+            calibration_prompt_topic=self.calibration_prompt_topic,
+            calibration_audio_cooldown_s=self.calibration_audio_cooldown_s,
         )
 
 
@@ -377,6 +431,10 @@ class FaConfig:
                     endeff_publish_port=ports.XARM_ENDEFF_SUBSCRIBE_PORT + SYSMO32_RIGHT_PORT_OFFSET,
                     endeff_subscribe_port=ports.XARM_ENDEFF_PUBLISH_PORT + SYSMO32_RIGHT_PORT_OFFSET,
                     hand_side=robots.RIGHT,
+                    enable_vr_axis_calibration=self.laterality == Laterality.BIMANUAL,
+                    calibration_audio_enabled=self.laterality == Laterality.BIMANUAL,
+                    right_transformed_keypoints_port=ports.KEYPOINT_TRANSFORM_PORT,
+                    left_transformed_keypoints_port=ports.LEFT_KEYPOINT_TRANSFORM_PORT,
                     logging_config={"enabled": False, "log_dir": "logs", "log_poses": True, "log_prefix": "fa_right"},
                 )
             )
@@ -387,6 +445,10 @@ class FaConfig:
                     endeff_publish_port=ports.XARM_ENDEFF_SUBSCRIBE_PORT + SYSMO32_LEFT_PORT_OFFSET,
                     endeff_subscribe_port=ports.XARM_ENDEFF_PUBLISH_PORT + SYSMO32_LEFT_PORT_OFFSET,
                     hand_side=robots.LEFT,
+                    enable_vr_axis_calibration=self.laterality == Laterality.BIMANUAL,
+                    calibration_audio_enabled=False,
+                    right_transformed_keypoints_port=ports.KEYPOINT_TRANSFORM_PORT,
+                    left_transformed_keypoints_port=ports.LEFT_KEYPOINT_TRANSFORM_PORT,
                     logging_config={"enabled": False, "log_dir": "logs", "log_poses": True, "log_prefix": "fa_left"},
                 )
             )

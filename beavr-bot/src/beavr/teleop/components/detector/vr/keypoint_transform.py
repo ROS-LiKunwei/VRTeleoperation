@@ -350,10 +350,10 @@ class TransformHandPositionCoords(Component):
         # 2. 转换为 Numpy 数组：将接收到的通常是 Python List 格式的数据转化为高效的 numpy 数组
         keypoints = np.asanyarray(input_frame.keypoints)
 
-        logger.debug(
-            f"_get_hand_coords: Received keypoints for {input_frame.hand_side} hand. "
-            f"Length: {len(input_frame.keypoints)}, First 3 values: {input_frame.keypoints[:3] if len(input_frame.keypoints) > 0 else 'empty'}"
-        )
+        # logger.debug(
+        #     f"_get_hand_coords: Received keypoints for {input_frame.hand_side} hand. "
+        #     f"Length: {len(input_frame.keypoints)}, First 3 values: {input_frame.keypoints[:3] if len(input_frame.keypoints) > 0 else 'empty'}"
+        # )
 
         # 3. 完整性校验
         expected_count = robots.OCULUS_NUM_KEYPOINTS * 3  # 26 * 3 = 78

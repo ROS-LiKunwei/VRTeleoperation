@@ -91,6 +91,14 @@ public class AndroidTextToSpeech : MonoBehaviour
 #endif
     }
 
+    public bool PlayVoiceClipResource(string resourcePath)
+    {
+        if (string.IsNullOrEmpty(resourcePath))
+            return false;
+
+        return TryPlayVoiceClipResource(resourcePath, logMissing: true);
+    }
+
     private void Update()
     {
 #if UNITY_ANDROID && !UNITY_EDITOR
@@ -253,18 +261,21 @@ public class AndroidTextToSpeech : MonoBehaviour
 
     private bool TryPlayBundledVoicePrompt(string text)
     {
-        if (_audioSource == null)
-            return false;
-
         bool started = !string.IsNullOrEmpty(text) && text.Contains("开启");
         string resourcePath = started ? StartedVoiceClipResource : PausedVoiceClipResource;
-        if (string.IsNullOrEmpty(resourcePath))
+        return TryPlayVoiceClipResource(resourcePath, logMissing: true);
+    }
+
+    private bool TryPlayVoiceClipResource(string resourcePath, bool logMissing)
+    {
+        if (_audioSource == null || string.IsNullOrEmpty(resourcePath))
             return false;
 
         AudioClip clip = Resources.Load<AudioClip>(resourcePath);
         if (clip == null)
         {
-            Debug.LogWarning("[TTS] bundled voice clip not found: Resources/" + resourcePath);
+            if (logMissing)
+                Debug.LogWarning("[TTS] bundled voice clip not found: Resources/" + resourcePath);
             return false;
         }
 

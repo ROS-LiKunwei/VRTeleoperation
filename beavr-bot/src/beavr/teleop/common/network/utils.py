@@ -42,11 +42,14 @@ def cleanup_zmq_resources() -> None:
         # Import locally to avoid circular imports at module import time
         from .handshake import HandshakeCoordinator
         from .publisher import ZMQPublisherManager
+        from .string_publisher import ZMQStringPublisherManager
 
         # Stop the publisher manager and its monitor thread
         manager = ZMQPublisherManager.get_instance()
         if hasattr(manager, "close_all"):
             manager.close_all()
+        string_manager = ZMQStringPublisherManager.get_instance()
+        string_manager.close_all()
 
         # Clean up handshake coordinator
         HandshakeCoordinator.cleanup_all()

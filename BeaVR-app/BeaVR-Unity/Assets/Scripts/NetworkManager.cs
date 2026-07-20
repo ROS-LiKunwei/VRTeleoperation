@@ -28,6 +28,8 @@ public class NetworkConfiguration
     public string LeftPausePortNum;
     /// <summary>右手暂停状态端口</summary>
     public string RightPausePortNum;
+    /// <summary>FA标定语音提示端口</summary>
+    public string FaCalibrationPromptPortNum;
 
     /// <summary>
     /// 检查IP地址是否已分配
@@ -179,6 +181,20 @@ public class NetworkManager : MonoBehaviour
             return "tcp://:";
         else
             return "tcp://" + netConfig.IPAddress + ":" + netConfig.RightPausePortNum;
+    }
+
+    /// <summary>
+    /// 获取FA标定语音提示地址
+    /// </summary>
+    /// <returns>FA标定语音提示ZMQ地址</returns>
+    public string getFaCalibrationPromptAddress()
+    {
+        if (IPNotFound)
+            return "tcp://:";
+        string port = string.IsNullOrEmpty(netConfig.FaCalibrationPromptPortNum)
+            ? "8112"
+            : netConfig.FaCalibrationPromptPortNum;
+        return "tcp://" + netConfig.IPAddress + ":" + port;
     }
 
     // changeIPAddress 不再需要；IP 从 PlayerPrefs[ServerIP] 获取

@@ -1,5 +1,5 @@
 {
-  "IPAddress": "192.168.1.134",
+  "IPAddress": "192.168.1.136",
   "rightkeyptPortNum": "8087",
   "leftkeyptPortNum": "8110",
   "camPortNum": "10005",
@@ -8,5 +8,6 @@
   "resolutionPortNum": "8095",
   "PausePortNum": "8100",
   "LeftPausePortNum": "8107",
-  "RightPausePortNum": "8109"
+  "RightPausePortNum": "8109",
+  "FaCalibrationPromptPortNum": "8112"
 }

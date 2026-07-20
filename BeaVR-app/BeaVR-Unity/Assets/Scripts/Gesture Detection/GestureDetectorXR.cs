@@ -263,6 +263,7 @@ public class GestureDetectorXR : MonoBehaviour
 	{
 		yield return new WaitForSeconds(2f);
 		NetMQController.Instance.CreateStandardSockets();
+		CalibrationPromptReceiver.Instance.StartReceiver(netConfig.getFaCalibrationPromptAddress());
 		NetMQController.Instance.PerformDiagnosticTests();
 	}
 
@@ -411,6 +412,7 @@ public class GestureDetectorXR : MonoBehaviour
 			netConfig.getResolutionAddress(),
 			netConfig.getPauseAddress()
 		);
+		CalibrationPromptReceiver.Instance.StartReceiver(netConfig.getFaCalibrationPromptAddress());
 
 		yield return new WaitForSeconds(2f);
 
@@ -772,6 +774,8 @@ public class GestureDetectorXR : MonoBehaviour
 	void SpeakTeleopState(bool started)
 	{
 		if (!EnableTeleopVoicePrompt)
+			return;
+		if (started)
 			return;
 
 		string prompt = started ? TeleopStartedVoicePrompt : TeleopPausedVoicePrompt;

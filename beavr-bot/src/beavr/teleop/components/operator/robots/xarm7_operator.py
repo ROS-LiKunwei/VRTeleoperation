@@ -672,6 +672,19 @@ class XArmOperator(Operator):
             return self.hand_moving_h[:3, :3] @ self.hand_init_h[:3, :3].T
         return body_relative_h[:3, :3]
 
+    def _get_r_vr_to_robot(self) -> np.ndarray:
+        """Return the current VR-to-robot rotation used for translation and rotation retargeting."""
+        return np.linalg.inv(self.h_r_v[:3, :3])
+
+    def _before_retargeting_cycle(
+        self,
+        new_arm_teleop_state: int,
+        resume_edge: bool,
+        fresh_resume_command: bool,
+    ) -> bool:
+        """Hook for subclasses to gate retargeting before reset/publish logic runs."""
+        return True
+
     def project_to_rotation_matrix(self, r_mat: np.ndarray) -> np.ndarray:
         """
         使用奇异值分解(SVD)将一个近似旋转的3x3矩阵调整为一个有效的SO(3)旋转矩阵,确保行列式为+1(去除反射)
@@ -960,6 +973,10 @@ class XArmOperator(Operator):
             self._clear_hand_tracking_cache()
             return
 
+        if not self._before_retargeting_cycle(new_arm_teleop_state, resume_edge, fresh_resume_command):
+            self.arm_teleop_state = new_arm_teleop_state
+            return
+
         needs_reset = self.is_first_frame or resume_edge or fresh_resume_command  # 检查是否需要重置
 
         if needs_reset:
@@ -1079,9 +1096,8 @@ class XArmOperator(Operator):
 
         # 6. 坐标系空间重定向 Apply Coordinate Transformations
         try:
-            h_robot_to_vr = self.h_r_v
-            r_robot_to_vr = h_robot_to_vr[:3, :3]
-            r_vr_to_robot = np.linalg.inv(r_robot_to_vr)
+            r_vr_to_robot = self._get_r_vr_to_robot()
+            r_robot_to_vr = np.linalg.inv(r_vr_to_robot)
             hand_rotation_delta_vr = self._hand_rotation_delta_vr(h_ht_hi)
 
             relative_affine_in_robot_frame = np.eye(4)

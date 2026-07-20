@@ -7,3 +7,5 @@
 - **接口(Interfaces)** —— 将指令转换为机器人可执行动作的机器人适配器
 - **操作者(Operators)** —— 将 VR 输入重定向为机器人动作的进程
 使用 `python -m beavr.teleop.main --robot_name=leap,xarm7 --laterality=bimanual` 启动默认的双臂配置。
+
+FA 双臂遥操作的坐标变换细节见 [FA 遥操作坐标变换逻辑](fa_coordinate_transform.md)。

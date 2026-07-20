@@ -766,4 +766,5 @@ public class NetworkSettings
     public string PausePortNum;
     public string LeftPausePortNum;
     public string RightPausePortNum;
+    public string FaCalibrationPromptPortNum;
 }
