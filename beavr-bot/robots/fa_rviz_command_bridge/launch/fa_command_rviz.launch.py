@@ -28,6 +28,7 @@ def _launch_setup(context, *args, **kwargs):
     interpolation_steps = LaunchConfiguration("interpolation_steps")
     interpolation_profile = LaunchConfiguration("interpolation_profile")
     publish_rate_hz = LaunchConfiguration("publish_rate_hz")
+    idle_publish_rate_hz = LaunchConfiguration("idle_publish_rate_hz")
     use_command_bridge = LaunchConfiguration("use_command_bridge")
     use_robot_state_publisher = LaunchConfiguration("use_robot_state_publisher")
     publish_base_tf = LaunchConfiguration("publish_base_tf")
@@ -64,6 +65,7 @@ def _launch_setup(context, *args, **kwargs):
                     "interpolation_steps": interpolation_steps,
                     "interpolation_profile": interpolation_profile,
                     "publish_rate_hz": publish_rate_hz,
+                    "idle_publish_rate_hz": idle_publish_rate_hz,
                     "expected_command_length": 16,
                 }
             ],
@@ -116,8 +118,13 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 "publish_rate_hz",
-                default_value="100.0",
+                default_value="1000.0",
                 description="Rate used to publish interpolated JointState samples.",
+            ),
+            DeclareLaunchArgument(
+                "idle_publish_rate_hz",
+                default_value="1000.0",
+                description="Rate used to keep publishing JointState when no command is active.",
             ),
             DeclareLaunchArgument(
                 "use_command_bridge",

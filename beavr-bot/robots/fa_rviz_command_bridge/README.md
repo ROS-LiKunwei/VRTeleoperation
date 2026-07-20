@@ -42,5 +42,7 @@ By default the launch file uses:
 - input command topic: `/upper_position_controller/commands`
 - joint state topic: `/joint_states`
 - interpolation profile: `min_snap`
+- command interpolation publish rate: `1000.0 Hz`
+- idle joint state publish rate: `1000.0 Hz`
 
 Do not publish `/joint_states` from both this bridge and the real robot driver at the same time.

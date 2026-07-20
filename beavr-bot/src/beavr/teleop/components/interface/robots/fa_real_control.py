@@ -107,9 +107,9 @@ class FaRealControlConfig:
     ik_solution_jump_clip_rad: float = 0.3
     ik_max_position_error_m: float = 0.05
     ik_max_orientation_error_rad: float = 0.5
-    min_snap_expected_duration_s: float = 0.3
-    min_snap_max_velocity_rad_s: float = 0.8
-    min_snap_max_acceleration_rad_s2: float = 3.0
+    min_snap_expected_duration_s: float = 0.033
+    min_snap_max_velocity_rad_s: float = 0.3
+    min_snap_max_acceleration_rad_s2: float = 2.0
     min_snap_target_publish_hz: float = 60.0
     min_snap_target_epsilon_rad: float = 0.002
     ik_cartesian_position_deadband_m: float = 0.012

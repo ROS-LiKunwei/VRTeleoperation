@@ -102,9 +102,9 @@ class FaCommandToJointState(Node):
         if interpolation_profile not in ("quintic", "min_snap"):
             raise ValueError("interpolation_profile must be one of: quintic, min_snap")
         self.interpolation_profile = interpolation_profile
-        self.publish_rate_hz = max(1.0, float(self.declare_parameter("publish_rate_hz", 100.0).value))
+        self.publish_rate_hz = max(1.0, float(self.declare_parameter("publish_rate_hz", 1000.0).value))
         self.idle_publish_rate_hz = max(
-            0.0, float(self.declare_parameter("idle_publish_rate_hz", 2.0).value)
+            0.0, float(self.declare_parameter("idle_publish_rate_hz", 1000.0).value)
         )
         self.expected_command_length = int(
             self.declare_parameter("expected_command_length", FA_UPPER_COMMAND_LENGTH).value
