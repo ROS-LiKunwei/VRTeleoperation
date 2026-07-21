@@ -37,6 +37,7 @@ class FaArmIkConfig:
     orientation_weight: float = 1.0
     acceptable_position_error_m: float = 0.05
     acceptable_orientation_error_rad: float = 0.5
+    continuity_nullspace_weight: float = 0.0
     comfort_nullspace_log_enabled: bool = True
     comfort_nullspace_weight: float = 0.08
     comfort_left_arm_positions_rad: tuple[float, ...] | None = None
@@ -63,6 +64,11 @@ class FaArmIkConfig:
             self,
             "acceptable_orientation_error_rad",
             max(0.0, float(self.acceptable_orientation_error_rad)),
+        )
+        object.__setattr__(
+            self,
+            "continuity_nullspace_weight",
+            max(0.0, float(self.continuity_nullspace_weight)),
         )
         object.__setattr__(
             self,
@@ -130,6 +136,15 @@ class FaPybindIkClient(FaArmIkClientBase):
                 "IK_7DOF_INSTALL_PREFIX to the deployed install/ik_7dof directory."
             ) from exc
         self._solver = module.FaIkSolver(config.urdf_file, config.srdf_file)
+        configure_comfort = getattr(self._solver, "configure_comfort_nullspace", None)
+        left_q_ref = _comfort_reference_for_side(config, "left")
+        right_q_ref = _comfort_reference_for_side(config, "right")
+        if configure_comfort is not None and left_q_ref is not None and right_q_ref is not None:
+            configure_comfort(
+                config.comfort_nullspace_weight,
+                [float(v) for v in left_q_ref],
+                [float(v) for v in right_q_ref],
+            )
         self._log_comfort_nullspace_config_once()
 
     def _log_comfort_nullspace_config_once(self) -> None:
@@ -160,6 +175,7 @@ class FaPybindIkClient(FaArmIkClientBase):
             self.config.orientation_weight,
             self.config.acceptable_position_error_m,
             self.config.acceptable_orientation_error_rad,
+            self.config.continuity_nullspace_weight,
         )
         q_target = out.get("q_target") or ()
         try:
@@ -341,6 +357,8 @@ def _candidate_ik_module_paths() -> list[Path]:
 
 
 class _FaIkCsvLogger:
+    _INSTANCE_LOCK = threading.Lock()
+    _INSTANCE_COUNTER = 0
     _HEADER = (
         "wall_time_s",
         "wall_time_iso",
@@ -357,6 +375,7 @@ class _FaIkCsvLogger:
         "orientation_weight",
         "acceptable_position_error_m",
         "acceptable_orientation_error_rad",
+        "continuity_nullspace_weight",
         "comfort_nullspace_weight",
         "comfort_seed_distance_rad",
         "comfort_target_distance_rad",
@@ -412,8 +431,13 @@ class _FaIkCsvLogger:
         self._lock = threading.Lock()
         self.log_dir = Path(log_dir).expanduser() if log_dir else _default_ik_log_dir()
         self.log_dir.mkdir(parents=True, exist_ok=True)
+        with self._INSTANCE_LOCK:
+            instance_index = self._INSTANCE_COUNTER
+            type(self)._INSTANCE_COUNTER += 1
         timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M-%S.%f")[:-3]
-        self.log_file = self.log_dir / f"fa_ik_{timestamp}_pid{os.getpid()}.csv"
+        self.log_file = self.log_dir / (
+            f"fa_ik_{timestamp}_pid{os.getpid()}_client{instance_index}.csv"
+        )
         self._file = self.log_file.open("a", newline="", encoding="utf-8", buffering=1)
         self._writer = csv.DictWriter(self._file, fieldnames=self._HEADER)
         self._writer.writeheader()
@@ -451,6 +475,7 @@ class _FaIkCsvLogger:
             "orientation_weight": f"{float(config.orientation_weight):.9g}",
             "acceptable_position_error_m": f"{float(config.acceptable_position_error_m):.9g}",
             "acceptable_orientation_error_rad": f"{float(config.acceptable_orientation_error_rad):.9g}",
+            "continuity_nullspace_weight": f"{float(config.continuity_nullspace_weight):.9g}",
             "comfort_nullspace_weight": f"{float(config.comfort_nullspace_weight):.9g}",
             "comfort_seed_distance_rad": _format_optional_float(comfort["seed_distance"]),
             "comfort_target_distance_rad": _format_optional_float(comfort["target_distance"]),

@@ -1,5 +1,5 @@
 {
-  "IPAddress": "192.168.1.136",
+  "IPAddress": "192.168.50.1",
   "rightkeyptPortNum": "8087",
   "leftkeyptPortNum": "8110",
   "camPortNum": "10005",
