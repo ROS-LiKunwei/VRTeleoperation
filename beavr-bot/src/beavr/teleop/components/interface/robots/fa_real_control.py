@@ -12,6 +12,7 @@ from typing import Dict, Optional, Sequence
 
 import numpy as np
 
+from beavr.teleop.common.math.orientation import quat_to_euler
 from beavr.teleop.common.network.publisher import ZMQPublisherManager
 from beavr.teleop.common.network.subscriber import ZMQSubscriber
 from beavr.teleop.common.network.utils import cleanup_zmq_resources
@@ -48,6 +49,68 @@ FA_HAND_OPEN_COMMAND = 1
 FA_HAND_GRASP_COMMAND = 2
 
 
+def _rotation_matrix_to_quaternion_xyzw(rotation: np.ndarray) -> np.ndarray:
+    """Convert a 3x3 rotation matrix to a normalized xyzw quaternion."""
+    matrix = np.asarray(rotation, dtype=np.float64)
+    if matrix.shape != (3, 3) or not np.all(np.isfinite(matrix)):
+        raise ValueError("rotation must be a finite 3x3 matrix")
+
+    trace = float(np.trace(matrix))
+    if trace > 0.0:
+        scale = 2.0 * np.sqrt(trace + 1.0)
+        quaternion = np.array(
+            [
+                (matrix[2, 1] - matrix[1, 2]) / scale,
+                (matrix[0, 2] - matrix[2, 0]) / scale,
+                (matrix[1, 0] - matrix[0, 1]) / scale,
+                0.25 * scale,
+            ],
+            dtype=np.float64,
+        )
+    else:
+        axis = int(np.argmax(np.diag(matrix)))
+        if axis == 0:
+            scale = 2.0 * np.sqrt(max(0.0, 1.0 + matrix[0, 0] - matrix[1, 1] - matrix[2, 2]))
+            quaternion = np.array(
+                [
+                    0.25 * scale,
+                    (matrix[0, 1] + matrix[1, 0]) / scale,
+                    (matrix[0, 2] + matrix[2, 0]) / scale,
+                    (matrix[2, 1] - matrix[1, 2]) / scale,
+                ],
+                dtype=np.float64,
+            )
+        elif axis == 1:
+            scale = 2.0 * np.sqrt(max(0.0, 1.0 + matrix[1, 1] - matrix[0, 0] - matrix[2, 2]))
+            quaternion = np.array(
+                [
+                    (matrix[0, 1] + matrix[1, 0]) / scale,
+                    0.25 * scale,
+                    (matrix[1, 2] + matrix[2, 1]) / scale,
+                    (matrix[0, 2] - matrix[2, 0]) / scale,
+                ],
+                dtype=np.float64,
+            )
+        else:
+            scale = 2.0 * np.sqrt(max(0.0, 1.0 + matrix[2, 2] - matrix[0, 0] - matrix[1, 1]))
+            quaternion = np.array(
+                [
+                    (matrix[0, 2] + matrix[2, 0]) / scale,
+                    (matrix[1, 2] + matrix[2, 1]) / scale,
+                    0.25 * scale,
+                    (matrix[1, 0] - matrix[0, 1]) / scale,
+                ],
+                dtype=np.float64,
+            )
+    norm = float(np.linalg.norm(quaternion))
+    if norm <= np.finfo(np.float64).eps:
+        raise ValueError("rotation matrix produced a zero quaternion")
+    quaternion /= norm
+    if quaternion[3] < 0.0:
+        quaternion = -quaternion
+    return quaternion
+
+
 def _default_beavr_bot_root() -> Path:
     return Path(os.environ.get("BEAVR_BOT_ROOT", Path(__file__).resolve().parents[6])).expanduser()
 
@@ -78,6 +141,7 @@ class FaRos2Topics:
     joint_state_topic: str = "/joint_states"
     upper_position_command_topic: str = "/upper_position_controller/commands"
     min_snap_target_topic: str = "/min_snap/target"
+    vision_calibration_topic: str = "/sysmo_vision_calibration"
     left_hand_topic: str = "/left_topic_to_hand"
     right_hand_topic: str = "/right_topic_to_hand"
     upper_position_command_queue_size: int = 60
@@ -100,6 +164,8 @@ class FaRealControlConfig:
     )
     state_publish_fps: float = 30.0
     command_publish_hz: float = 1000.0
+    vision_calibration_publish_hz: float = 0.0
+    vision_calibration_hand_side: str = robots.LEFT
     safety_hold_arm_on_pause: bool = True
     pause_hold_heartbeat_hz: float = 20.0
     allow_mujoco_mirror_without_joint_state: bool = True
@@ -152,6 +218,11 @@ class FaRealControlConfig:
     initial_hand_ros_action: Optional[int] = 21
 
     def __post_init__(self):
+        if self.vision_calibration_hand_side not in (robots.LEFT, robots.RIGHT):
+            raise ValueError("vision_calibration_hand_side must be left or right")
+        self.vision_calibration_publish_hz = max(
+            0.0, float(self.vision_calibration_publish_hz)
+        )
         self.max_ik_solution_jump_rad = max(0.0, float(self.max_ik_solution_jump_rad))
         self.ik_continuity_weight = max(0.0, float(self.ik_continuity_weight))
         self.ik_continuity_task_score_slack = max(0.0, float(self.ik_continuity_task_score_slack))
@@ -270,9 +341,11 @@ class FaRos2Bridge:
         topics: FaRos2Topics,
         require_ros: bool,
         node_name: str = "fa_real_control",
+        vision_calibration_enabled: bool = False,
     ):
         self.topics = topics
         self.require_ros = require_ros
+        self.vision_calibration_enabled = vision_calibration_enabled
         self.available = False
         self.joint_cache = FaJointStateCache(topics.joint_state_timeout_s)
         self._rclpy = None
@@ -280,7 +353,9 @@ class FaRos2Bridge:
         self._min_snap_target_publisher = None
         self._left_hand_pub = None
         self._right_hand_pub = None
+        self._vision_calibration_pub = None
         self._hand_msg_type = None
+        self._attitude_msg_type = None
         if require_ros:
             self._init_ros2(node_name)
 
@@ -308,12 +383,20 @@ class FaRos2Bridge:
             self._right_hand_pub = self._node.create_publisher(
                 Int32, self.topics.right_hand_topic, self.topics.hand_command_queue_size
             )
+            if self.vision_calibration_enabled:
+                from attitude_pkg.msg import Attitude
+
+                self._attitude_msg_type = Attitude
+                self._vision_calibration_pub = self._node.create_publisher(
+                    Attitude, self.topics.vision_calibration_topic, 10
+                )
             self._node.create_subscription(JointState, self.topics.joint_state_topic, self._on_joint_state, 10)
             self.available = True
             logger.info(
-                "FA ROS2 bridge connected: joint_state=%s min_snap_target=%s",
+                "FA ROS2 bridge connected: joint_state=%s min_snap_target=%s vision_calibration=%s",
                 self.topics.joint_state_topic,
                 self.topics.min_snap_target_topic,
+                self.topics.vision_calibration_topic if self.vision_calibration_enabled else "disabled",
             )
         except Exception as exc:
             self.available = False
@@ -338,6 +421,32 @@ class FaRos2Bridge:
             self._left_hand_pub.publish(msg)
         else:
             self._right_hand_pub.publish(msg)
+        return True
+
+    def publish_vision_calibration_pose(
+        self,
+        position_xyz: Sequence[float],
+        quaternion_xyzw: Sequence[float],
+        euler_rpy: Sequence[float],
+    ) -> bool:
+        if (
+            not self.available
+            or self._attitude_msg_type is None
+            or self._vision_calibration_pub is None
+        ):
+            return False
+        msg = self._attitude_msg_type()
+        msg.quaternion_pose_x = float(position_xyz[0])
+        msg.quaternion_pose_y = float(position_xyz[1])
+        msg.quaternion_pose_z = float(position_xyz[2])
+        msg.quaternion_attitude_x = float(quaternion_xyzw[0])
+        msg.quaternion_attitude_y = float(quaternion_xyzw[1])
+        msg.quaternion_attitude_z = float(quaternion_xyzw[2])
+        msg.quaternion_attitude_w = float(quaternion_xyzw[3])
+        msg.myroll = float(euler_rpy[0])
+        msg.mypitch = float(euler_rpy[1])
+        msg.myyaw = float(euler_rpy[2])
+        self._vision_calibration_pub.publish(msg)
         return True
 
     def publish_min_snap_target(
@@ -422,6 +531,7 @@ class FaRealControl(Component):
         self._ros2 = FaRos2Bridge(
             self.config.ros2,
             require_ros=require_ros,
+            vision_calibration_enabled=self.config.vision_calibration_publish_hz > 0.0,
         )
         self._dry_joint_cache = FaJointStateCache(self.config.ros2.joint_state_timeout_s)
         self._dry_joint_cache.update(
@@ -470,6 +580,7 @@ class FaRealControl(Component):
         self._pending_resume_after_initial_pose = False
         self._last_pause_hold_publish_time = 0.0
         self._next_state_publish_time_s = 0.0
+        self._next_vision_calibration_publish_time_s = 0.0
         self._last_published_upper_command: Optional[FaUpperPositionCommand] = None
         self._last_hand_commands: Dict[str, Optional[int]] = {robots.LEFT: None, robots.RIGHT: None}
         self._hand_gripper_states: Dict[str, int] = {robots.LEFT: 0, robots.RIGHT: 0}
@@ -497,6 +608,8 @@ class FaRealControl(Component):
         while True:
             start = time.time()
             self._ros2.spin_once()
+            if self.config.vision_calibration_publish_hz > 0.0:
+                self._publish_vision_calibration_pose_if_due(start)
             self._handle_session_command()
             self._publish_pause_hold_if_needed()
             self._publish_initial_pose_if_needed()
@@ -512,6 +625,40 @@ class FaRealControl(Component):
             self._publish_upper_command_if_safe()
             command_period_s = 1.0 / max(1.0, float(self.config.command_publish_hz))
             time.sleep(max(0.0, command_period_s - (time.time() - start)))
+
+    def _publish_vision_calibration_pose_if_due(self, now_s: Optional[float] = None) -> None:
+        publish_hz = float(self.config.vision_calibration_publish_hz)
+        if publish_hz <= 0.0:
+            return
+        now_s = time.time() if now_s is None else now_s
+        if now_s < self._next_vision_calibration_publish_time_s:
+            return
+        self._next_vision_calibration_publish_time_s = now_s + 1.0 / publish_hz
+
+        snapshot = self._current_joint_snapshot()
+        if snapshot is None or not self._real_joint_state_fresh():
+            self._warn_safety(
+                "vision_calibration_joint_state_stale",
+                "vision calibration pose held until fresh /joint_states",
+            )
+            return
+        hand_side = self.config.vision_calibration_hand_side
+        arm_joints = snapshot.left_arm if hand_side == robots.LEFT else snapshot.right_arm
+        homo = self._ik_client.compute_fk(hand_side, arm_joints)
+        if homo is None:
+            self._warn_safety(
+                "vision_calibration_fk_failed",
+                f"vision calibration pose skipped: {hand_side}_hand_base_link FK failed",
+            )
+            return
+        rotation = np.asarray(homo[:3, :3], dtype=np.float64)
+        quaternion = _rotation_matrix_to_quaternion_xyzw(rotation)
+        euler = quat_to_euler(quaternion)
+        self._ros2.publish_vision_calibration_pose(
+            np.asarray(homo[:3, 3], dtype=np.float64),
+            quaternion,
+            euler,
+        )
 
     def _handle_session_command(self) -> None:
         msg = self._pause_subscriber.recv_keypoints()

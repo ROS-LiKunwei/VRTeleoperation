@@ -1,5 +1,6 @@
 ﻿<Solution>
   <Project Path="Unity.XR.PICO.csproj" />
+  <Project Path="Pico.Spatializer.Example.csproj" />
   <Project Path="Assembly-CSharp.csproj" />
   <Project Path="PICO.Platform.csproj" />
   <Project Path="PICO.TobSupport.csproj" />

@@ -31,7 +31,11 @@ from beavr.teleop.components.interface.robots.fa_mujoco_kinematics import (
     FaKinematicsConfig,
     FaMujocoKinematics,
 )
-from beavr.teleop.components.interface.robots.fa_real_control import FaRealControl, FaRealControlConfig
+from beavr.teleop.components.interface.robots.fa_real_control import (
+    FaRealControl,
+    FaRealControlConfig,
+    _rotation_matrix_to_quaternion_xyzw,
+)
 from beavr.teleop.components.interface.robots import fa_real_control as fa_real_control_module
 from beavr.teleop.components.operator.operator_types import CartesianTarget
 from beavr.teleop.components.operator.robots.fa_operator import H_R_V_FA
@@ -55,18 +59,19 @@ def test_fa_config_routes_backends():
     robot_cfg = mujoco_cfg.robots[0]
     assert isinstance(robot_cfg.config, FaRealControlConfig)
     assert robot_cfg.config.ros2.joint_state_topic == "/joint_states"
-    assert robot_cfg.config.ros2.upper_position_command_topic == "/upper_position_controller/commands"
+    assert robot_cfg.config.ros2.upper_position_command_topic == ""
+    assert robot_cfg.config.ros2.min_snap_target_topic == "/min_snap/target"
     assert mujoco_cfg.upper_position_command_topic == "/upper_position_controller/commands"
     assert mujoco_cfg.upper_position_command_size == 16
-    assert robot_cfg.config.command_publish_hz == pytest.approx(1000.0)
+    assert robot_cfg.config.command_publish_hz == pytest.approx(100.0)
     assert robot_cfg.config.upper.max_joint_velocity_rad_s == pytest.approx(tuple([1.2] * 16))
     assert robot_cfg.config.ik.module_name == "ik_7dof_pybind"
-    assert robot_cfg.config.ik.max_iters == 200
+    assert robot_cfg.config.ik.max_iters == 50
     assert robot_cfg.config.ik.eps == pytest.approx(1e-3)
-    assert mujoco_cfg.environment[0].ros_arm_command_topic == "/upper_position_controller/commands"
-    assert mujoco_cfg.environment[0].arm_command_source == "ros2"
+    assert mujoco_cfg.environment[0].ros_arm_command_topic == ""
+    assert mujoco_cfg.environment[0].arm_command_source == "none"
     assert mujoco_cfg.environment[0].kinematics_type == "fa"
-    assert mujoco_cfg.environment[0].interpolation_profile == "linear"
+    assert mujoco_cfg.environment[0].interpolation_profile == "min_snap"
     assert mujoco_cfg.environment[0].publish_joint_states
     assert mujoco_cfg.environment[0].expected_command_length == 16
     assert mujoco_cfg.environment[0].joint_state_joint_names == FA_LEFT_ARM_JOINT_NAMES + FA_RIGHT_ARM_JOINT_NAMES
@@ -81,10 +86,151 @@ def test_fa_config_routes_backends():
 
     mirror_cfg = load_robot_config("fa", Laterality.BIMANUAL, True, control_backend="real_with_mujoco")
     assert not mirror_cfg.robots[0].config.allow_mujoco_mirror_without_joint_state
-    assert mirror_cfg.environment[0].arm_command_source == "ros2"
+    assert mirror_cfg.environment[0].arm_command_source == "none"
     assert mirror_cfg.environment[0].kinematics_type == "fa"
-    assert mirror_cfg.environment[0].interpolation_profile == "linear"
+    assert mirror_cfg.environment[0].interpolation_profile == "min_snap"
     assert not mirror_cfg.environment[0].publish_joint_states
+
+
+    for config in (mujoco_cfg, mirror_cfg):
+        assert config.environment[0].subscribe_min_snap_target
+        assert config.environment[0].min_snap_target_topic == config.robots[0].config.ros2.min_snap_target_topic
+
+def test_vision_calibration_disabled_by_default():
+    assert FaRealControlConfig().vision_calibration_publish_hz == 0.0
+    config = load_robot_config("fa", Laterality.BIMANUAL, False, control_backend="real")
+    assert config.robots[0].config.vision_calibration_publish_hz == 0.0
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_ros_bridge_calibration_dependency_is_optional(monkeypatch, enabled):
+    import builtins
+
+    publishers = []
+    subscriptions = []
+    attitude_imports = []
+    node = SimpleNamespace(
+        create_publisher=lambda msg, topic, queue: publishers.append(topic) or object(),
+        create_subscription=lambda msg, topic, callback, queue: subscriptions.append(topic),
+    )
+    modules = {
+        "rclpy": SimpleNamespace(ok=lambda: True, create_node=lambda name: node),
+        "min_snap.msg": SimpleNamespace(MinSnapTarget=object),
+        "sensor_msgs.msg": SimpleNamespace(JointState=object),
+        "std_msgs.msg": SimpleNamespace(Int32=object),
+    }
+    original_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):
+        if name == "attitude_pkg.msg":
+            attitude_imports.append(name)
+            if not enabled:
+                raise ImportError("attitude_pkg intentionally unavailable")
+            return SimpleNamespace(Attitude=object)
+        if name in modules:
+            return modules[name]
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+    monkeypatch.setattr(
+        fa_real_control_module, "MinSnapTargetPublisher", lambda **kwargs: object()
+    )
+    bridge = fa_real_control_module.FaRos2Bridge(
+        fa_real_control_module.FaRos2Topics(),
+        require_ros=True,
+        vision_calibration_enabled=enabled,
+    )
+    assert bridge.available
+    assert "/joint_states" in subscriptions
+    assert "/left_topic_to_hand" in publishers
+    assert "/right_topic_to_hand" in publishers
+    assert ("/sysmo_vision_calibration" in publishers) == enabled
+    assert bool(attitude_imports) == enabled
+    assert (bridge._attitude_msg_type is not None) == enabled
+
+
+def test_rotation_matrix_to_quaternion_xyzw_and_euler_convention():
+    rotation = np.array(
+        [
+            [0.0, -1.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ]
+    )
+
+    quaternion = _rotation_matrix_to_quaternion_xyzw(rotation)
+
+    assert quaternion == pytest.approx((0.0, 0.0, np.sqrt(0.5), np.sqrt(0.5)))
+
+
+def test_fa_teleop_joint_limits_match_hardware_limits():
+    config = load_robot_config("fa", Laterality.BIMANUAL, False, control_backend="real")
+    safety = config.robots[0].config.upper
+
+    assert safety.joint_lower_limits_rad == pytest.approx(
+        (
+            -2.750, -0.288, -2.650, -2.050, -2.735, -0.469, -1.550,
+            -2.750, -3.330, -2.570, -2.050, -2.730, -0.480, -1.536,
+            -1.570, -0.523,
+        )
+    )
+    assert safety.joint_upper_limits_rad == pytest.approx(
+        (
+            2.748, 3.342, 2.583, 1.440, 2.729, 0.482, 1.520,
+            2.750, 0.302, 2.660, 1.440, 2.730, 0.470, 1.532,
+            1.570, 0.785,
+        )
+    )
+
+
+def test_vision_calibration_pose_publishes_selected_hand_at_10_hz():
+    class FakeRos2:
+        def __init__(self):
+            self.poses = []
+
+        def publish_vision_calibration_pose(self, position, quaternion, euler):
+            self.poses.append((tuple(position), tuple(quaternion), tuple(euler)))
+            return True
+
+    class FakeIk:
+        def __init__(self):
+            self.calls = []
+
+        def compute_fk(self, hand_side, arm_joints):
+            self.calls.append((hand_side, tuple(arm_joints)))
+            homo = np.eye(4)
+            homo[:3, 3] = (0.1, 0.2, 0.3)
+            return homo
+
+    controller = FaRealControl.__new__(FaRealControl)
+    controller.config = FaRealControlConfig(
+        vision_calibration_publish_hz=10.0,
+        vision_calibration_hand_side=robots.RIGHT,
+    )
+    controller._ros2 = FakeRos2()
+    controller._ik_client = FakeIk()
+    controller._next_vision_calibration_publish_time_s = 0.0
+    controller._real_joint_state_fresh = lambda: True
+    controller._current_joint_snapshot = lambda: FaJointStateSnapshot(
+        timestamp_s=1.0,
+        left_arm=tuple([0.1] * 7),
+        right_arm=tuple([0.2] * 7),
+        neck=(0.0, 0.0),
+    )
+
+    controller._publish_vision_calibration_pose_if_due(1.0)
+    controller._publish_vision_calibration_pose_if_due(1.05)
+    controller._publish_vision_calibration_pose_if_due(1.1)
+
+    assert controller._ik_client.calls == [
+        (robots.RIGHT, pytest.approx(tuple([0.2] * 7))),
+        (robots.RIGHT, pytest.approx(tuple([0.2] * 7))),
+    ]
+    assert len(controller._ros2.poses) == 2
+    position, quaternion, euler = controller._ros2.poses[0]
+    assert position == pytest.approx((0.1, 0.2, 0.3))
+    assert quaternion == pytest.approx((0.0, 0.0, 0.0, 1.0))
+    assert euler == pytest.approx((0.0, 0.0, 0.0))
 
 
 def test_fa_mujoco_initial_pose_waits_for_joint_state():
@@ -170,7 +316,7 @@ def test_fa_real_with_mujoco_initial_pose_publishes_min_snap_target():
     assert controller._active_arm_goals[robots.RIGHT] == pytest.approx(np.asarray([0.2] * 7))
 
 
-def test_fa_real_with_mujoco_initial_pose_republishes_during_startup_window(monkeypatch):
+def test_fa_real_with_mujoco_initial_pose_does_not_republish_during_startup_window(monkeypatch):
     class FakeRos2:
         def __init__(self):
             self.min_snap_commands = []
@@ -211,10 +357,9 @@ def test_fa_real_with_mujoco_initial_pose_republishes_during_startup_window(monk
     monkeypatch.setattr(fa_real_control_module.time, "time", lambda: 10.06)
     controller._publish_initial_pose_if_needed()
 
-    assert len(controller._ros2.min_snap_commands) == 1
-    command = controller._ros2.min_snap_commands[0][0]
-    assert command.left_arm == pytest.approx(tuple([0.1] * 7))
-    assert command.right_arm == pytest.approx(tuple([0.2] * 7))
+    # Resending would restart the external min-snap trajectory.
+    assert controller._ros2.min_snap_commands == []
+    assert controller._last_initial_pose_publish_time_s == 10.0
 
 
 def test_fa_initial_pose_ready_logs_teleop_prompt_once(monkeypatch):
@@ -532,7 +677,8 @@ def test_fa_adapter_config_is_available_for_lerobot_recording():
     assert [item["joint_count"] for item in cfg.robot_configs] == [7, 7]
 
 
-def test_fa_reset_fk_uses_single_arm_joints_for_pybind_client():
+@pytest.mark.parametrize("fresh", [True, False])
+def test_fa_reset_fk_uses_single_arm_joints_only_when_fresh(fresh):
     class FakeIkClient:
         def __init__(self):
             self.calls = []
@@ -557,6 +703,12 @@ def test_fa_reset_fk_uses_single_arm_joints_for_pybind_client():
             self.values.append(value)
 
     controller = FaRealControl.__new__(FaRealControl)
+    controller.config = FaRealControlConfig()
+    controller._builder = FaUpperPositionCommandBuilder()
+    controller._hand_init_ready = {robots.LEFT: False, robots.RIGHT: False}
+    controller._latest_targets = {robots.LEFT: None, robots.RIGHT: None}
+    controller._latest_target_keys = {robots.LEFT: None, robots.RIGHT: None}
+    controller._last_ik_cartesian_targets = {robots.LEFT: None, robots.RIGHT: None}
     controller.host = "127.0.0.1"
     controller.control_backend = "mujoco"
     controller._ik_client = FakeIkClient()
@@ -572,12 +724,23 @@ def test_fa_reset_fk_uses_single_arm_joints_for_pybind_client():
         neck=(0.0, 0.0),
     )
     controller._current_joint_snapshot = lambda: snapshot
-    controller._real_joint_state_fresh = lambda: False
-    controller._warn_safety = lambda key, message: (_ for _ in ()).throw(AssertionError(message))
+    controller._real_joint_state_fresh = lambda: fresh
+    warnings = []
+    controller._warn_safety = lambda key, message: warnings.append(key)
 
     controller._publish_current_endeff_homo(robots.LEFT, publish_port=1234)
     controller._publish_current_endeff_homo(robots.RIGHT, publish_port=1236)
 
+    if not fresh:
+        assert warnings == ["reset_joint_state_stale", "reset_joint_state_stale"]
+        assert controller._ik_client.calls == []
+        assert controller._publisher_manager.messages == []
+        assert controller._needs_reset
+        assert not any(controller._hand_init_ready.values())
+        return
+
+    assert warnings == []
+    assert all(controller._hand_init_ready.values())
     assert controller._ik_client.calls == [
         (robots.LEFT, tuple(range(7))),
         (robots.RIGHT, tuple(range(10, 17))),
@@ -997,9 +1160,12 @@ def test_fa_real_control_uses_last_safe_as_ik_seed_for_recovery():
     controller._last_ik_cartesian_targets = {robots.LEFT: None, robots.RIGHT: None}
     seed_calls = []
 
+    # Keep the elbow away from the singularity filter thresholds.
+    solved = np.asarray([0.15, 0.15, 0.15, -0.5, 0.15, 0.15, 0.15])
+
     def solve(hand_side, target, current_arm):
         seed_calls.append(np.asarray(current_arm, dtype=np.float64).copy())
-        return FaArmIkResult(success=True, q_target=tuple([0.15] * 7), has_solution=True)
+        return FaArmIkResult(success=True, q_target=tuple(solved), has_solution=True)
 
     controller._ik_client = SimpleNamespace(solve=solve)
     controller._warn_safety = lambda key, message: (_ for _ in ()).throw(AssertionError(message))
@@ -1008,18 +1174,20 @@ def test_fa_real_control_uses_last_safe_as_ik_seed_for_recovery():
 
     np.testing.assert_allclose(seed_calls[0], last_safe)
     assert controller._arm_goal_dirty[robots.RIGHT] is True
-    assert controller._last_safe_arm_targets[robots.RIGHT] == pytest.approx(np.asarray([0.15] * 7))
+    assert controller._last_safe_arm_targets[robots.RIGHT] == pytest.approx(solved)
 
 
 def test_fa_multi_seed_uses_escape_seed_when_primary_seed_is_bad_branch():
     controller = FaRealControl.__new__(FaRealControl)
-    escape_seed = tuple([0.3] * 7)
+    escape_seed = (0.0, 0.0, 0.0, -0.25, 0.0, 0.0, 0.0)
+    solved = (0.35, 0.35, 0.35, -0.5, 0.35, 0.35, 0.35)
     controller.config = FaRealControlConfig(
         max_ik_solution_jump_rad=1.0,
         ik_max_position_error_m=0.08,
         ik_max_orientation_error_rad=0.2,
         ik_multi_seed_enabled=True,
-        ik_escape_right_arm_positions_rad=escape_seed,
+        ik_escape_local_enabled=True,
+        ik_escape_right_arm_positions_rad=tuple([0.3] * 7),
     )
     snapshot = FaJointStateSnapshot(
         timestamp_s=1.0,
@@ -1050,7 +1218,7 @@ def test_fa_multi_seed_uses_escape_seed_when_primary_seed_is_bad_branch():
         if np.allclose(seed, escape_seed):
             return FaArmIkResult(
                 success=True,
-                q_target=tuple([0.35] * 7),
+                q_target=solved,
                 has_solution=True,
                 position_error=0.01,
                 orientation_error=0.02,
@@ -1073,7 +1241,7 @@ def test_fa_multi_seed_uses_escape_seed_when_primary_seed_is_bad_branch():
         time.sleep(0.005)
 
     assert any(np.allclose(seed, escape_seed) for seed in seed_calls)
-    assert controller._active_arm_goals[robots.RIGHT] == pytest.approx(np.asarray([0.35] * 7))
+    assert controller._active_arm_goals[robots.RIGHT] == pytest.approx(solved)
     assert controller._arm_goal_dirty[robots.RIGHT] is True
     assert controller._ik_problem_counts[robots.RIGHT] == 0
 
@@ -1129,12 +1297,13 @@ def test_fa_multi_seed_prefers_continuous_solution_over_tiny_task_error_gain():
 
 def test_fa_escape_mode_triggers_after_consecutive_ik_problems_and_clears_on_reach():
     controller = FaRealControl.__new__(FaRealControl)
-    escape_target = np.asarray([0.2] * 7, dtype=np.float64)
+    escape_target = np.asarray([0.0, 0.0, 0.0, -0.25, 0.0, 0.0, 0.0])
     controller.config = FaRealControlConfig(
         ik_escape_enabled=True,
         ik_escape_trigger_count=2,
         ik_escape_target_tolerance_rad=0.04,
-        ik_escape_right_arm_positions_rad=tuple(escape_target),
+        ik_escape_local_enabled=True,
+        ik_escape_right_arm_positions_rad=tuple([0.2] * 7),
     )
     controller._ik_problem_counts = {robots.LEFT: 0, robots.RIGHT: 0}
     controller._arm_escape_active = {robots.LEFT: False, robots.RIGHT: False}
@@ -1791,11 +1960,13 @@ def test_fa_command_publish_reuses_active_goal_without_repeating_ik_for_same_tar
     controller._active_arm_goals = {robots.LEFT: None, robots.RIGHT: None}
     controller._last_safe_arm_targets = {robots.LEFT: None, robots.RIGHT: None}
     controller._hand_init_ready = {robots.LEFT: True, robots.RIGHT: True}
+    # A non-singular IK result should be reused without a filter retry.
+    goal = (0.2, 0.2, 0.2, -0.2, 0.2, 0.2, 0.2)
     solve_calls = []
 
     def solve(hand_side, target, current_arm):
         solve_calls.append((hand_side, target.timestamp_s))
-        return FaArmIkResult(success=True, q_target=tuple([0.2] * 7), has_solution=True)
+        return FaArmIkResult(success=True, q_target=goal, has_solution=True)
 
     controller._ik_client = SimpleNamespace(solve=solve)
     controller._builder = FaUpperPositionCommandBuilder()
@@ -1808,11 +1979,14 @@ def test_fa_command_publish_reuses_active_goal_without_repeating_ik_for_same_tar
     controller._publish_upper_command_outputs = publish
 
     controller._publish_upper_command_if_safe()
+    first_solve_calls = solve_calls.copy()
+    assert first_solve_calls
+    assert all(call == (robots.RIGHT, 123.0) for call in first_solve_calls)
     controller._publish_upper_command_if_safe()
 
-    assert solve_calls == [(robots.RIGHT, 123.0)]
+    assert solve_calls == first_solve_calls
     assert len(published) == 1
-    assert published[-1].right_arm == pytest.approx(tuple([0.2] * 7))
+    assert published[-1].right_arm == pytest.approx(goal)
     assert controller._arm_goal_dirty[robots.RIGHT] is False
 
 
@@ -1838,11 +2012,13 @@ def test_fa_command_publish_keeps_chasing_rate_limited_active_goal_without_repea
     controller._last_safe_arm_targets = {robots.LEFT: None, robots.RIGHT: None}
     controller._last_ik_cartesian_targets = {robots.LEFT: None, robots.RIGHT: None}
     controller._hand_init_ready = {robots.LEFT: True, robots.RIGHT: True}
+    # A non-singular IK result should be reused without a filter retry.
+    goal = (0.2, 0.2, 0.2, -0.2, 0.2, 0.2, 0.2)
     solve_calls = []
 
     def solve(hand_side, target, current_arm):
         solve_calls.append((hand_side, target.timestamp_s))
-        return FaArmIkResult(success=True, q_target=tuple([0.2] * 7), has_solution=True)
+        return FaArmIkResult(success=True, q_target=goal, has_solution=True)
 
     class FakeRateLimiter:
         def __init__(self):
@@ -1850,8 +2026,8 @@ def test_fa_command_publish_keeps_chasing_rate_limited_active_goal_without_repea
 
         def limit(self, command, now_s=None):
             self.calls += 1
-            right = [0.024 * self.calls] * 7
-            limited = FaUpperPositionCommand(command.timestamp_s, tuple([0.0] * 7 + right + [0.0, 0.0]))
+            right = np.sign(goal) * (0.024 * self.calls)
+            limited = FaUpperPositionCommand(command.timestamp_s, tuple([0.0] * 7 + list(right) + [0.0, 0.0]))
             return limited, "joint velocity limited"
 
     controller._ik_client = SimpleNamespace(solve=solve)
@@ -1867,12 +2043,15 @@ def test_fa_command_publish_keeps_chasing_rate_limited_active_goal_without_repea
     controller._publish_upper_command_outputs = publish
 
     controller._publish_upper_command_if_safe()
+    first_solve_calls = solve_calls.copy()
+    assert first_solve_calls
+    assert all(call == (robots.RIGHT, 123.0) for call in first_solve_calls)
     controller._publish_upper_command_if_safe()
 
-    assert solve_calls == [(robots.RIGHT, 123.0)]
+    assert solve_calls == first_solve_calls
     assert len(published) == 2
-    assert published[0].right_arm == pytest.approx(tuple([0.024] * 7))
-    assert published[1].right_arm == pytest.approx(tuple([0.048] * 7))
+    assert published[0].right_arm == pytest.approx(np.sign(goal) * 0.024)
+    assert published[1].right_arm == pytest.approx(np.sign(goal) * 0.048)
     assert controller._arm_goal_dirty[robots.RIGHT] is True
 
 
