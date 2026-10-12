@@ -144,7 +144,8 @@ class LeRobotDatasetMetadata:
     def get_video_file_path(self, ep_index: int, vid_key: str) -> Path:
         ep_chunk = self.get_episode_chunk(ep_index)
         fpath = self.video_path.format(episode_chunk=ep_chunk, video_key=vid_key, episode_index=ep_index)
-        return Path(fpath)
+        from .lossless_video import feature_video_path
+        return feature_video_path(fpath, self.features[vid_key])
 
     def get_episode_chunk(self, ep_index: int) -> int:
         return ep_index // self.chunks_size
@@ -293,9 +294,12 @@ class LeRobotDatasetMetadata:
         been encoded the same way. Also, this means it assumes the first episode exists.
         """
         for key in self.video_keys:
-            if not self.features[key].get("info", None):
+            feature_info = self.features[key].get("info") or {}
+            if not feature_info or (feature_info.get("lossless_encoding") and "video.fps" not in feature_info):
                 video_path = self.root / self.get_video_file_path(ep_index=0, vid_key=key)
-                self.info["features"][key]["info"] = get_video_info(video_path)
+                self.info["features"][key]["info"] = {**get_video_info(video_path), **feature_info}
+                if feature_info.get("is_depth_map"):
+                    self.info["features"][key]["info"]["video.is_depth_map"] = True
 
     def __repr__(self):
         feature_keys = list(self.features)
@@ -373,6 +377,8 @@ class LeRobotDataset(torch.utils.data.Dataset):
         force_cache_sync: bool = False,
         download_videos: bool = True,
         video_backend: str | None = None,
+        keep_image_files: bool = False,
+        depth_video: bool = False,
     ):
         """
         2 modes are available for instantiating this class, depending on 2 different use cases:
@@ -489,6 +495,8 @@ class LeRobotDataset(torch.utils.data.Dataset):
         # Unused attributes
         self.image_writer = None
         self.episode_buffer = None
+        self.keep_image_files = keep_image_files
+        self.depth_video = depth_video
         self._async_video_encoding = False
         self._video_encoder: ThreadPoolExecutor | None = None
         self._video_encoding_futures: list[Future] = []
@@ -721,7 +729,12 @@ class LeRobotDataset(torch.utils.data.Dataset):
         item = {}
         for vid_key, query_ts in query_timestamps.items():
             video_path = self.root / self.meta.get_video_file_path(ep_idx, vid_key)
-            frames = decode_video_frames(video_path, query_ts, self.tolerance_s, self.video_backend)
+            encoding = (self.features[vid_key].get("info") or {}).get("lossless_encoding")
+            if encoding:
+                from .lossless_video import decode_lossless_video
+                frames = decode_lossless_video(video_path, query_ts, self.tolerance_s, encoding)
+            else:
+                frames = decode_video_frames(video_path, query_ts, self.tolerance_s, self.video_backend)
             item[vid_key] = frames.squeeze(0)
 
         return item
@@ -890,7 +903,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
             episode_buffer[key] = np.stack(episode_buffer[key])
 
         encode_videos_async = self._async_video_encoding and len(self.meta.video_keys) > 0
-        if not encode_videos_async:
+        if not encode_videos_async or self.meta.image_keys:
             self._wait_image_writer()
 
         self._save_episode_table(episode_buffer, episode_index)
@@ -905,6 +918,9 @@ class LeRobotDataset(torch.utils.data.Dataset):
 
             if not encode_videos_async:
                 self.encode_episode_videos(episode_index)
+
+        if not encode_videos_async:
+            self._save_episode_depth_videos(episode_index)
 
         episode_stats = (
             None if encode_videos_async else compute_episode_stats(episode_stats_buffer, self.features)
@@ -930,7 +946,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         if encode_videos_async:
             self._queue_episode_finalization(episode_index, episode_stats_buffer)
         else:
-            video_files = list(self.root.rglob("*.mp4"))
+            video_files = self._existing_episode_video_files()
             assert len(video_files) == self.num_episodes * len(self.meta.video_keys)
 
         parquet_files = list(self.root.rglob("*.parquet"))
@@ -954,13 +970,13 @@ class LeRobotDataset(torch.utils.data.Dataset):
 
     def clear_episode_buffer(self) -> None:
         episode_index = self.episode_buffer["episode_index"]
-        if self.image_writer is not None:
-            for cam_key in self.meta.camera_keys:
-                img_dir = self._get_image_file_path(
-                    episode_index=episode_index, image_key=cam_key, frame_index=0
-                ).parent
-                if img_dir.is_dir():
-                    shutil.rmtree(img_dir)
+        self._wait_image_writer()
+        for cam_key in self.meta.camera_keys:
+            img_dir = self._get_image_file_path(
+                episode_index=episode_index, image_key=cam_key, frame_index=0
+            ).parent
+            if img_dir.is_dir():
+                shutil.rmtree(img_dir)
 
         # Reset the buffer
         self.episode_buffer = self.create_episode_buffer()
@@ -1007,7 +1023,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
                 episode_index, episode_stats = future.result()
                 self.meta.save_episode_stats(episode_index, episode_stats)
 
-        video_files = list(self.root.rglob("*.mp4"))
+        video_files = self._existing_episode_video_files()
         assert len(video_files) == self.num_episodes * len(self.meta.video_keys)
         if len(self.meta.video_keys) > 0:
             self.meta.update_video_info()
@@ -1036,6 +1052,8 @@ class LeRobotDataset(torch.utils.data.Dataset):
             self.image_writer.wait_until_done()
 
     def _delete_episode_images(self, episode_index: int) -> None:
+        if self.keep_image_files:
+            return
         for key in self.meta.camera_keys:
             img_dir = self._get_image_file_path(
                 episode_index=episode_index, image_key=key, frame_index=0
@@ -1046,6 +1064,15 @@ class LeRobotDataset(torch.utils.data.Dataset):
         images_root = self.root / "images"
         if images_root.is_dir() and not any(images_root.rglob("*.png")):
             shutil.rmtree(images_root)
+
+    def _existing_episode_video_files(self) -> list[Path]:
+        # Count schema videos only; depth preview sidecars are not dataset video features.
+        return [
+            path
+            for ep in range(self.num_episodes)
+            for key in self.meta.video_keys
+            if (path := self.root / self.meta.get_video_file_path(ep, key)).is_file()
+        ]
 
     def _get_episode_video_paths(self, episode_index: int) -> dict:
         video_paths = {}
@@ -1063,9 +1090,22 @@ class LeRobotDataset(torch.utils.data.Dataset):
         self._wait_image_writer()
         episode_stats = compute_episode_stats(episode_buffer, self.features)
         self.encode_episode_videos(episode_index)
+        self._save_episode_depth_videos(episode_index)
         self._delete_episode_images(episode_index)
         logging.info("Asynchronous episode finalization finished for episode %d.", episode_index)
         return episode_index, episode_stats
+
+    def _save_episode_depth_videos(self, episode_index: int) -> None:
+        if not self.depth_video:
+            return
+        for key in self.meta.image_keys:
+            if not key.endswith("_depth"):
+                continue
+            image_dir = self._get_image_file_path(episode_index, key, 0).parent
+            video_path = self.root / "videos" / key / f"episode-{episode_index:06d}.mp4"
+            encode_video_frames(
+                image_dir, video_path, self.fps, vcodec="h264", overwrite=True, grayscale_uint16=True
+            )
 
     def encode_videos(self) -> None:
         """
@@ -1092,7 +1132,12 @@ class LeRobotDataset(torch.utils.data.Dataset):
             img_dir = self._get_image_file_path(
                 episode_index=episode_index, image_key=key, frame_index=0
             ).parent
-            encode_video_frames(img_dir, video_path, self.fps, overwrite=True)
+            encoding = (self.features[key].get("info") or {}).get("lossless_encoding")
+            if encoding:
+                from .lossless_video import encode_lossless_video, DEPTH_ENCODING, GRAY_DEPTH_ENCODING
+                encode_lossless_video(img_dir, video_path, self.fps, depth=encoding == DEPTH_ENCODING, gray_depth=encoding == GRAY_DEPTH_ENCODING)
+            else:
+                encode_video_frames(img_dir, video_path, self.fps, overwrite=True)
 
         return video_paths
 
@@ -1110,6 +1155,8 @@ class LeRobotDataset(torch.utils.data.Dataset):
         image_writer_processes: int = 0,
         image_writer_threads: int = 0,
         video_backend: str | None = None,
+        keep_image_files: bool = False,
+        depth_video: bool = False,
     ) -> "LeRobotDataset":
         """Create a LeRobot Dataset from scratch in order to record data."""
         obj = cls.__new__(cls)
@@ -1141,6 +1188,8 @@ class LeRobotDataset(torch.utils.data.Dataset):
         obj.delta_indices = None
         obj.episode_data_index = None
         obj.video_backend = video_backend if video_backend is not None else get_safe_default_codec()
+        obj.keep_image_files = keep_image_files
+        obj.depth_video = depth_video
         obj._async_video_encoding = False
         obj._video_encoder = None
         obj._video_encoding_futures = []

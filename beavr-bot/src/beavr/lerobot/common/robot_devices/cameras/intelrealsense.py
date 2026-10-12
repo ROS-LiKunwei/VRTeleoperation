@@ -255,6 +255,8 @@ class IntelRealSenseCamera:
         self.color_image = None
         self.depth_map = None
         self.logs = {}
+        self.effective_controls = None
+        self.stream_profiles = {}
 
         if self.mock:
             import tests.cameras.mock_cv2 as cv2
@@ -344,6 +346,21 @@ class IntelRealSenseCamera:
 
             raise OSError(f"Can't access IntelRealSenseCamera({self.serial_number}).")
 
+        try:
+            if self.config.manual_mode:
+                from .manual_controls import apply_realsense_manual_controls
+                self.effective_controls = apply_realsense_manual_controls(
+                    profile.get_device(), self.config.manual_controls, rs, use_depth=self.use_depth
+                )
+                logging.info("RealSense %s fixed camera controls: %s", self.serial_number, self.effective_controls)
+                # Discard queued frames captured before manual controls took effect.
+                for _ in range(5):
+                    self.camera.wait_for_frames(timeout_ms=5000)
+        except Exception:
+            self.camera.stop()
+            self.camera = None
+            raise
+
         color_stream = profile.get_stream(rs.stream.color)
         color_profile = color_stream.as_video_stream_profile()
         actual_fps = color_profile.fps()
@@ -365,6 +382,10 @@ class IntelRealSenseCamera:
                 f"Can't set {self.capture_height=} for IntelRealSenseCamera({self.serial_number}). Actual value is {actual_height}."
             )
 
+        self.stream_profiles["color"] = {
+            "width": actual_width, "height": actual_height,
+            "fps": actual_fps, "format": str(color_profile.format()),
+        }
         self.fps = round(actual_fps)
         self.capture_width = round(actual_width)
         self.capture_height = round(actual_height)

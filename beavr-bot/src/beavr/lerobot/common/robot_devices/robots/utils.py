@@ -104,6 +104,8 @@ def make_robot_from_config(config: RobotConfig):
             cameras=config.cameras,
             robot_type=config.robot_type,
             record_actions=config.record_actions,
+            read_only=config.read_only,
+            state_timeout_s=config.state_timeout_s,
             record_next_joint_state_action=getattr(config, "record_next_joint_state_action", False),
             record_bimanual_gripper_state=getattr(config, "record_bimanual_gripper_state", False),
         )

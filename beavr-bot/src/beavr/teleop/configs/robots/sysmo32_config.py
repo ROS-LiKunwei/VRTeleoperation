@@ -412,22 +412,9 @@ class Sysmo32Config:
                 )
             )
 
-        # MuJoCo dry-run/mirror should not require a physical camera.
+        # Camera ownership belongs to the separate LeRobot recording process.
+        # Opening /dev/video0 here races with SDK RGB-D capture in terminal 2.
         self.camera_streamers = []
-        if self.control_backend == "real":
-            self.camera_streamers = [
-                Sysmo32RealCameraStreamerCfg(
-                    host=network.HOST_ADDRESS,
-                    port=ports.SIM_IMAGE_PORT,
-                    camera_name="front",
-                    camera_type="opencv",
-                    camera_index=0,
-                    fps=30,
-                    width=640,
-                    height=480,
-                    rotation=180,
-                )
-            ]
 
         # Robot配置：sysmo32真实接口是一条双臂18维命令，因此只启动一个双臂控制层。
         self.robots = [

@@ -1,0 +1,299 @@
+{
+  "schema_version": 1,
+  "cameras": {
+    "head": {
+      "config": {
+        "serial_number": "CPCBC530001L",
+        "fps": 30,
+        "width": 1280,
+        "height": 720,
+        "channels": 3,
+        "color_mode": "rgb",
+        "use_depth": true,
+        "manual_mode": true,
+        "manual_controls": {
+          "color_auto_exposure_priority": 0,
+          "color_backlight_compensation": 0,
+          "color_power_line_frequency": 0,
+          "color_exposure": 156,
+          "color_gain": 16,
+          "color_white_balance": 4600,
+          "color_brightness": 0,
+          "color_contrast": 50,
+          "color_saturation": 64,
+          "color_gamma": 300,
+          "color_sharpness": 0,
+          "depth_exposure": 3000,
+          "depth_gain": 16,
+          "ir_exposure": 3000,
+          "ir_gain": 16
+        },
+        "warmup_s": 2.0,
+        "frame_timeout_ms": 2000,
+        "min_depth_m": 0.0,
+        "max_depth_m": 1.0,
+        "map_depth_to_full_uint16": false,
+        "crop_x_min": null,
+        "crop_x_max": null,
+        "crop_y_min": null,
+        "crop_y_max": null,
+        "type": "orbbec",
+        "expected_stream_profiles": {
+          "OBSensorType.COLOR_SENSOR": {
+            "width": 1280,
+            "height": 720,
+            "fps": 30,
+            "format": "OBFormat.MJPG"
+          },
+          "OBSensorType.DEPTH_SENSOR": {
+            "width": 848,
+            "height": 480,
+            "fps": 30,
+            "format": "OBFormat.Y16"
+          }
+        },
+        "align_depth_to_color": true
+      },
+      "effective_controls": {
+        "values": {
+          "color_auto_exposure": false,
+          "color_auto_white_balance": false,
+          "depth_auto_exposure": false,
+          "ir_auto_exposure": false,
+          "frame_interleave": false,
+          "color_auto_exposure_priority": 0,
+          "color_backlight_compensation": 0,
+          "color_power_line_frequency": 0,
+          "color_exposure": 156,
+          "color_gain": 16,
+          "color_white_balance": 4600,
+          "color_brightness": 0,
+          "color_contrast": 50,
+          "color_saturation": 64,
+          "color_gamma": 300,
+          "color_sharpness": 0,
+          "depth_exposure": 3000,
+          "depth_gain": 16,
+          "ir_exposure": 3000,
+          "ir_gain": 16
+        },
+        "unsupported": [
+          "color_hdr",
+          "hdr_merge",
+          "depth_auto_exposure_priority",
+          "color_denoising_level"
+        ]
+      },
+      "stream_profiles": {
+        "OBSensorType.COLOR_SENSOR": {
+          "width": 1280,
+          "height": 720,
+          "fps": 30,
+          "format": "OBFormat.MJPG"
+        },
+        "OBSensorType.DEPTH_SENSOR": {
+          "width": 848,
+          "height": 480,
+          "fps": 30,
+          "format": "OBFormat.Y16"
+        }
+      }
+    },
+    "wrist_CV2856D0001C": {
+      "config": {
+        "serial_number": "CV2856D0001C",
+        "fps": 30,
+        "width": 848,
+        "height": 530,
+        "channels": 3,
+        "color_mode": "rgb",
+        "use_depth": true,
+        "manual_mode": true,
+        "manual_controls": {
+          "color_auto_exposure_priority": 0,
+          "color_backlight_compensation": 0,
+          "color_power_line_frequency": 0,
+          "color_exposure": 156,
+          "color_gain": 16,
+          "color_white_balance": 4600,
+          "color_brightness": 0,
+          "color_contrast": 50,
+          "color_saturation": 64,
+          "color_gamma": 300,
+          "color_sharpness": 0,
+          "depth_exposure": 15600,
+          "depth_gain": 16,
+          "ir_exposure": 15600,
+          "ir_gain": 16
+        },
+        "warmup_s": 2.0,
+        "frame_timeout_ms": 2000,
+        "min_depth_m": 0.0,
+        "max_depth_m": 1.0,
+        "map_depth_to_full_uint16": false,
+        "crop_x_min": null,
+        "crop_x_max": null,
+        "crop_y_min": null,
+        "crop_y_max": null,
+        "type": "orbbec",
+        "expected_stream_profiles": {
+          "OBSensorType.COLOR_SENSOR": {
+            "width": 848,
+            "height": 530,
+            "fps": 10,
+            "format": "OBFormat.YUYV"
+          },
+          "OBSensorType.DEPTH_SENSOR": {
+            "width": 848,
+            "height": 530,
+            "fps": 10,
+            "format": "OBFormat.Y16"
+          }
+        },
+        "align_depth_to_color": true
+      },
+      "effective_controls": {
+        "values": {
+          "color_auto_exposure": false,
+          "color_auto_white_balance": false,
+          "depth_auto_exposure": false,
+          "ir_auto_exposure": false,
+          "frame_interleave": false,
+          "color_auto_exposure_priority": 0,
+          "color_backlight_compensation": 0,
+          "color_power_line_frequency": 0,
+          "color_exposure": 156,
+          "color_gain": 16,
+          "color_white_balance": 4600,
+          "color_brightness": 0,
+          "color_contrast": 50,
+          "color_saturation": 64,
+          "color_gamma": 300,
+          "color_sharpness": 0,
+          "depth_exposure": 15600,
+          "depth_gain": 16,
+          "ir_exposure": 15600,
+          "ir_gain": 16
+        },
+        "unsupported": [
+          "color_hdr",
+          "hdr_merge",
+          "depth_auto_exposure_priority",
+          "color_denoising_level"
+        ]
+      },
+      "stream_profiles": {
+        "OBSensorType.COLOR_SENSOR": {
+          "width": 848,
+          "height": 530,
+          "fps": 10,
+          "format": "OBFormat.YUYV"
+        },
+        "OBSensorType.DEPTH_SENSOR": {
+          "width": 848,
+          "height": 530,
+          "fps": 10,
+          "format": "OBFormat.Y16"
+        }
+      }
+    },
+    "wrist_CV2756100033": {
+      "config": {
+        "serial_number": "CV2756100033",
+        "fps": 30,
+        "width": 848,
+        "height": 530,
+        "channels": 3,
+        "color_mode": "rgb",
+        "use_depth": true,
+        "manual_mode": true,
+        "manual_controls": {
+          "color_auto_exposure_priority": 0,
+          "color_backlight_compensation": 0,
+          "color_power_line_frequency": 0,
+          "color_exposure": 156,
+          "color_gain": 16,
+          "color_white_balance": 4600,
+          "color_brightness": 0,
+          "color_contrast": 50,
+          "color_saturation": 64,
+          "color_gamma": 300,
+          "color_sharpness": 0,
+          "depth_exposure": 15600,
+          "depth_gain": 16,
+          "ir_exposure": 15600,
+          "ir_gain": 16
+        },
+        "warmup_s": 2.0,
+        "frame_timeout_ms": 2000,
+        "min_depth_m": 0.0,
+        "max_depth_m": 1.0,
+        "map_depth_to_full_uint16": false,
+        "crop_x_min": null,
+        "crop_x_max": null,
+        "crop_y_min": null,
+        "crop_y_max": null,
+        "type": "orbbec",
+        "expected_stream_profiles": {
+          "OBSensorType.COLOR_SENSOR": {
+            "width": 848,
+            "height": 530,
+            "fps": 10,
+            "format": "OBFormat.YUYV"
+          },
+          "OBSensorType.DEPTH_SENSOR": {
+            "width": 848,
+            "height": 530,
+            "fps": 10,
+            "format": "OBFormat.Y16"
+          }
+        },
+        "align_depth_to_color": true
+      },
+      "effective_controls": {
+        "values": {
+          "color_auto_exposure": false,
+          "color_auto_white_balance": false,
+          "depth_auto_exposure": false,
+          "ir_auto_exposure": false,
+          "frame_interleave": false,
+          "color_auto_exposure_priority": 0,
+          "color_backlight_compensation": 0,
+          "color_power_line_frequency": 0,
+          "color_exposure": 156,
+          "color_gain": 16,
+          "color_white_balance": 4600,
+          "color_brightness": 0,
+          "color_contrast": 50,
+          "color_saturation": 64,
+          "color_gamma": 300,
+          "color_sharpness": 0,
+          "depth_exposure": 15600,
+          "depth_gain": 16,
+          "ir_exposure": 15600,
+          "ir_gain": 16
+        },
+        "unsupported": [
+          "color_hdr",
+          "hdr_merge",
+          "depth_auto_exposure_priority",
+          "color_denoising_level"
+        ]
+      },
+      "stream_profiles": {
+        "OBSensorType.COLOR_SENSOR": {
+          "width": 848,
+          "height": 530,
+          "fps": 10,
+          "format": "OBFormat.YUYV"
+        },
+        "OBSensorType.DEPTH_SENSOR": {
+          "width": 848,
+          "height": 530,
+          "fps": 10,
+          "format": "OBFormat.Y16"
+        }
+      }
+    }
+  }
+}

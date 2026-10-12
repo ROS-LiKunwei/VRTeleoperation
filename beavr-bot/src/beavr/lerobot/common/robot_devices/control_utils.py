@@ -18,6 +18,8 @@
 
 
 import logging
+import os
+import sys
 import queue
 
 # ---- Asynchronous inference support ----
@@ -89,20 +91,20 @@ def log_control_info(robot: Robot, dt_s, episode_index=None, frame_index=None, f
 
 @cache
 def is_headless():
-    """Detects if python is running without a monitor."""
+    """Detect whether desktop keyboard/display access is available."""
+    if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
+        logging.info("No X display: using headless recording with terminal keyboard fallback.")
+        return True
     try:
         import pynput  # noqa
 
         return False
-    except Exception:
-        print(
-            "Error trying to import pynput. Switching to headless mode. "
-            "As a result, the video stream from the cameras won't be shown, "
-            "and keyboard control will fall back to the current terminal when possible. "
-            "For more info, see traceback below.\n"
+    except Exception as exc:
+        logging.warning(
+            "Desktop keyboard unavailable (%s); using headless recording with "
+            "terminal keyboard fallback. Camera capture and saving remain enabled.", exc
         )
-        traceback.print_exc()
-        print()
+        logging.debug("Desktop keyboard import details", exc_info=True)
         return True
 
 
@@ -396,7 +398,9 @@ def record_episode(
     # reset grace period and only start accepting operator commands once the
     # next episode officially begins.
     # ------------------------------------------------------------------
-    if has_method(robot, "teleop_resume"):
+    if has_method(robot, "reset_recording"):
+        robot.reset_recording()
+    if not getattr(robot, "read_only", False) and has_method(robot, "teleop_resume"):
         try:
             robot.teleop_resume()
         except Exception as e:
@@ -534,11 +538,20 @@ def control_loop(
     while timestamp < control_time_s:
         start_loop_t = time.perf_counter()
 
-        if teleoperate:
-            observation, action = robot.teleop_step(record_data=True)
-        else:
-            observation = robot.capture_observation()
-            action = None
+        from beavr.lerobot.common.robot_devices.cameras.recording_fault import CameraFault, handle_recording_fault
+        try:
+            if teleoperate:
+                observation, action = robot.teleop_step(record_data=True)
+            else:
+                observation = robot.capture_observation()
+                action = None
+        except CameraFault as fault:
+            if dataset is None:
+                raise
+            handle_recording_fault(dataset, events, fault)
+            break
+
+        if not teleoperate:
 
             # -----------------------------------------------------------------
             # Asynchronous action generation: push observation to the queue and
@@ -619,7 +632,9 @@ def reset_environment(robot, events, reset_time_s, fps):
        control pipeline is deliberately not run during this phase, so camera or
        state reads cannot block the operator from skipping reset.
     """
-    if has_method(robot, "teleop_stop"):
+    if has_method(robot, "reset_recording"):
+        robot.reset_recording()
+    if not getattr(robot, "read_only", False) and has_method(robot, "teleop_stop"):
         robot.teleop_stop()
 
     # A right-arrow event used to finish the recording phase must not also

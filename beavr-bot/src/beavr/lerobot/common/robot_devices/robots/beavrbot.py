@@ -39,6 +39,8 @@ class BeavrBot(Robot):
         op_state_port: int = 8089,
         handshake_host: str = "127.0.0.1",
         record_actions: bool = True,
+        read_only: bool = False,
+        state_timeout_s: float = 1.0,
         record_next_joint_state_action: bool = False,
         record_bimanual_gripper_state: bool = False,
     ):
@@ -63,7 +65,9 @@ class BeavrBot(Robot):
         self.record_actions = record_actions
         self.record_next_joint_state_action = record_next_joint_state_action
         self.record_bimanual_gripper_state = record_bimanual_gripper_state
-        self.manage_teleop_state = True
+        self.read_only = read_only
+        self.state_timeout_s = state_timeout_s
+        self.manage_teleop_state = not read_only
 
         # Create ZMQ subscribers for each robot
         self.robot_subscribers = {}
@@ -96,6 +100,19 @@ class BeavrBot(Robot):
         self._leader_arms = {}
         self._follower_arms = {}
         self.logs = {}
+
+        self._last_quaternions: dict[str, np.ndarray] = {}
+        self._pending_observation_frame: Frame | None = None
+        self.handshake_host = handshake_host
+        # A recorder owns SUB sockets and cameras only: no command/home/pause PUB,
+        # handshake coordinator or publishing executor is ever constructed.
+        self.pub_manager = None
+        self.home_publishers = {}
+        self.command_publishers = {}
+        self.handshake_coordinator = None
+        self._publish_pool = None
+        if self.read_only:
+            return
 
         # Centralised publisher manager (shared singleton)
         self.pub_manager = ZMQPublisherManager.get_instance()
@@ -169,10 +186,6 @@ class BeavrBot(Robot):
         # policy/control loop. Threads are daemonised by default.
         self._publish_pool = ThreadPoolExecutor(max_workers=max(4, len(self.command_publishers)))
 
-        self._last_quaternions: dict[str, np.ndarray] = {}
-        self._pending_observation_frame: Frame | None = None
-        self.handshake_host = handshake_host
-
         # Initialize handshake coordinator
         self.handshake_coordinator = HandshakeCoordinator.get_instance()
 
@@ -245,6 +258,24 @@ class BeavrBot(Robot):
                     "info": None,
                 }
 
+                if getattr(config, "use_depth", False):
+                    if not hasattr(camera, "read_latest_rgbd"):
+                        raise ValueError("Depth recording requires an Orbbec RGB-D camera")
+                    features[f"observation.images.{name}_depth"] = {
+                        "dtype": "image",
+                        "shape": (config.height, config.width, 1),
+                        "names": ["height", "width", "channels"],
+                        "info": {
+                            "is_depth_map": True,
+                            "alignment": "depth_to_color" if config.align_depth_to_color else "none",
+                            "depth_unit": "mapped_uint16" if config.map_depth_to_full_uint16 else "mm",
+                            "min_depth_m": config.min_depth_m,
+                            "max_depth_m": config.max_depth_m,
+                            "invalid_value": 0,
+                            "camera_serial_number": config.serial_number,
+                        },
+                    }
+
         # Store the configs order for consistent array building
         self._sorted_configs = sorted_configs
 
@@ -283,6 +314,9 @@ class BeavrBot(Robot):
                 logging.info(f"Started async reading for camera: {name}")
             except Exception as e:
                 logging.error(f"Failed to connect to camera {name}: {e}")
+                for connected_camera in self.cameras.values():
+                    if connected_camera.is_connected:
+                        connected_camera.disconnect()
                 raise
 
         # TODO: Add a simple test to see if the robot is connected
@@ -393,6 +427,35 @@ class BeavrBot(Robot):
 
         return states
 
+    def wait_for_recording_states(self, timeout_s=10.0):
+        deadline = time.monotonic() + timeout_s
+        while True:
+            states = self._fetch_robot_states()
+            if self._recording_states_valid(states):
+                return
+            if time.monotonic() >= deadline:
+                raise TimeoutError("No fresh complete teleop state; start terminal 1 and check /joint_states and state_host")
+            time.sleep(0.05)
+
+    def _recording_states_valid(self, states):
+        for config in self.robot_configs:
+            data = states.get(config["name"])
+            if not isinstance(data, dict):
+                return False
+            timestamp = data.get("timestamp")
+            if not isinstance(timestamp, (float, int)) or not 0 <= time.time() - timestamp <= self.state_timeout_s:
+                return False
+            joints = self._get_nested_value(data, config["joint_state_path"])
+            if joints is None:
+                return False
+            joints = np.asarray(joints)
+            if joints.shape != (config["joint_count"],) or not np.isfinite(joints).all():
+                return False
+        return True
+
+    def reset_recording(self):
+        self._pending_observation_frame = None
+
     def _fetch_image(self, camera_name: str) -> tuple[np.ndarray | None, float]:
         """Fetch an image from the specified camera."""
         try:
@@ -414,6 +477,8 @@ class BeavrBot(Robot):
             raise RuntimeError("Robot is not connected")
 
         robot_states = self._fetch_robot_states()
+        if self.read_only and not self._recording_states_valid(robot_states):
+            raise RuntimeError("Teleop state is missing/stale/invalid; refusing to record fabricated or stale robot states")
         observation = {}
 
         # Build combined state array
@@ -458,7 +523,13 @@ class BeavrBot(Robot):
             observation["observation.state"] = torch.from_numpy(np.array(combined_state, dtype=np.float32))
 
         # Add camera images
-        for name in self.cameras:
+        for name, camera in self.cameras.items():
+            if getattr(camera, "use_depth", False):
+                # Copy RGB and depth under the same camera lock; never read them separately.
+                image, depth = camera.read_latest_rgbd(camera.config.frame_timeout_ms)
+                observation[f"observation.images.{name}"] = torch.from_numpy(image)
+                observation[f"observation.images.{name}_depth"] = torch.from_numpy(depth[..., None])
+                continue
             image, _ = self._fetch_image(name)
             if image is not None:
                 observation[f"observation.images.{name}"] = torch.from_numpy(image)
@@ -540,7 +611,7 @@ class BeavrBot(Robot):
 
     def teleop_stop(self):
         """Send a stop signal to all operators to pause teleoperation."""
-        if not self.manage_teleop_state:
+        if self.read_only or not self.manage_teleop_state:
             logging.info("Skipping teleop stop because recorder teleop-state management is disabled")
             return
 
@@ -573,7 +644,7 @@ class BeavrBot(Robot):
 
     def teleop_resume(self):
         """Send a resume signal to all operators to resume teleoperation."""
-        if not self.manage_teleop_state:
+        if self.read_only or not self.manage_teleop_state:
             logging.info("Skipping teleop resume because recorder teleop-state management is disabled")
             return
 
@@ -612,6 +683,8 @@ class BeavrBot(Robot):
             host: Host address of the subscriber
             port: Port number for handshake communication
         """
+        if self.read_only:
+            raise RuntimeError("read_only recorder cannot register control handshakes")
         self.handshake_coordinator.register_subscriber(subscriber_id, host, port)
         logging.info(f"Registered handshake subscriber '{subscriber_id}' at {host}:{port}")
 
@@ -621,6 +694,8 @@ class BeavrBot(Robot):
         Args:
             subscriber_id: Unique identifier of the subscriber to remove
         """
+        if self.read_only:
+            return
         self.handshake_coordinator.unregister_subscriber(subscriber_id)
         logging.info(f"Unregistered handshake subscriber '{subscriber_id}'")
 
@@ -651,6 +726,8 @@ class BeavrBot(Robot):
             The exact action that has been sent (after possible type/shape
             conversions).
         """
+        if self.read_only:
+            raise RuntimeError("read_only recorder cannot send robot actions")
         # Defensive copy & type normalisation --------------------------------
         if isinstance(action, torch.Tensor):
             action_np = action.detach().cpu().flatten().numpy()

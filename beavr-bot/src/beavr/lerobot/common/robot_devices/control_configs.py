@@ -68,6 +68,15 @@ class RecordControlConfig(ControlConfig):
     video: bool = True
     # Encode episode videos in the background after the first episode has written video metadata.
     async_video_encoding: bool = True
+    read_only: bool = True
+    camera_settings_path: str | None = None
+    save_depth: bool = False
+    keep_image_files: bool = False
+    depth_video: bool = False
+    lossless_video: bool = False
+    depth_video_format: str = "gray16_mkv"
+    export_data100: bool = False
+    export_previews: bool = False
     # Upload dataset to Hugging Face hub.
     push_to_hub: bool = True
     # Upload on private repository on the Hugging Face hub.

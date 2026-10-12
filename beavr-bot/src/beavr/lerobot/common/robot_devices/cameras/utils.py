@@ -43,6 +43,11 @@ def make_cameras_from_configs(camera_configs: dict[str, CameraConfig]) -> list[C
 
             cameras[key] = OpenCVCamera(cfg)
 
+        elif cfg.type == "orbbec":
+            from .orbbec import OrbbecCamera
+
+            cameras[key] = OrbbecCamera(cfg)
+
         elif cfg.type == "intelrealsense":
             from beavr.lerobot.common.robot_devices.cameras.intelrealsense import (
                 IntelRealSenseCamera,
@@ -61,6 +66,12 @@ def make_camera(camera_type, **kwargs) -> Camera:
 
         config = OpenCVCameraConfig(**kwargs)
         return OpenCVCamera(config)
+
+    elif camera_type == "orbbec":
+        from .configs import OrbbecCameraConfig
+        from .orbbec import OrbbecCamera
+
+        return OrbbecCamera(OrbbecCameraConfig(**kwargs))
 
     elif camera_type == "intelrealsense":
         from beavr.lerobot.common.robot_devices.cameras.intelrealsense import (

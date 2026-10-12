@@ -43,3 +43,6 @@ __pycache__/
 
 *.zip
 *.csv
+
+# 本机运行产物和场景参考文件
+/artifacts/

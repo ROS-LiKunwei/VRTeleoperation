@@ -145,7 +145,6 @@ import numpy as np
 # from safetensors.torch import load_file, save_file
 from beavr.lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 from beavr.lerobot.common.datasets.v30.convert_dataset_v21_to_v30 import convert_dataset_v21_to_v30
-from beavr.lerobot.common.policies.factory import make_policy # 用于实例化AI策略模型
 from beavr.lerobot.common.robot_devices.control_configs import (
     ControlPipelineConfig,
     RecordControlConfig,
@@ -177,39 +176,7 @@ from beavr.lerobot.configs import parser
 # 用于存储遥操作相关的多进程列表，在运行时会被填充
 _teleop_processes: list[multiprocessing.Process] | None = None  # Populated at runtime
 
-_FA_REPLAY_PREP_TARGET_A = (
-    0.0,
-    1.40,
-    0.0,
-    0.0,
-    0.0,
-    0.0,
-    0.0,
-    0.0,
-    -1.40,
-    0.0,
-    0.0,
-    0.0,
-    0.0,
-    0.0,
-)
-_FA_REPLAY_PREP_TARGET_B = (
-    -1.09,
-    0.76,
-    -0.57,
-    -1.08,
-    0.89,
-    0.15,
-    -0.35,
-    -1.09,
-    -0.76,
-    0.57,
-    -1.08,
-    -0.89,
-    0.15,
-    0.35,
-)
-_FA_REPLAY_PREP_TARGET_C = (
+_FA_REPLAY_WAYPOINT_1 = (
     0.0,
     0.2,
     0.0,
@@ -225,9 +192,68 @@ _FA_REPLAY_PREP_TARGET_C = (
     0.0,
     0.0,
 )
+_FA_REPLAY_WAYPOINT_2 = (
+    0.0,
+    1.40,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    -1.40,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+)
+_FA_REPLAY_WAYPOINT_3 = (
+    0.0,
+    1.40,
+    0.0,
+    -1.40,
+    0.0,
+    0.0,
+    0.0,
+    -0.0,
+    -1.40,
+    0.0,
+    -1.40,
+    0.0,
+    0.0,
+    0.0,
+)
+_FA_REPLAY_WAYPOINT_4 = (
+    -0.868398,
+    0.992635,
+    -0.978102,
+    -1.870111,
+    -0.383045,
+    0.250036,
+    -0.009134,
+    -0.969093,
+    -1.124586,
+    0.831005,
+    -1.463140,
+    0.269165,
+    -0.044380,
+    0.134951,
+)
+_FA_REPLAY_APPROACH_SEQUENCE = (
+    ("P1", _FA_REPLAY_WAYPOINT_1),
+    ("P2", _FA_REPLAY_WAYPOINT_2),
+    ("P3", _FA_REPLAY_WAYPOINT_3),
+    ("P4", _FA_REPLAY_WAYPOINT_4),
+)
+_FA_REPLAY_RETURN_SEQUENCE = tuple(reversed(_FA_REPLAY_APPROACH_SEQUENCE))
 _FA_REPLAY_PREP_MOVE_DURATION_S = 4.0
+_FA_REPLAY_P2_TO_P3_MOVE_DURATION_S = 10.5
+_FA_REPLAY_P3_TO_P4_MOVE_DURATION_S = 7.5
 _FA_REPLAY_TARGET_REACHED_TOLERANCE_RAD = 0.03
 _FA_REPLAY_TARGET_REACHED_STABLE_SAMPLES = 3
+_FA_REPLAY_INITIAL_RIGHT_OPEN_ACTION = 21
+_FA_REPLAY_RIGHT_OPEN_ACTION = 22
 
 
 class _FaDatasetReplayPublisher:
@@ -253,7 +279,7 @@ class _FaDatasetReplayPublisher:
                 "sensor_msgs.msg.JointState, and std_msgs.msg.Int32 available. "
                 "Run replay from a shell that has sourced both:\n"
                 "  source /opt/ros/humble/setup.bash\n"
-                "  source /home/likunwei/humanoid_ws/install/setup.bash\n"
+                "  source /home/wangzebei/likunwei_ws/install/setup.bash\n"
                 "Then start control_robot.py from the same shell."
             ) from exc
 
@@ -315,9 +341,16 @@ class _FaDatasetReplayPublisher:
         self._publish_hand(self._robots.RIGHT, action_np[15])
         self._rclpy.spin_once(self._node, timeout_sec=0.0)
 
+    def initialize_right_hand(self) -> None:
+        """Open the right hand once with the hardware initialization action."""
+        msg = self._msg_type()
+        msg.data = _FA_REPLAY_INITIAL_RIGHT_OPEN_ACTION
+        self._right_hand_pub.publish(msg)
+        self._rclpy.spin_once(self._node, timeout_sec=0.0)
+
     def _publish_hand(self, hand_side: str, gripper_state: float) -> None:
         msg = self._msg_type()
-        msg.data = self._gripper_state_to_ros_action(gripper_state)
+        msg.data = self._gripper_state_to_ros_action(hand_side, gripper_state)
         if hand_side == self._robots.LEFT:
             self._left_hand_pub.publish(msg)
         else:
@@ -328,9 +361,14 @@ class _FaDatasetReplayPublisher:
             name: float(position) for name, position in zip(msg.name, msg.position, strict=False)
         }
 
-    def _gripper_state_to_ros_action(self, gripper_state: float) -> int:
-        # 数据集里 0 表示打开，1 表示握紧；ROS 侧使用 FA 配置里的真实动作编号。
-        return self._grasp_ros_action if float(gripper_state) >= 0.5 else self._open_ros_action
+    def _gripper_state_to_ros_action(self, hand_side: str, gripper_state: float) -> int:
+        # 数据集里 0 表示打开，1 表示握紧。右手在回放开始时先用 21
+        # 初始化一次，后续轨迹中的所有打开动作使用 22；关闭仍使用配置中的 20。
+        if float(gripper_state) >= 0.5:
+            return self._grasp_ros_action
+        if hand_side == self._robots.RIGHT:
+            return _FA_REPLAY_RIGHT_OPEN_ACTION
+        return self._open_ros_action
 
     def current_arm_position(self) -> np.ndarray | None:
         if not all(name in self._latest_joint_state for name in self._arm_joint_names):
@@ -387,7 +425,11 @@ class _FaDatasetReplayPublisher:
             )
             return target_np
 
-        logging.info("Publishing FA replay arm target %s via min_snap", label)
+        logging.info(
+            "Publishing FA replay arm target %s via min_snap; expected_duration_s=%.3f",
+            label,
+            duration_s,
+        )
         self.publish_arm_target(target_np, expected_duration_s=duration_s)
         reached_samples = 0
         last_wait_log_s = 0.0
@@ -540,12 +582,14 @@ def _wait_for_replay_start_key() -> None:
 def _run_fa_replay_arm_sequence(
     fa_replay_publisher: _FaDatasetReplayPublisher,
     targets: tuple[tuple[str, tuple[float, ...]], ...],
+    duration_overrides_s: dict[str, float] | None = None,
 ) -> np.ndarray | None:
     current_position = None
     for label, target in targets:
+        duration_s = (duration_overrides_s or {}).get(label, _FA_REPLAY_PREP_MOVE_DURATION_S)
         current_position = fa_replay_publisher.move_arm_target(
             target,
-            duration_s=_FA_REPLAY_PREP_MOVE_DURATION_S,
+            duration_s=duration_s,
             label=label,
         )
     return current_position
@@ -731,16 +775,38 @@ def record(
     # When recording, the teleoperation system is assumed to be already running.
     # This function is now only responsible for the recording logic itself.
     try:
+        if cfg.read_only:
+            if not getattr(robot, "read_only", False) or cfg.policy is not None or cfg.manage_teleop_state:
+                raise ValueError("read_only recording requires a read_only adapter, no policy and no teleop-state management")
+            robot.wait_for_recording_states(timeout_s=max(10.0, cfg.warmup_time_s))
         if hasattr(robot, "manage_teleop_state"):
             robot.manage_teleop_state = cfg.manage_teleop_state
             logging.info("Recorder teleop-state management: %s", cfg.manage_teleop_state)
 
         # TODO: Add option to record logs
         # 处理数据集初始化：如果是断点续录(resume)，则加载已有数据集；否则新建。
+        if cfg.lossless_video:
+            if not cfg.video or cfg.depth_video or cfg.keep_image_files:
+                raise ValueError("lossless_video requires video=true, depth_video=false, keep_image_files=false")
+            from beavr.lerobot.common.datasets.lossless_video import RGB_ENCODING, DEPTH_ENCODING, GRAY_DEPTH_ENCODING
+            if cfg.depth_video_format not in ("gray16_mkv", "packed_mp4"):
+                raise ValueError("Unknown depth_video_format")
+            for key, feature in robot.features.items():
+                if key.startswith("observation.images."):
+                    feature["dtype"] = "video"
+                    feature["info"] = dict(feature.get("info") or {})
+                    feature["info"]["lossless_encoding"] = DEPTH_ENCODING if feature["info"].get("is_depth_map") else RGB_ENCODING
+                    if feature["info"].get("is_depth_map") and cfg.depth_video_format == "gray16_mkv":
+                        if feature["info"].get("depth_unit") != "mm" or feature["info"].get("max_depth_m") != 1.0:
+                            raise ValueError("gray16_mkv requires millimetre depth clipped to 1 m")
+                        feature["info"].update(lossless_encoding=GRAY_DEPTH_ENCODING, video_container="mkv",
+                                               stored_pixel_unit="round(mm * 65535 / 1000)", decoded_depth_unit="mm")
         if cfg.resume:
             dataset = LeRobotDataset(
                 cfg.repo_id,
                 root=cfg.root,
+                keep_image_files=cfg.keep_image_files,
+                depth_video=cfg.depth_video,
             )
             if len(robot.cameras) > 0:
                 dataset.start_image_writer(
@@ -755,16 +821,28 @@ def record(
                 cfg.repo_id,
                 cfg.fps,
                 root=cfg.root,
+                keep_image_files=cfg.keep_image_files,
+                depth_video=cfg.depth_video,
                 robot=robot,
                 use_videos=cfg.video,
                 image_writer_processes=cfg.num_image_writer_processes,
                 image_writer_threads=cfg.num_image_writer_threads_per_camera * len(robot.cameras),
             )
+        from beavr.lerobot.common.robot_devices.cameras.manual_controls import save_camera_settings
+        settings_path = dataset.root / "meta" / "camera_settings.json"
+        if cfg.resume and not settings_path.is_file() and any(
+            getattr(camera.config, "manual_mode", False) for camera in robot.cameras.values()
+        ):
+            raise ValueError("Cannot resume with fixed controls: the old dataset has no camera settings record")
+        save_camera_settings(robot.cameras, settings_path)
         if cfg.video:
             dataset.set_async_video_encoding(cfg.async_video_encoding)
 
         # 如果配置了策略（Policy），则实例化 AI 模型。如果是人类录制，这里为 None。
-        policy = None if cfg.policy is None else make_policy(cfg.policy, ds_meta=dataset.meta)
+        policy = None
+        if cfg.policy is not None:
+            from beavr.lerobot.common.policies.factory import make_policy
+            policy = make_policy(cfg.policy, ds_meta=dataset.meta)
         # 初始化键盘监听器，以便在终端里通过快捷键（如 ESC 退出，左右箭头重录）控制流程
         listener, events = init_keyboard_listener()
 
@@ -840,6 +918,9 @@ def record(
                 dataset.clear_episode_buffer()
                 if events["stop_recording"]:
                     break
+                if events.pop("camera_recovered", False):
+                    events["exit_early"] = False
+                    continue
                 if recorded_episodes < cfg.num_episodes:
                     log_say("Reset the environment", cfg.play_sounds)
                     reset_environment(robot, events, cfg.reset_time_s, cfg.fps)
@@ -853,10 +934,19 @@ def record(
                 time.perf_counter() - save_start_t,
                 len(getattr(dataset, "_pending_episode_finalizations", [])),
             )
-            recorded_episodes += 1
+            recovered = events.pop("camera_recovered", False)
+            # Interrupted prefixes remain in the dataset but do not consume
+            # the requested number of complete episodes.
+            if not recovered:
+                recorded_episodes += 1
 
             if events["stop_recording"]:
                 break
+
+            if recovered:
+                events["exit_early"] = False
+                logging.warning("Camera recovered; starting a new episode without robot reset")
+                continue
 
             # Execute a few seconds without recording to give time to manually reset the environment.
             # Save first so early-exited episodes are durable before reset or a later Ctrl+C.
@@ -880,6 +970,12 @@ def record(
             convert_dataset_v21_to_v30(dataset.root)
         elif cfg.dataset_format != "v2.1":
             raise ValueError("control.dataset_format must be either 'v3.0' or 'v2.1'")
+        if cfg.export_previews:
+            from beavr.scripts.preview_lossless_rgbd import export_previews
+            export_previews(dataset.root, dataset.root / "previews")
+        if cfg.export_data100:
+            from beavr.lerobot.common.datasets.data100_export import export_data100
+            export_data100(dataset.root, dataset.root.with_name(dataset.root.name + "_data100"))
         # 选择性推送到 Hugging Face Hub（云端）
         if cfg.push_to_hub:
             dataset.push_to_hub(tags=cfg.tags, private=cfg.private)
@@ -927,16 +1023,46 @@ def replay(
             # fails early and does not briefly connect hardware resources.
             fa_replay_publisher = _FaDatasetReplayPublisher(replay_fps)
 
-    if not robot.is_connected:
+    # FA replay publishes directly to ROS min_snap and hand topics. Connecting
+    # the generic adapter would only open its configured cameras, which are not
+    # inputs to dataset replay. Other robot types retain the original path.
+    if not is_fa_bimanual_replay and not robot.is_connected:
         robot.connect()
 
     if is_fa_bimanual_replay:
         assert fa_replay_publisher is not None
         _wait_for_replay_start_key()
-        logging.info("Moving FA replay arm targets A -> B before dataset replay.")
+        logging.info(
+            "Initializing FA replay right hand with action %d before arm approach.",
+            _FA_REPLAY_INITIAL_RIGHT_OPEN_ACTION,
+        )
+        fa_replay_publisher.initialize_right_hand()
+        logging.info("Moving FA replay arm targets P1 -> P2 -> P3 -> P4 before dataset replay.")
         _run_fa_replay_arm_sequence(
             fa_replay_publisher,
-            (("A", _FA_REPLAY_PREP_TARGET_A), ("B", _FA_REPLAY_PREP_TARGET_B)),
+            _FA_REPLAY_APPROACH_SEQUENCE,
+            duration_overrides_s={
+                "P3": _FA_REPLAY_P2_TO_P3_MOVE_DURATION_S,
+                "P4": _FA_REPLAY_P3_TO_P4_MOVE_DURATION_S,
+            },
+        )
+        # The requested P4 waypoint is not assumed to equal the selected
+        # episode's first recorded target. Move to that exact target through
+        # min_snap before starting the 30 FPS frame stream; otherwise the first
+        # replay frame could introduce a large one-frame jump.
+        first_arm_target = np.asarray(first_action, dtype=np.float64).flatten()[:14]
+        p3_to_episode_start = float(
+            np.max(np.abs(first_arm_target - np.asarray(_FA_REPLAY_WAYPOINT_4)))
+        )
+        logging.info(
+            "Aligning from P4 to episode %s first arm target via min_snap; max_delta=%.4frad",
+            cfg.episode,
+            p3_to_episode_start,
+        )
+        fa_replay_publisher.move_arm_target(
+            first_arm_target,
+            duration_s=_FA_REPLAY_PREP_MOVE_DURATION_S,
+            label=f"episode-{cfg.episode}-start",
         )
 
     log_say("Replaying episode", cfg.play_sounds, blocking=True)
@@ -962,14 +1088,10 @@ def replay(
             log_control_info(robot, dt_s, fps=replay_fps)
 
         if is_fa_bimanual_replay:
-            logging.info("Dataset replay finished. Moving FA replay arm targets B -> A -> C.")
+            logging.info("Dataset replay finished. Moving FA replay arm targets P4 -> P3 -> P2 -> P1.")
             _run_fa_replay_arm_sequence(
                 fa_replay_publisher,
-                (
-                    ("B", _FA_REPLAY_PREP_TARGET_B),
-                    ("A", _FA_REPLAY_PREP_TARGET_A),
-                    ("C", _FA_REPLAY_PREP_TARGET_C),
-                ),
+                _FA_REPLAY_RETURN_SEQUENCE,
             )
             logging.info("FA replay sequence complete.")
     finally:
@@ -985,6 +1107,26 @@ def control_robot(cfg: ControlPipelineConfig):
     """
     init_logging()
     if isinstance(cfg.control, RecordControlConfig):
+        if cfg.control.export_previews and (not cfg.control.lossless_video or cfg.control.dataset_format != "v3.0"):
+            raise ValueError("export_previews requires lossless_video=true and dataset_format=v3.0")
+        if cfg.control.export_data100 and (not cfg.control.lossless_video or cfg.control.dataset_format != "v3.0" or cfg.control.depth_video_format != "gray16_mkv"):
+            raise ValueError("export_data100 requires lossless_video=true and dataset_format=v3.0")
+        if cfg.control.read_only:
+            if cfg.teleop.start or cfg.control.manage_teleop_state or cfg.control.policy is not None:
+                raise ValueError("Separate read-only recording requires --teleop.start=false, --control.manage_teleop_state=false and no policy")
+            if not hasattr(cfg.robot, "read_only"):
+                raise ValueError("This robot adapter does not implement read-only recording")
+            cfg.robot.read_only = True
+        if cfg.control.camera_settings_path:
+            from beavr.lerobot.common.robot_devices.cameras.manual_controls import load_camera_settings
+            cfg.robot.cameras = load_camera_settings(cfg.control.camera_settings_path)
+        if cfg.control.save_depth:
+            from beavr.lerobot.common.robot_devices.cameras.configs import OrbbecCameraConfig
+            depth_cameras = [c for c in cfg.robot.cameras.values() if isinstance(c, OrbbecCameraConfig)]
+            if not depth_cameras:
+                raise ValueError("--control.save_depth requires at least one Orbbec camera")
+            for camera in depth_cameras:
+                camera.use_depth = True
         _configure_record_terminal_logging() # 如果是录制模式，开启日志过滤
     logging.info(pformat(asdict(cfg)))
 
@@ -1008,8 +1150,14 @@ def control_robot(cfg: ControlPipelineConfig):
     robot = make_robot_from_config(cfg.robot)
 
     try:
-        # 连接硬件
-        if not robot.is_connected:
+        # FA dataset replay uses the dedicated ROS min_snap/hand publishers in
+        # replay(). Its generic adapter only owns cameras, so defer connection
+        # and avoid opening an unrelated camera during trajectory replay.
+        defer_fa_replay_connect = (
+            isinstance(cfg.control, ReplayControlConfig)
+            and getattr(robot, "robot_type", None) == "fa"
+        )
+        if not defer_fa_replay_connect and not robot.is_connected:
             robot.connect()
         # 根据配置文件指定的模式执行对应逻辑
         if isinstance(cfg.control, TeleoperateControlConfig):

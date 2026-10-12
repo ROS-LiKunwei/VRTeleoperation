@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 import av
+import numpy as np
 import pyarrow as pa
 import torch
 import torchvision
@@ -257,6 +258,7 @@ def encode_video_frames(
     fast_decode: int = 0,
     log_level: int | None = av.logging.ERROR,
     overwrite: bool = False,
+    grayscale_uint16: bool = False,
 ) -> None:
     """More info on ffmpeg arguments tuning on `benchmark/video/README.md`"""
     # Check encoder availability
@@ -316,8 +318,12 @@ def encode_video_frames(
 
         # Loop through input frames and encode them
         for input_data in input_list:
-            input_image = Image.open(input_data).convert("RGB")
-            input_frame = av.VideoFrame.from_image(input_image)
+            with Image.open(input_data) as input_image:
+                if grayscale_uint16:
+                    depth = np.asarray(input_image, dtype=np.uint16)
+                    input_frame = av.VideoFrame.from_ndarray((depth >> 8).astype(np.uint8), format="gray")
+                else:
+                    input_frame = av.VideoFrame.from_image(input_image.convert("RGB"))
             packet = output_stream.encode(input_frame)
             if packet:
                 output.mux(packet)
@@ -439,7 +445,7 @@ def get_video_pixel_channels(pix_fmt: str) -> int:
         return 1
     elif "rgba" in pix_fmt or "yuva" in pix_fmt:
         return 4
-    elif "rgb" in pix_fmt or "yuv" in pix_fmt:
+    elif "rgb" in pix_fmt or "gbr" in pix_fmt or "yuv" in pix_fmt:
         return 3
     else:
         raise ValueError("Unknown format")

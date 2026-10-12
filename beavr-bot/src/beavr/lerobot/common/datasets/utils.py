@@ -291,11 +291,16 @@ def hf_transform_to_torch(items_dict: dict[torch.Tensor | None]):
         first_item = items_dict[key][0]
         if isinstance(first_item, PILImage.Image):
             to_tensor = transforms.ToTensor()
-            items_dict[key] = [to_tensor(img) for img in items_dict[key]]
+            items_dict[key] = [
+                torch.from_numpy(np.array(img, dtype=np.float32)).unsqueeze(0)
+                if key.endswith("_depth") else to_tensor(img)
+                for img in items_dict[key]
+            ]
         elif isinstance(first_item, (bytes, bytearray)):
             # NEW: decode PNG bytes to PIL, then to tensor
             to_tensor = transforms.ToTensor()
-            items_dict[key] = [to_tensor(PILImage.open(io.BytesIO(x))) for x in items_dict[key]]
+            decoded = {key: [PILImage.open(io.BytesIO(x)) for x in items_dict[key]]}
+            items_dict[key] = hf_transform_to_torch(decoded)[key]
         elif first_item is None:
             pass
         else:
@@ -774,6 +779,10 @@ def validate_feature_dtype_and_shape(name: str, feature: dict, value: np.ndarray
     if is_valid_numpy_dtype_string(expected_dtype):
         return validate_feature_numpy_array(name, expected_dtype, expected_shape, value)
     elif expected_dtype in ["image", "video"]:
+        if (feature.get("info") or {}).get("is_depth_map"):
+            array = np.asarray(value)
+            if array.dtype != np.uint16:
+                return f"Depth feature '{name}' must contain uint16 values, got {array.dtype}.\n"
         return validate_feature_image_or_video(name, expected_shape, value)
     elif expected_dtype == "string":
         return validate_feature_string(name, value)

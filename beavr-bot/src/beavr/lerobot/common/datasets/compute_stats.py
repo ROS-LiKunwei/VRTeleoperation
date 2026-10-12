@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import numpy as np
+from PIL import Image
 
 from beavr.lerobot.common.datasets.utils import load_image_as_numpy
 
@@ -91,7 +92,14 @@ def compute_episode_stats(episode_data: dict[str, list[str] | np.ndarray], featu
         if features[key]["dtype"] == "string":
             continue  # HACK: we should receive np.arrays of strings
         elif features[key]["dtype"] in ["image", "video"]:
-            ep_ft_array = sample_images(data)  # data is a list of image paths
+            if key.endswith("_depth"):
+                samples = []
+                for idx in sample_indices(len(data)):
+                    with Image.open(data[idx]) as image:
+                        samples.append(auto_downsample_height_width(np.asarray(image, dtype=np.float32)[None]))
+                ep_ft_array = np.stack(samples)
+            else:
+                ep_ft_array = sample_images(data)  # data is a list of image paths
             axes_to_reduce = (0, 2, 3)  # keep channel dim
             keepdims = True
         else:
@@ -104,7 +112,7 @@ def compute_episode_stats(episode_data: dict[str, list[str] | np.ndarray], featu
         # finally, we normalize and remove batch dim for images
         if features[key]["dtype"] in ["image", "video"]:
             ep_stats[key] = {
-                k: v if k == "count" else np.squeeze(v / 255.0, axis=0) for k, v in ep_stats[key].items()
+                k: v if k == "count" else np.squeeze(v / (1.0 if key.endswith("_depth") else 255.0), axis=0) for k, v in ep_stats[key].items()
             }
 
     return ep_stats
@@ -123,7 +131,7 @@ def _assert_type_and_shape(stats_list: list[dict[str, dict]]):
                     raise ValueError("Number of dimensions must be at least 1, and is 0 instead.")
                 if k == "count" and v.shape != (1,):
                     raise ValueError(f"Shape of 'count' must be (1), but is {v.shape} instead.")
-                if "image" in fkey and k != "count" and v.shape != (3, 1, 1):
+                if "image" in fkey and k != "count" and v.shape != ((1, 1, 1) if fkey.endswith("_depth") else (3, 1, 1)):
                     raise ValueError(f"Shape of '{k}' must be (3,1,1), but is {v.shape} instead.")
 
 

@@ -63,7 +63,20 @@ def convert_dataset_v21_to_v30(
     try:
         _write_v30_data_files(root, tmp_root, info, episodes)
         _write_v30_video_files(root, tmp_root, info, episodes)
+        # PNG originals and depth previews are sidecars, outside the RGB video schema.
+        if (root / "images").is_dir():
+            shutil.copytree(root / "images", tmp_root / "images")
+        for key, feature in info.get("features", {}).items():
+            preview_dir = root / "videos" / key
+            if key.endswith("_depth") and feature.get("dtype") == "image" and preview_dir.is_dir():
+                shutil.copytree(preview_dir, tmp_root / "videos" / key)
         _write_v30_metadata(tmp_root, info, tasks, episodes, episodes_stats)
+        fault_dir = root / "meta" / "recording_faults"
+        if fault_dir.is_dir():
+            shutil.copytree(fault_dir, tmp_root / "meta" / "recording_faults")
+        settings_path = root / "meta" / "camera_settings.json"
+        if settings_path.is_file():
+            shutil.copy2(settings_path, tmp_root / "meta" / "camera_settings.json")
 
         root.rename(backup_root)
         tmp_root.rename(root)
@@ -101,13 +114,14 @@ def _format_v21_data_path(info: dict[str, Any], episode_index: int) -> Path:
 
 def _format_v21_video_path(info: dict[str, Any], episode_index: int, video_key: str) -> Path:
     episode_chunk = episode_index // int(info.get("chunks_size", DEFAULT_CHUNK_SIZE))
-    return Path(
+    from ..lossless_video import feature_video_path
+    return feature_video_path(Path(
         info["video_path"].format(
             episode_chunk=episode_chunk,
             episode_index=episode_index,
             video_key=video_key,
         )
-    )
+    ), info["features"][video_key])
 
 
 def _write_v30_data_files(
@@ -149,6 +163,8 @@ def _write_v30_video_files(
                 chunk_index=chunk_index,
                 file_index=file_index,
             )
+            from ..lossless_video import feature_video_path
+            dst = feature_video_path(dst, info["features"][video_key])
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dst)
 

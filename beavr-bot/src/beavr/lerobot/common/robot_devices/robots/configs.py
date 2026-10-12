@@ -707,6 +707,8 @@ class BeavrBotConfig(RobotConfig):
     # Overall robot type identifier
     robot_type: str = "multi_robot"
     record_actions: bool = True
+    read_only: bool = False
+    state_timeout_s: float = 1.0
     record_next_joint_state_action: bool = False
     record_bimanual_gripper_state: bool = False
 
@@ -839,6 +841,7 @@ class Sysmo32AdapterConfig(BeavrBotConfig):
             ),
         }
     )
+    state_host: str = "127.0.0.1"
     robot_type: str = "sysmo32"
     record_actions: bool = True
     record_next_joint_state_action: bool = True
@@ -847,7 +850,7 @@ class Sysmo32AdapterConfig(BeavrBotConfig):
         self.robot_configs = [
             {
                 "name": "sysmo32_left",
-                "host": network.HOST_ADDRESS,
+                "host": self.state_host,
                 "state_port": ports.XARM_STATE_PUBLISH_PORT + 4,
                 "state_topic": "sysmo32_left",
                 "robot_type": "arm",
@@ -866,7 +869,7 @@ class Sysmo32AdapterConfig(BeavrBotConfig):
             },
             {
                 "name": "sysmo32_right",
-                "host": network.HOST_ADDRESS,
+                "host": self.state_host,
                 "state_port": ports.XARM_STATE_PUBLISH_PORT + 2,
                 "state_topic": "sysmo32_right",
                 "robot_type": "arm",
