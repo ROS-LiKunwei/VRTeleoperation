@@ -6,6 +6,14 @@ beavr-bot/beavr_run.log
 # 其他可能的日志文件
 *.log
 *.txt
+!CMakeLists.txt
+!requirements.txt
+provenance/copy_files.txt
+cpp_ws/.colcon/
+validation/private/
+validation/integration_initial/
+validation/integration_round2/
+validation/sweep_initial/
 
 # IDE 相关文件
 .vscode/

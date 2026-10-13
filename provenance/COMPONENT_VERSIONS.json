@@ -1,0 +1,39 @@
+{
+  "release_id": "fe9149ec349c2dcb52bc995fea1b5be6ac69b698747b3c8e864ce6e5492da11b",
+  "components": {
+    "config": {
+      "origin_commit": "",
+      "sha256": "2ee70021367deaa4d3280135514c2ee409b6f6d6d33bd9816bb8c7eec27e6d0a",
+      "version": "1.0.0",
+      "full_version": "1.0.0+2ee70021367d"
+    },
+    "fa_model": {
+      "origin_commit": "7f03b73ad3b88be3c8e6096f320b67d7ff39517f",
+      "sha256": "8647fc6b4d1b99ef77af6f71f8a0d47294b726d7b97af5d7f5c0a302f0a27041",
+      "version": "1.0.0",
+      "full_version": "1.0.0+8647fc6b4d1b"
+    },
+    "ik": {
+      "origin_commit": "b1560aae2807f992b1e8fa6f1759527ee600e968",
+      "sha256": "04b32d71a2de0adb0ccc8a3ff0eac42de5933076eabe7df8073507117f49db03",
+      "version": "1.0.0",
+      "full_version": "1.0.0+04b32d71a2de"
+    },
+    "min_snap": {
+      "origin_commit": "b1560aae2807f992b1e8fa6f1759527ee600e968",
+      "sha256": "70c763e3fc288f2f561329488ada5330cecdc6a143abc70100dbc87ec112bf76",
+      "version": "1.0.0",
+      "full_version": "1.0.0+70c763e3fc28"
+    },
+    "teleop": {
+      "origin_commit": "",
+      "sha256": "648d899803392ae1cf69f34abcc3e03e9adeecf0dfc100060795d03f27e2b50c",
+      "version": "1.0.0",
+      "full_version": "1.0.0+648d89980339"
+    }
+  },
+  "profile_sha256": {
+    "precision_200hz.yaml": "a955d1a7a564fd4558b02ff230ef24fb8da3a7ee5e8235158e038a31ee3ab126",
+    "simulation_test.yaml": "6bbd988f3915dd2d51b296cd617fb49a91d72a244eba2903db8159507a683afc"
+  }
+}

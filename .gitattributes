@@ -1,0 +1,2 @@
+# Component IDs hash exact bytes. Preserve URDF and vendored source line endings.
+cpp_ws/src/fa_teleop/** -text

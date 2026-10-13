@@ -1,0 +1,10 @@
+# Isolated end-to-end test only. No root namespace or hardware topics.
+control_hz: 200.0
+sample_hz: 1000.0
+calibration_enabled: false
+require_source_stamp: true
+right_port: 18087
+left_port: 18110
+event_port: 18100
+button_port: 18095
+prompt_port: 18112

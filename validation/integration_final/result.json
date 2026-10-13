@@ -1,0 +1,20 @@
+{
+  "commands": 12485,
+  "executor": "fe9149ec349c2dcb52bc995fea1b5be6ac69b698747b3c8e864ce6e5492da11b:6bbd988f3915dd2d51b296cd617fb49a91d72a244eba2903db8159507a683afc|READY|49|late=0|samples=12445|reason=0",
+  "teleop": {
+    "release_id": "fe9149ec349c2dcb52bc995fea1b5be6ac69b698747b3c8e864ce6e5492da11b",
+    "stage": 4,
+    "pause_reason": "input_stale_or_unsynchronized",
+    "cycles": 2405,
+    "valid_solves": 1577,
+    "compute_overruns": 0,
+    "max_work_ms": 0.314683,
+    "max_wakeup_ms": 0.303156,
+    "vr_frames": 24250
+  },
+  "max_step_rad": 5.740836892259614e-05,
+  "passed": true,
+  "namespace": "/fa_cpp_integration",
+  "domain_id": 197,
+  "physical_hardware": false
+}

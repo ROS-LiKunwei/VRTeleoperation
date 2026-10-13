@@ -1,0 +1,130 @@
+min_snap_node:
+  ros__parameters:
+    # 优化后轨迹采样点的发布频率。
+    # command_topic 和 desired_joint_states_topic 都按这个频率发布。
+    publish_hz: 1000.0
+
+    # 选择 min_snap_node 内部使用的机器人关节布局和关节限位表。
+    # 支持 "fa" 和 "sysmo32"。
+    robot_type: "fa"  # fa or sysmo32
+
+    # beavr 下发的输入目标。每条消息包含上肢关节目标，以及下一段轨迹使用的运动约束。
+    target_topic: "/min_snap/target"
+
+    # 优化后的关节位置命令输出，真实机器人 / MuJoCo 控制器订阅这个话题。
+    command_topic: "/upper_position_controller/commands"
+
+    # 调试和记录用的期望轨迹输出，包含优化后的期望位置、速度、加速度和加加速度。
+    desired_joint_states_topic: "/min_snap/desired_joint_states"
+
+    # 机器人实际状态反馈。用于规划初始状态、tracking CSV 记录，以及状态超时安全检查。
+    joint_states_topic: "/joint_states"
+
+    # 调用该 Trigger 服务后，min_snap 会停用当前 active trajectory，并停止继续下发轨迹采样点。
+    pause_publish_service: "/min_snap/pause_trajectory_publish"
+
+    # 调用该 Trigger 服务后，min_snap 会恢复轨迹采样点发布。通常在状态机收到 pause 返回后、
+    # 发送下一组目标前调用。
+    resume_publish_service: "/min_snap/resume_trajectory_publish"
+
+    # 生成轨迹段的最小时长。目标时长小于该值时，会先被夹到该值再优化。
+    min_duration_s: 0.01
+
+    # 默认轨迹段期望时长。当目标消息没有提供有效 expected_duration 时使用。
+    default_expected_duration_s: 0.1
+
+    # 默认最大速度和最大加速度。当目标消息没有提供有效约束时使用。
+    default_max_velocity_rad_s: 1.2
+    default_max_acceleration_rad_s2: 8.0
+
+    # 如果候选轨迹违反速度、加速度或关节限位，就把轨迹时长乘以该系数后重新规划。
+    duration_scale_on_violation: 1.12
+
+    # 约束搜索过程中允许扩展到的最大轨迹时长。
+    # 如果 duration 超过该值，直接停止规划并保持当前关节，避免生成异常长时长轨迹。
+    # 设为 <=0 时表示不启用该保护。
+    max_duration_on_violation_s: 2.0
+
+    # 延长轨迹时长的最大重试次数。如果全部重试后仍不满足约束，会报 constraint_search_exhausted。
+    max_duration_search_iterations: 10
+
+    # 用于检查生成轨迹约束的采样点数量。数值越大越容易发现超限，但规划耗时也会增加。
+    constraint_sample_count: 200
+
+    # 七次多项式轨迹优化的代价权重：
+    # 1.0 表示纯最小 snap；数值越小，越重视贴近关节直线插值，可减少靠近限位时的鼓包。
+    snap_weight_lambda: 0.85
+
+    # 目标变化小于该阈值时，规划端认为目标未变化，不触发重新规划。
+    replan_threshold_rad: 0.001
+
+    # 发布 /commands 前的绝对安全保护。若采样点非有限值或超过该绝对位置范围，
+    # 当前 active trajectory 会被停用。
+    publish_position_abs_limit_rad: 3.14
+
+    # 关节硬限位内侧预留的软限位安全裕量。
+    # 例如硬限位 [-0.52, 0.52]，margin=0.02 时，实际规划软限位为 [-0.50, 0.50]。
+    publish_joint_limit_margin_rad: 0.0
+
+    # 最终发布前的绝对速度/加速度安全保护。
+    # 这是紧急保护，和每段轨迹自身的 max_velocity / max_acceleration 约束不同。
+    publish_velocity_abs_limit_rad_s: 2.0
+    publish_acceleration_abs_limit_rad_s2: 20.0
+
+    # 为 true 时，重规划初始速度只使用 /joint_states.velocity 字段；
+    # 为 false 时，每次规划初始速度按 0 处理，不做位置差分估计。
+    use_joint_state_velocity: true
+
+    # /joint_states.velocity 的有效性阈值。某个关节速度缺失、非有限、或绝对值超过该值时，
+    # 该关节规划初始速度置 0。设为 <=0 时只检查 NaN/Inf，不检查大小。
+    joint_state_velocity_abs_limit_rad_s: 2.0
+
+    # 遥操作会发送高频目标流。关闭从 joint_states 重规划并限制重规划频率，
+    # 可以避免在 1 kHz 下把多项式加速度反复带入下一次求解。
+    replan_from_joint_state: false
+
+    # 两次接受重规划之间的最小时间间隔。beavr 约 60 Hz 下发目标时，
+    # 该参数避免 1 kHz 定时器每一帧都生成新多项式。
+    min_replan_interval_s: 0.016
+
+    # 启动轨迹前必须至少收到一次 /joint_states。
+    require_joint_state_before_start: true
+
+    # /joint_states 超过该时间未更新时，认为状态超时，并暂停命令发布。
+    joint_state_timeout_s: 0.1
+
+    # 轨迹时间走完后，用 /joint_states 判断当前目标是否真正到位。
+    # 左右臂任一关节与目标的最大误差小于该阈值，并持续 goal_reached_hold_s 后，
+    # planner 会正常退出 active 状态，避免很久以后仍被判定为从 active trajectory 重规划。
+    goal_reached_position_tolerance_rad: 0.01
+    goal_reached_hold_s: 0.05
+
+    # tracking CSV 记录开关。为 true 时，记录实际 joint_states，以及优化后的期望位置、
+    # 速度、加速度、加加速度到 tracking_output_dir。
+    record_tracking: true
+    tracking_output_dir: "/home/likunwei/humanoid_ws/src/min_snap/logs"
+
+    # 文本运行日志开关。用于记录 min_snap 的告警、失败、重规划和周期性运行统计。
+    record_run_log: true
+    run_log_output_dir: "/home/likunwei/humanoid_ws/src/min_snap/Log"
+
+    # 周期性运行统计日志的记录周期。事件日志会立即写入，不受该参数限制。
+    run_log_period_s: 0.1
+
+    # 高频 WARN 写入文本运行日志的最小间隔。同类 WARN 在该时间内只记录一次。
+    run_log_warn_throttle_s: 2.0
+
+    # /joint_states 不包含 neck 时使用的默认 neck 起点/保持目标。
+    # MinSnapTarget.neck_target_rad 为空时，neck 会保持当前反馈值或该默认值。
+    neck_default_position:
+      - 0.0
+      - 0.0
+
+    # 仅 robot_type=sysmo32 时使用。
+    speed_mode: 4.0
+    reserved:
+      - 0.0
+      - 0.0
+      - 0.0
+      - 0.0
+    neck_joint: 0.0

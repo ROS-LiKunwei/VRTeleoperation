@@ -48,6 +48,8 @@ public class GestureDetectorXR : MonoBehaviour
 	[Header("手势发送过滤")]
 	[Tooltip("两次已发送手势帧之间的最大关节位移小于该值时跳过发送。单位：米，0.001 = 1毫米。")]
 	public float MinGestureSendDeltaMeters = 0.001f;
+	[Tooltip("C++ precision mode: send each valid tracked frame, including stationary hands. This does not increase sensor sampling rate.")]
+	public bool CppPrecisionStream = true;
 	private readonly Dictionary<string, List<Vector3>> _lastSentHandFrames = new Dictionary<string, List<Vector3>>();
 	private readonly Dictionary<string, string> _lastSentHandModes = new Dictionary<string, string>();
 	private readonly Dictionary<string, int> _lastSentHandCommands = new Dictionary<string, int>();
@@ -1053,6 +1055,10 @@ public class GestureDetectorXR : MonoBehaviour
 	{
 		if (currentFrame == null || currentFrame.Count == 0)
 			return false;
+
+		// C++ freshness monitoring requires valid stationary frames. Do not suppress sub-millimetre motion.
+		if (CppPrecisionStream)
+			return true;
 
 		if (!_lastSentHandModes.TryGetValue(handKey, out var lastMode) ||
 			lastMode != typeMarker)

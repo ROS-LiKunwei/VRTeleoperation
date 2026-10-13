@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>fa_teleop</name><version>1.0.0</version>
+  <description>Version-locked C++ FA bimanual teleoperation and minimum-snap execution.</description>
+  <maintainer email="likunwei@example.com">ROS-LiKunwei</maintainer>
+  <license>Apache-2.0</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <build_depend>rosidl_default_generators</build_depend>
+  <depend>rclcpp</depend><depend>sensor_msgs</depend><depend>std_msgs</depend>
+  <depend>std_srvs</depend><depend>ament_index_cpp</depend><depend>pinocchio</depend>
+  <depend>eigen</depend><depend>yaml_cpp_vendor</depend><depend>libzmq3-dev</depend>
+  <depend>libssl-dev</depend>
+  <exec_depend>rosidl_default_runtime</exec_depend><exec_depend>launch_ros</exec_depend>
+  <member_of_group>rosidl_interface_packages</member_of_group>
+  <export><build_type>ament_cmake</build_type></export>
+</package>

@@ -1,0 +1,44 @@
+{
+  "ik_7dof": {
+    "source_root": "/home/likunwei/humanoid_ws/src/ik_7dof",
+    "git_commit": "b1560aae2807f992b1e8fa6f1759527ee600e968",
+    "source_files": {
+      "package.xml": "c2b47faa39e549355da8d1abe55a914f2b9ca3bfe825f41e1761441702a2f6b1",
+      "README.md": "dfc4199c89704484fa44a5ddc46c6ec0fb209d956df3500b7c7b74162559c5e1",
+      "LICENSE": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "CMakeLists.txt": "d0d6a48378f1f7237dccf7acfd3be7c905525e628caa30c3506b53d88dc99832",
+      "include/ik_7dof/fa_ik_solver.hpp": "248cc5165f9de1ca8a06ef8864358f495f3d3ef69404c7eb616aa48b4d5d729a",
+      "src/fa_arm_kinematic_node.cpp": "9cf0f4ed93e8776b97d8482d888c363d8498a3eb5971432070e189f499bb4464",
+      "src/arm_ik_rviz_node.cpp": "452fab8b02dacca83e4cc8c899704f901eac0adc641c6aa1cb9a70c47ef9cfee",
+      "src/fa_ik_approx_verify.cpp": "f772508fedaab9c4add1c5aeb077fd0a59a6aed41ae02df0ce3fc889bfb7cfcb",
+      "src/fa_ik_pybind.cpp": "c2e29309cacde73f12d0d1b21c8e57377f8fcf8c932fe13e2bab39c9681ecf35",
+      "src/fa_ik_solver.cpp": "318127c8373674a0915ec8d1de913f7ddcd924d16a56240336d6bb47e6377a80"
+    }
+  },
+  "min_snap": {
+    "source_root": "/home/likunwei/humanoid_ws/src/min_snap",
+    "git_commit": "b1560aae2807f992b1e8fa6f1759527ee600e968",
+    "source_files": {
+      "package.xml": "5f6e5edee0f01e19575a474edf8567e4cebec866e34bae045dff0f4abcd9d772",
+      "README.md": "93268eddac64e47178ed01892a2f937574da6b96539639969fdb0508af4e7cab",
+      "CMakeLists.txt": "585162318163a0c6dbd4bcf5d9136b50abb89958fed76c5d6021b690c8fc6b86",
+      "include/min_snap/trajectory_recorder.hpp": "81fad4ad0b5f50fdf7006f5c3ce80e32cb0eec647987af4934d8c94cfa934da3",
+      "include/min_snap/fa_joint_mapping.hpp": "03c29284bcf1fe12c9c4a7e584e4627071b17009915ae8afdbe2986497783f75",
+      "include/min_snap/min_snap_planner.hpp": "590fc67720ec1887bc304a3df74d69a34dec2edd1e32dda208acb06921b14065",
+      "include/min_snap/min_snap_trajectory.hpp": "42d61a703b4aec7a1eda71d1542e3a5fb42be2a86dbeb9e85202c1d7c42813ce",
+      "msg/MinSnapTarget.msg": "6b42a255cb8ea38539d58df9469e97ef1af9738a0af1e10167da51b1c520bc6e",
+      "src/min_snap_node.cpp": "cc0ba5a2cc941cff123b58cdfeed30433e5ed27c296afa88cc0bebcf6115eb71",
+      "src/fa_joint_mapping.cpp": "97cc7dc1e71791c2ec607f3661be9c14aec867360b4cdc1ec466060b9176b987",
+      "src/min_snap_trajectory.cpp": "19f66a273948ef970d0c9dd6df3f26af14bb14f86e3559afd12971c56e8b97fc",
+      "src/trajectory_recorder.cpp": "e6435c8f4fcf738eb03892f0c0d50e3aaf8a3449bb4531dbbd0b5a69f26695e8",
+      "src/resume_publish_client.cpp": "02689b5155df18e6249ea2f70b1267522cc869ae9118934f8606ed700c857e2f",
+      "src/min_snap_planner.cpp": "15fac8fc3352f1c9d80fa5d1a779c1127c7ccfb870c0d9a0461920bad79c4d46",
+      "src/pause_publish_client.cpp": "0c986ff8ea5e2b2a75e0189fcc1404869de278d1369586988e9a628e886f2f07",
+      "config/min_snap.yaml": "ca961eb7af54c733cc677bcd31110c02cb14868f9cef84fba2ae52bbc7728c10"
+    }
+  },
+  "fa_model": {
+    "source_root": "/home/likunwei/dataCollection/beavr-bot/robots/fa_description",
+    "git_commit": "7f03b73ad3b88be3c8e6096f320b67d7ff39517f"
+  }
+}

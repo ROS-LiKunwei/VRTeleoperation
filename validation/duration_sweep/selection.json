@@ -1,0 +1,215 @@
+{
+  "criteria": "minimize maximum simultaneous TCP position error among zero-failure precision-qualified candidates with compute p99 below 5 ms; hardware unverified",
+  "best": {
+    "release_id": "fe9149ec349c2dcb52bc995fea1b5be6ac69b698747b3c8e864ce6e5492da11b",
+    "steps": 4000,
+    "realtime": false,
+    "elapsed_s": 0.981733137,
+    "ik_iterations": 35,
+    "trajectory_duration_s": 0.02,
+    "path_joint_amplitude_rad": 0.02,
+    "path_frequency_hz": 0.1,
+    "plant": "kinematic first-order 0.25 per 1 ms, not physical hardware",
+    "failed_steps": 0,
+    "compute_deadline_misses": 0,
+    "wakeup_deadline_misses": 0,
+    "compute_ms_p99": 0.415834998421,
+    "compute_ms_max": 0.605312998232,
+    "ik_ms_p99": 0.126167004055,
+    "planning_ms_p99": 0.28774299426,
+    "wakeup_ms_p99": 0,
+    "wakeup_ms_max": 0,
+    "position_max_m": [
+      0.000284015367984,
+      0.000335035782348
+    ],
+    "orientation_max_rad": [
+      0.000755992803484,
+      0.000814402141703
+    ],
+    "ik_position_max_m": [
+      4.25605311337e-05,
+      5.50099469959e-05
+    ],
+    "ik_orientation_max_rad": [
+      9.73962235695e-05,
+      9.76126295182e-05
+    ],
+    "position_rms_m": 0.000213830610799,
+    "velocity_max_rad_s": 0.0158459678633,
+    "acceleration_max_rad_s2": 1.34759223368,
+    "accuracy_pass": true,
+    "strict_all_deadlines_pass": true,
+    "returncode": 0
+  },
+  "candidates": [
+    {
+      "release_id": "fe9149ec349c2dcb52bc995fea1b5be6ac69b698747b3c8e864ce6e5492da11b",
+      "steps": 4000,
+      "realtime": false,
+      "elapsed_s": 0.981733137,
+      "ik_iterations": 35,
+      "trajectory_duration_s": 0.02,
+      "path_joint_amplitude_rad": 0.02,
+      "path_frequency_hz": 0.1,
+      "plant": "kinematic first-order 0.25 per 1 ms, not physical hardware",
+      "failed_steps": 0,
+      "compute_deadline_misses": 0,
+      "wakeup_deadline_misses": 0,
+      "compute_ms_p99": 0.415834998421,
+      "compute_ms_max": 0.605312998232,
+      "ik_ms_p99": 0.126167004055,
+      "planning_ms_p99": 0.28774299426,
+      "wakeup_ms_p99": 0,
+      "wakeup_ms_max": 0,
+      "position_max_m": [
+        0.000284015367984,
+        0.000335035782348
+      ],
+      "orientation_max_rad": [
+        0.000755992803484,
+        0.000814402141703
+      ],
+      "ik_position_max_m": [
+        4.25605311337e-05,
+        5.50099469959e-05
+      ],
+      "ik_orientation_max_rad": [
+        9.73962235695e-05,
+        9.76126295182e-05
+      ],
+      "position_rms_m": 0.000213830610799,
+      "velocity_max_rad_s": 0.0158459678633,
+      "acceleration_max_rad_s2": 1.34759223368,
+      "accuracy_pass": true,
+      "strict_all_deadlines_pass": true,
+      "returncode": 0
+    },
+    {
+      "release_id": "fe9149ec349c2dcb52bc995fea1b5be6ac69b698747b3c8e864ce6e5492da11b",
+      "steps": 4000,
+      "realtime": false,
+      "elapsed_s": 0.933747078,
+      "ik_iterations": 35,
+      "trajectory_duration_s": 0.04,
+      "path_joint_amplitude_rad": 0.02,
+      "path_frequency_hz": 0.1,
+      "plant": "kinematic first-order 0.25 per 1 ms, not physical hardware",
+      "failed_steps": 0,
+      "compute_deadline_misses": 0,
+      "wakeup_deadline_misses": 0,
+      "compute_ms_p99": 0.30304199754,
+      "compute_ms_max": 0.328540001647,
+      "ik_ms_p99": 0.0758739988669,
+      "planning_ms_p99": 0.22034200083,
+      "wakeup_ms_p99": 0,
+      "wakeup_ms_max": 0,
+      "position_max_m": [
+        0.000434373253249,
+        0.000483299999628
+      ],
+      "orientation_max_rad": [
+        0.00113776943672,
+        0.00117455030847
+      ],
+      "ik_position_max_m": [
+        4.25605311337e-05,
+        5.50099469959e-05
+      ],
+      "ik_orientation_max_rad": [
+        9.73962235695e-05,
+        9.76126295182e-05
+      ],
+      "position_rms_m": 0.00033217771578,
+      "velocity_max_rad_s": 0.0158303500396,
+      "acceleration_max_rad_s2": 0.557141908772,
+      "accuracy_pass": true,
+      "strict_all_deadlines_pass": true,
+      "returncode": 0
+    },
+    {
+      "release_id": "fe9149ec349c2dcb52bc995fea1b5be6ac69b698747b3c8e864ce6e5492da11b",
+      "steps": 4000,
+      "realtime": false,
+      "elapsed_s": 0.917320253,
+      "ik_iterations": 35,
+      "trajectory_duration_s": 0.06,
+      "path_joint_amplitude_rad": 0.02,
+      "path_frequency_hz": 0.1,
+      "plant": "kinematic first-order 0.25 per 1 ms, not physical hardware",
+      "failed_steps": 0,
+      "compute_deadline_misses": 0,
+      "wakeup_deadline_misses": 0,
+      "compute_ms_p99": 0.29978800012,
+      "compute_ms_max": 0.330483999278,
+      "ik_ms_p99": 0.0775900043664,
+      "planning_ms_p99": 0.220781003009,
+      "wakeup_ms_p99": 0,
+      "wakeup_ms_max": 0,
+      "position_max_m": [
+        0.00061180694239,
+        0.000682424547162
+      ],
+      "orientation_max_rad": [
+        0.00160228374795,
+        0.00166898151462
+      ],
+      "ik_position_max_m": [
+        4.25605311337e-05,
+        5.50099469959e-05
+      ],
+      "ik_orientation_max_rad": [
+        9.73962235695e-05,
+        9.76126295182e-05
+      ],
+      "position_rms_m": 0.000466602182857,
+      "velocity_max_rad_s": 0.0158273264694,
+      "acceleration_max_rad_s2": 0.355189949395,
+      "accuracy_pass": true,
+      "strict_all_deadlines_pass": true,
+      "returncode": 0
+    },
+    {
+      "release_id": "fe9149ec349c2dcb52bc995fea1b5be6ac69b698747b3c8e864ce6e5492da11b",
+      "steps": 4000,
+      "realtime": false,
+      "elapsed_s": 0.93464397,
+      "ik_iterations": 35,
+      "trajectory_duration_s": 0.08,
+      "path_joint_amplitude_rad": 0.02,
+      "path_frequency_hz": 0.1,
+      "plant": "kinematic first-order 0.25 per 1 ms, not physical hardware",
+      "failed_steps": 0,
+      "compute_deadline_misses": 0,
+      "wakeup_deadline_misses": 0,
+      "compute_ms_p99": 0.298429004033,
+      "compute_ms_max": 0.462970005174,
+      "ik_ms_p99": 0.0771919949329,
+      "planning_ms_p99": 0.218423003389,
+      "wakeup_ms_p99": 0,
+      "wakeup_ms_max": 0,
+      "position_max_m": [
+        0.000789918553889,
+        0.000882477778697
+      ],
+      "orientation_max_rad": [
+        0.00206853307576,
+        0.00216533774088
+      ],
+      "ik_position_max_m": [
+        4.25605311337e-05,
+        5.50099469959e-05
+      ],
+      "ik_orientation_max_rad": [
+        9.73962235695e-05,
+        9.76126295182e-05
+      ],
+      "position_rms_m": 0.000601447137157,
+      "velocity_max_rad_s": 0.0158264048862,
+      "acceleration_max_rad_s2": 0.26014554722,
+      "accuracy_pass": true,
+      "strict_all_deadlines_pass": true,
+      "returncode": 0
+    }
+  ]
+}
