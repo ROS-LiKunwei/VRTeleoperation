@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 """Create a relocatable source/model/config bundle and a compiled SHA-256 identity."""
 import argparse
 import hashlib
@@ -12,12 +12,12 @@ def sha(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def generate(source, output):
+def generate(source, output, runtime):
     output.mkdir(parents=True, exist_ok=True)
     origins = json.loads((source / "ORIGINS.json").read_text())
     groups = {"ik": ["vendor/ik_7dof"], "min_snap": ["vendor/min_snap"],
               "fa_model": ["models"], "config": ["config"],
-              "teleop": ["include", "src", "msg", "tools", "tests", "CMakeLists.txt", "package.xml", "ORIGINS.json"]}
+              "teleop": ["include", "src", "msg", "tools", "tests", "cmake", "launch", "CMakeLists.txt", "package.xml", "ORIGINS.json"]}
     files, components = {}, {}
     for group, roots in groups.items():
         names = []
@@ -35,9 +35,11 @@ def generate(source, output):
             shutil.copyfile(path, dest)
         files.update(entries)
         source_name = {"ik": "ik_7dof", "min_snap": "min_snap", "fa_model": "fa_model"}.get(group)
-        components[group] = {"version": "1.0.0", "sha256": sha(json.dumps(entries, sort_keys=True).encode()),
+        components[group] = {"version": "1.1.0" if group in {"teleop", "config"} else "1.0.0", "sha256": sha(json.dumps(entries, sort_keys=True).encode()),
                              "origin_commit": origins.get(source_name, {}).get("git_commit", "")}
-    metadata = {"schema": 1, "version": "1.0.0", "components": components, "files": files}
+    engine = json.loads(runtime.read_text())
+    components["mujoco_runtime"] = {"version": engine["version"], "sha256": engine["library_sha256"], "origin_commit": ""}
+    metadata = {"schema": 2, "version": "1.1.0", "components": components, "files": files, "mujoco_runtime": engine}
     raw = (json.dumps(metadata, sort_keys=True, indent=2) + "\n").encode()
     release_id = sha(raw)
     (output / "release.json").write_bytes(raw)
@@ -48,7 +50,9 @@ def generate(source, output):
         '#pragma once\nnamespace fa {\n'
         f'inline constexpr const char* kReleaseId = "{release_id}";\n'
         f'inline constexpr const char* kFileListSha = "{file_list_sha}";\n'
-        'inline constexpr const char* kVersion = "1.0.0";\n}\n')
+        'inline constexpr const char* kVersion = "1.1.0";\n'
+        f'inline constexpr const char* kMujocoLibrarySha = "{engine["library_sha256"]}";\n'
+        f'inline constexpr const char* kMujocoVersion = "{engine["version"]}";\n}}\n')
     print("FA release:", release_id)
 
 
@@ -56,5 +60,6 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--source", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
+    p.add_argument("--runtime", type=Path, required=True)
     args = p.parse_args()
-    generate(args.source.resolve(), args.output.resolve())
+    generate(args.source.resolve(), args.output.resolve(), args.runtime.resolve())

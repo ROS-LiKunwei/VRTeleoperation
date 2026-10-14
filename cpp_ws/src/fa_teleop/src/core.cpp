@@ -6,6 +6,7 @@
 #include <ctime>
 #include <sstream>
 #include <stdexcept>
+#include <type_traits>
 #include <yaml-cpp/yaml.h>
 
 namespace fa {
@@ -21,74 +22,55 @@ Config Config::load(const std::string &path) {
   Config c;
   c.profile_sha = file_sha256(path);
   const auto n = YAML::LoadFile(path);
-#define READ(key, member)                                                      \
-  if (n[key])                                                                  \
-    c.member = n[key].as<decltype(c.member)>();
-  READ("control_hz", control_hz)
-  READ("sample_hz", sample_hz)
-  READ("input_timeout_s", input_timeout)
-  READ("feedback_timeout_s", feedback_timeout) READ(
-      "source_max_age_s",
-      source_max_age) READ("timestamp_skew_s",
-                           timestamp_skew) READ("require_source_stamp",
-                                                require_source_stamp)
-      READ("calibration_enabled", calibration_enabled) READ(
-          "live_enabled", live_enabled) READ("ik_iterations", ik_iterations)
-          READ("ik_budget_ms", ik_budget_ms) READ("ik_eps", ik_eps) READ(
-              "ik_position_m", ik_position) READ("ik_orientation_rad",
-                                                 ik_orientation)
-              READ("max_joint_jump_rad", max_joint_jump) READ(
-                  "max_tracking_error_rad",
-                  max_tracking_error) READ("velocity_limit_rad_s",
-                                           velocity_limit)
-                  READ("acceleration_limit_rad_s2", acceleration_limit) READ(
-                      "trajectory_duration_s",
-                      duration) READ("plan_lead_s",
-                                     plan_lead) READ("target_timeout_s",
-                                                     target_timeout)
-                      READ("translation_scale", translation_scale) READ(
-                          "initialization_duration_s",
-                          initialization_duration) READ("initialization_"
-                                                        "velocity_rad_s",
-                                                        initialization_velocity)
-                          READ("calibration_dwell_s", calibration_dwell) READ(
-                              "calibration_stability_m",
-                              calibration_stability) READ("calibration_min_"
-                                                          "motion_m",
-                                                          calibration_min_motion)
-                              READ(
-                                  "calibration_max_motion_m",
-                                  calibration_max_motion) READ("calibration_"
-                                                               "return_m",
-                                                               calibration_return)
-                                  READ("origin_jump_m", origin_jump_m) READ(
-                                      "origin_jump_rad",
-                                      origin_jump_rad) READ("constraint_"
-                                                            "samples",
-                                                            constraint_samples)
-                                      READ("duration_search_iterations",
-                                           duration_search_iterations)
-                                          READ("snap_weight", snap_weight) READ(
-                                              "max_plan_duration_s",
-                                              max_plan_duration) READ("bind_"
-                                                                      "address",
-                                                                      bind_address)
-                                              READ("right_port", right_port) READ(
-                                                  "left_port",
-                                                  left_port) READ("event_port",
-                                                                  event_port)
-                                                  READ("button_port",
-                                                       button_port)
-                                                      READ("prompt_port",
-                                                           prompt_port)
-                                                          READ("hand_open_"
-                                                               "command",
-                                                               hand_open)
-                                                              READ("hand_close_"
-                                                                   "command",
-                                                                   hand_close)
-#undef READ
-                                                                  c.validate();
+  auto read = [&](const char *key, auto &value) {
+    if (n[key])
+      value = n[key].as<std::decay_t<decltype(value)>>();
+  };
+  read("control_hz", c.control_hz);
+  read("sample_hz", c.sample_hz);
+  read("input_timeout_s", c.input_timeout);
+  read("feedback_timeout_s", c.feedback_timeout);
+  read("source_max_age_s", c.source_max_age);
+  read("timestamp_skew_s", c.timestamp_skew);
+  read("require_source_stamp", c.require_source_stamp);
+  read("calibration_enabled", c.calibration_enabled);
+  read("live_enabled", c.live_enabled);
+  read("ik_iterations", c.ik_iterations);
+  read("ik_budget_ms", c.ik_budget_ms);
+  read("ik_eps", c.ik_eps);
+  read("ik_position_m", c.ik_position);
+  read("ik_orientation_rad", c.ik_orientation);
+  read("max_joint_jump_rad", c.max_joint_jump);
+  read("max_tracking_error_rad", c.max_tracking_error);
+  read("velocity_limit_rad_s", c.velocity_limit);
+  read("acceleration_limit_rad_s2", c.acceleration_limit);
+  read("trajectory_duration_s", c.duration);
+  read("plan_lead_s", c.plan_lead);
+  read("target_timeout_s", c.target_timeout);
+  read("translation_scale", c.translation_scale);
+  read("initialization_duration_s", c.initialization_duration);
+  read("initialization_velocity_rad_s", c.initialization_velocity);
+  read("initialization_plan_lead_s", c.initialization_plan_lead);
+  read("calibration_dwell_s", c.calibration_dwell);
+  read("calibration_stability_m", c.calibration_stability);
+  read("calibration_min_motion_m", c.calibration_min_motion);
+  read("calibration_max_motion_m", c.calibration_max_motion);
+  read("calibration_return_m", c.calibration_return);
+  read("origin_jump_m", c.origin_jump_m);
+  read("origin_jump_rad", c.origin_jump_rad);
+  read("constraint_samples", c.constraint_samples);
+  read("duration_search_iterations", c.duration_search_iterations);
+  read("snap_weight", c.snap_weight);
+  read("max_plan_duration_s", c.max_plan_duration);
+  read("bind_address", c.bind_address);
+  read("right_port", c.right_port);
+  read("left_port", c.left_port);
+  read("event_port", c.event_port);
+  read("button_port", c.button_port);
+  read("prompt_port", c.prompt_port);
+  read("hand_open_command", c.hand_open);
+  read("hand_close_command", c.hand_close);
+  c.validate();
   return c;
 }
 void Config::validate() const {
@@ -112,6 +94,7 @@ void Config::validate() const {
                    translation_scale,
                    initialization_duration,
                    initialization_velocity,
+                   initialization_plan_lead,
                    calibration_dwell,
                    calibration_stability,
                    calibration_min_motion,
@@ -129,7 +112,8 @@ void Config::validate() const {
       duration_search_iterations < 1 || duration_search_iterations > 20 ||
       !std::isfinite(snap_weight) || snap_weight < 0 || snap_weight > 1 ||
       calibration_min_motion >= calibration_max_motion ||
-      plan_lead >= target_timeout)
+      plan_lead >= target_timeout || initialization_plan_lead < plan_lead ||
+      initialization_plan_lead > 0.25)
     throw std::invalid_argument(
         "Configuration violates FA timing/precision contract");
   std::array<int, 5> ports{right_port, left_port, event_port, button_port,

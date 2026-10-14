@@ -1,11 +1,11 @@
 {
   "schema": 1,
-  "release_id": "fe9149ec349c2dcb52bc995fea1b5be6ac69b698747b3c8e864ce6e5492da11b",
+  "release_id": "943f80ce5bbe51390bb98797a75a398e31f55d649d2dd03845c8cb4e2bc8d107",
   "components": {
     "config": {
       "origin_commit": "",
-      "sha256": "2ee70021367deaa4d3280135514c2ee409b6f6d6d33bd9816bb8c7eec27e6d0a",
-      "version": "1.0.0"
+      "sha256": "e08b171bde825c3c23d41dcc4df210f69ccf1c0e3c766dd247e7293cb28ea55c",
+      "version": "1.1.0"
     },
     "fa_model": {
       "origin_commit": "7f03b73ad3b88be3c8e6096f320b67d7ff39517f",
@@ -22,20 +22,27 @@
       "sha256": "70c763e3fc288f2f561329488ada5330cecdc6a143abc70100dbc87ec112bf76",
       "version": "1.0.0"
     },
+    "mujoco_runtime": {
+      "origin_commit": "",
+      "sha256": "310954fe9571d4a61a407b2345ab0142c2664549857e9a7a4eab37f4e93be27c",
+      "version": "3.8.0"
+    },
     "teleop": {
       "origin_commit": "",
-      "sha256": "648d899803392ae1cf69f34abcc3e03e9adeecf0dfc100060795d03f27e2b50c",
-      "version": "1.0.0"
+      "sha256": "a9e4596ff88a46a921cfc7ad8e77a6690a86ca5352ec4093b9655f91ad13a69a",
+      "version": "1.1.0"
     }
   },
   "platform": "Linux-6.8.0-138-generic-x86_64-with-glibc2.35",
   "machine": "x86_64",
   "binaries": {
-    "lib/fa_teleop/fa_benchmark": "dbc97465aa6bb50d8d9539b888687075a966637749d2c86eab5f307a468c8a02",
-    "lib/fa_teleop/fa_core_tests": "52a22e7dbaaddd3d29feb2cc0ebfab4dfe3dab2e6a7e2811c85bc160d256ced3",
-    "lib/fa_teleop/fa_min_snap_node": "1eb7378bdba0145eb3c89509acaf4aff3f9f41c8c8ea413c51dc4fc9d2a5291f",
-    "lib/fa_teleop/fa_mock_robot": "fef09b862335d460b4a338b2ad4a16b92559765fac33f6036f507d9a12eaea82",
-    "lib/fa_teleop/fa_teleop_node": "35486873158d922dad59d95dc17220c1ee9cbb8b4d53cd68d653e1e273d33c86"
+    "lib/fa_teleop/fa_benchmark": "9c07df469d0bd65c916877148a7b4cfdc4fee6f522ec39bdd33a229d82526ffe",
+    "lib/fa_teleop/fa_core_tests": "b04411b772195933bce58cf9f81c818c3476544238b69e57893f6ac4b32a0a83",
+    "lib/fa_teleop/fa_min_snap_node": "f8eaa482ee3fb43a13eee3ea316c307d180a0150f4a273c097da3d080cf300b9",
+    "lib/fa_teleop/fa_mock_robot": "31e7d4c3016bd2890f3a1a72526175bbecb090492ab6330545409463ed5cda33",
+    "lib/fa_teleop/fa_mujoco_node": "336855d9b30e304e6d23d9ef7459c24ff3c6be7dd83861a51cab384ba492c11e",
+    "lib/fa_teleop/fa_mujoco_viewer": "d33b6b89b8d032635a48594d98ce22fc870c5ebe108df070a2fc3234e883b7c1",
+    "lib/fa_teleop/fa_teleop_node": "3090912461cd8a57ce0a9f2787d108dba3b5f243e53dc5ae5ba0ceab7b0bca6b"
   },
   "runtime_dependencies_sha256": {
     "/opt/ros/humble/lib/x86_64-linux-gnu/libpinocchio_parsers.so.3.9.0": "639ca984f1bffd4a06f9238c8cd6c151901ab05de7a284c815f463eef06f364b",
@@ -86,14 +93,21 @@
     "/opt/ros/humble/lib/librosidl_typesupport_c.so": "f413f19596682c3d3c5debccaaabd8f00fe9153b5e6c2c0becae7d583fa16693",
     "/opt/ros/humble/lib/libbuiltin_interfaces__rosidl_generator_c.so": "2177b084cf7bdb1911522bcb23db6ba829d699060ba7008d23853c80cc34a808",
     "/lib/x86_64-linux-gnu/libfmt.so.8": "d463bedd51d449b2346d329fad8080e0900120ad0aeab8bf93e325b6cff4a587",
-    "/lib/x86_64-linux-gnu/libzmq.so.5": "540a8defe7b1e1494ac553843a2bea88eaf5426bf367782b5ca6a5a01360989f",
+    "/home/likunwei/VRTeleoperation-cpp/cpp_ws/install/fa_teleop/lib/fa_teleop/runtime/libmujoco.so.3.8.0": "310954fe9571d4a61a407b2345ab0142c2664549857e9a7a4eab37f4e93be27c",
+    "/lib/x86_64-linux-gnu/libdl.so.2": "3eaaa4aefd9c28f3867c96a427c3cbec9191cb61c4c9d0a2cb4a765d66064499",
+    "/lib/x86_64-linux-gnu/libpthread.so.0": "fbed9505adacada2abb37c6b43be2df6de81e742712c6025694ba48de62c7e78",
+    "/lib/x86_64-linux-gnu/libglfw.so.3": "dd26d5740abe42d22bd086c5ec60233e22f95d15b0aa12ad5ab37ce956e6efa9",
+    "/lib/x86_64-linux-gnu/libX11.so.6": "34b7869a1ba702462a1aa862fc0afe5b2608a7d5a09552c07796802fcf0c684b",
+    "/lib/x86_64-linux-gnu/libxcb.so.1": "aabc489094abd96c876d1c989a2da8a8aa6d28f5a676c4a84dd6d0a0c34aec5d",
+    "/lib/x86_64-linux-gnu/libXau.so.6": "98343a8324ea62ed75a13c923ed5dea96b7a8ad41aeba9f18126c4cbf7178064",
+    "/lib/x86_64-linux-gnu/libXdmcp.so.6": "1dc3ff1269a5ede69ef9a8ec2436d73fccbcd10531055b359292e0bde4e29b46",
     "/lib/x86_64-linux-gnu/libbsd.so.0": "e4ad21c203d8e8b9b7f49071311339af6b438026e1ad236403e3b379b022f23d",
+    "/lib/x86_64-linux-gnu/libmd.so.0": "bb376813876bb214535bbbdac70f2c0c4b00baecb81557dab78a79518248df06",
+    "/lib/x86_64-linux-gnu/libzmq.so.5": "540a8defe7b1e1494ac553843a2bea88eaf5426bf367782b5ca6a5a01360989f",
     "/lib/x86_64-linux-gnu/libsodium.so.23": "f1e78ef8deb65b13d62873fab71546ccab06c77a0115891e55ce8fb108518f96",
     "/lib/x86_64-linux-gnu/libpgm-5.3.so.0": "fcc27728d8db55fff51c782a665f37f1e5c54f3a37872a272688800e962e0dda",
     "/lib/x86_64-linux-gnu/libnorm.so.1": "cc5c631eb267f0159baee696a3fead708397ccc095ddbcde434f678582cb0481",
     "/lib/x86_64-linux-gnu/libgssapi_krb5.so.2": "e367a86cae4e1e81d9bba594a9daea3b90eb50fadb62bb45e38a322184484867",
-    "/lib/x86_64-linux-gnu/libmd.so.0": "bb376813876bb214535bbbdac70f2c0c4b00baecb81557dab78a79518248df06",
-    "/lib/x86_64-linux-gnu/libpthread.so.0": "fbed9505adacada2abb37c6b43be2df6de81e742712c6025694ba48de62c7e78",
     "/lib/x86_64-linux-gnu/libkrb5.so.3": "9386cfdeb2f894869cdd0190b4f110a65ec0c257ac50ddefaefd6cbaeaab3c35",
     "/lib/x86_64-linux-gnu/libk5crypto.so.3": "c62a2a983e0d9c1de76ab2f4cf21a4d81da007af9e0351b8c04740459d231d3f",
     "/lib/x86_64-linux-gnu/libcom_err.so.2": "f196091d8ec9790b4cd203ecdb0eab3b242d35ae8625ead7962d0a944a8fdfa5",

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 """Optional recording-only compatibility bridge; never issues robot commands.
 
 Wire format matches the existing fa_left/fa_right BeaVR state dictionaries.

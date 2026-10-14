@@ -54,3 +54,4 @@ __pycache__/
 
 # 本机运行产物和场景参考文件
 /artifacts/
+/validation/*.ppm

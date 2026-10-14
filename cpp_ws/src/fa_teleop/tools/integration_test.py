@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 """Run actual C++ nodes on a local-only ROS domain and isolated namespace."""
 import argparse
 import datetime
@@ -32,6 +32,7 @@ def main():
     args.output.mkdir(parents=True, exist_ok=True)
     release_id = hashlib.sha256((args.bundle / "release.json").read_bytes()).hexdigest()
     release_id += ":" + hashlib.sha256((args.bundle / "config/simulation_test.yaml").read_bytes()).hexdigest()
+    release_id += ":real"
     processes, logs = [], []
 
     def start(executable, extra=()):

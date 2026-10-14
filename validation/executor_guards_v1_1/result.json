@@ -1,0 +1,9 @@
+{
+  "passed": true,
+  "feedback_loss_latches": true,
+  "feedback_recovery_does_not_resume": true,
+  "profile_mismatch_rejected": true,
+  "duplicate_output_publisher_rejected": true,
+  "physical_hardware": false,
+  "release_id": "943f80ce5bbe51390bb98797a75a398e31f55d649d2dd03845c8cb4e2bc8d107"
+}

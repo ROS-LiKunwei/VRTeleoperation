@@ -80,6 +80,7 @@ private:
 };
 struct Config {
   std::string profile_sha;
+  std::string control_backend{"real"};
   double control_hz{200}, sample_hz{1000}, input_timeout{0.1},
       feedback_timeout{0.05};
   double source_max_age{0.15}, timestamp_skew{0.05};
@@ -93,6 +94,7 @@ struct Config {
   double duration{0.04}, plan_lead{0.004}, target_timeout{0.075},
       translation_scale{1};
   double initialization_duration{5}, initialization_velocity{0.3};
+  double initialization_plan_lead{0.05};
   double calibration_dwell{0.4}, calibration_stability{0.02};
   double calibration_min_motion{0.06}, calibration_max_motion{0.6};
   double calibration_return{0.04}, calibration_max_dot{0.35};

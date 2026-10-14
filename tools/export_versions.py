@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 """Human-readable component versions derived from the installed, compiled manifest."""
 import argparse
 import hashlib

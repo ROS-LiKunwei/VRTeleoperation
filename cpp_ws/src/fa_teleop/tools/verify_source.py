@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 """Read-only verification that original protected source files did not change."""
 import argparse
 import hashlib

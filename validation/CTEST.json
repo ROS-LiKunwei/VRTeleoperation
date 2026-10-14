@@ -1,11 +1,13 @@
 {
-  "groups_passed": 4,
+  "groups_passed": 6,
   "groups_failed": 0,
   "core_contract_checks": 141,
   "groups": [
     "core_contracts",
     "numerical_regression",
     "version_lock",
-    "python_mapping_parity"
+    "python_mapping_parity",
+    "mujoco_model_contracts",
+    "launch_backend_contracts"
   ]
 }

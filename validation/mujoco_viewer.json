@@ -1,0 +1,13 @@
+{
+  "passed": true,
+  "release_id": "943f80ce5bbe51390bb98797a75a398e31f55d649d2dd03845c8cb4e2bc8d107",
+  "frames": 10,
+  "visible": false,
+  "renderer": "MuJoCo C API / GLFW / OpenGL",
+  "image_size": [
+    1100,
+    850
+  ],
+  "preview_sha256": "e42de5eea743e78fcfd71062e9da974a0cc0df2ee52eae7e2c6297cc0aad9dfe",
+  "physical_hardware": false
+}

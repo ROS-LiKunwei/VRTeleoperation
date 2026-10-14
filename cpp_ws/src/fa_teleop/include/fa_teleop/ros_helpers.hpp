@@ -24,7 +24,15 @@ inline Config node_config(rclcpp::Node &node, const std::string &bundle) {
   const auto manifest = YAML::LoadFile(bundle + "/release.json");
   if (!manifest["files"][relative])
     throw std::runtime_error("Profile is not part of the compiled release");
-  return Config::load(bundle + "/" + relative);
+  Config config = Config::load(bundle + "/" + relative);
+  config.control_backend =
+      node.declare_parameter<std::string>("control_backend", "real");
+  if (config.control_backend != "real" && config.control_backend != "mujoco")
+    throw std::runtime_error("control_backend must be real or mujoco");
+  if (config.control_backend == "mujoco" &&
+      std::string(node.get_namespace()) == "/")
+    throw std::runtime_error("MuJoCo mode requires an isolated ROS namespace");
+  return config;
 }
 inline bool receive_feedback(const sensor_msgs::msg::JointState &msg,
                              Feedback &cached) {

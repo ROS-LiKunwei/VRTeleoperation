@@ -27,6 +27,7 @@ snap_weight: 0.85
 translation_scale: 1.0
 initialization_duration_s: 5.0
 initialization_velocity_rad_s: 0.3
+initialization_plan_lead_s: 0.05
 calibration_dwell_s: 0.4
 calibration_stability_m: 0.02
 calibration_min_motion_m: 0.06

@@ -1,0 +1,32 @@
+# A Python wheel can supply the C SDK, but the simulation runtime is entirely C++.
+set(FA_MUJOCO_ROOT "$ENV{MUJOCO_ROOT}" CACHE PATH "MuJoCo C SDK root (include/ and libmujoco)")
+if(NOT FA_MUJOCO_ROOT)
+  execute_process(COMMAND ${Python3_EXECUTABLE} -c
+    "import importlib.util,pathlib; s=importlib.util.find_spec('mujoco'); print(pathlib.Path(s.origin).parent if s else '')"
+    OUTPUT_VARIABLE FA_MUJOCO_ROOT OUTPUT_STRIP_TRAILING_WHITESPACE)
+endif()
+find_path(FA_MUJOCO_INCLUDE_DIR mujoco/mujoco.h HINTS "${FA_MUJOCO_ROOT}/include")
+find_library(FA_MUJOCO_LIBRARY NAMES mujoco HINTS "${FA_MUJOCO_ROOT}" "${FA_MUJOCO_ROOT}/lib")
+if(NOT FA_MUJOCO_LIBRARY)
+  file(GLOB MUJOCO_VERSIONED_LIBS "${FA_MUJOCO_ROOT}/libmujoco.so.*" "${FA_MUJOCO_ROOT}/lib/libmujoco.so.*")
+  list(SORT MUJOCO_VERSIONED_LIBS)
+  if(MUJOCO_VERSIONED_LIBS)
+    list(GET MUJOCO_VERSIONED_LIBS 0 FA_MUJOCO_LIBRARY)
+  endif()
+endif()
+if(NOT FA_MUJOCO_LIBRARY OR NOT FA_MUJOCO_INCLUDE_DIR)
+  message(FATAL_ERROR "MuJoCo C SDK not found. Set MUJOCO_ROOT or install mujoco==3.8.0 for ${Python3_EXECUTABLE}.")
+endif()
+file(SHA256 "${FA_MUJOCO_LIBRARY}" FA_MUJOCO_SHA256)
+file(STRINGS "${FA_MUJOCO_INCLUDE_DIR}/mujoco/mujoco.h" MUJOCO_VERSION_LINE REGEX "^#define mjVERSION_HEADER [0-9]+")
+string(REGEX REPLACE ".*mjVERSION_HEADER ([0-9]+).*" "\\1" FA_MUJOCO_HEADER_VERSION "${MUJOCO_VERSION_LINE}")
+if(NOT FA_MUJOCO_HEADER_VERSION STREQUAL "3008000")
+  message(FATAL_ERROR "This release is validated against MuJoCo 3.8.0 (header 3008000), found ${FA_MUJOCO_HEADER_VERSION}")
+endif()
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/mujoco_runtime.json"
+  "{\"version\":\"3.8.0\",\"header_version\":${FA_MUJOCO_HEADER_VERSION},\"library_sha256\":\"${FA_MUJOCO_SHA256}\"}\n")
+get_filename_component(FA_MUJOCO_FILENAME "${FA_MUJOCO_LIBRARY}" NAME)
+add_library(fa_mujoco_runtime SHARED IMPORTED)
+set_target_properties(fa_mujoco_runtime PROPERTIES IMPORTED_LOCATION "${FA_MUJOCO_LIBRARY}"
+  INTERFACE_INCLUDE_DIRECTORIES "${FA_MUJOCO_INCLUDE_DIR}")
+message(STATUS "MuJoCo C SDK: ${FA_MUJOCO_LIBRARY} (locked SHA ${FA_MUJOCO_SHA256})")

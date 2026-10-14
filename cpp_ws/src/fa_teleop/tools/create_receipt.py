@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 """Record built binaries and resolved runtime dependencies after a successful build."""
 import argparse
 import hashlib

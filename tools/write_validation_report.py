@@ -1,95 +1,129 @@
-#!/usr/bin/env python3
-"""Produce the reviewable report from final-machine-readable test results."""
+#!/usr/bin/python3
+"""Generate the v1.1 report from evidence belonging to the current release."""
 import json
 from pathlib import Path
 
 root = Path(__file__).resolve().parents[1]
-load = lambda name: json.loads((root / name).read_text())
+
+
+def load(name):
+    return json.loads((root / name).read_text())
+
+
 versions = load("provenance/COMPONENT_VERSIONS.json")
-realtime = load("validation/realtime_600s.json")
-sweep = load("validation/duration_sweep/selection.json")
-integration = load("validation/integration_final/result.json")
-guards = load("validation/executor_guards/result.json")
+model = load("validation/mujoco_model.json")
+integration = load("validation/mujoco_integration/result.json")
+guards = load("validation/executor_guards_v1_1/result.json")
+sim_guards = load("validation/mujoco_guards/result.json")
+runtime = load("validation/mujoco_runtime_lock.json")
+viewer = load("validation/mujoco_viewer.json")
 ctest = load("validation/CTEST.json")
 source = load("validation/SOURCE_INTEGRITY.json")
-assert realtime["release_id"] == versions["release_id"] == guards["release_id"] == integration["teleop"]["release_id"]
-rows = "\n".join(f"| {name} | `{c['full_version']}` | `{c['origin_commit'] or 'new implementation'}` |" for name, c in versions["components"].items())
-experiments = "\n".join(f"| {r['trajectory_duration_s']*1000:.0f} | {r['position_max_m'][0]*1000:.4f} | {r['position_max_m'][1]*1000:.4f} | {max(r['orientation_max_rad']):.6f} | {r['compute_ms_p99']:.4f} | {r['failed_steps']} |" for r in sweep["candidates"])
-strict = "通过" if realtime["strict_all_deadlines_pass"] else "未通过；不能声称全部周期满足硬截止时间"
-report = f"""# FA C++ 重构测试与推荐配置
+release = versions["release_id"]
+assert all(item["release_id"] == release for item in [model, integration, guards, sim_guards, runtime, viewer])
+assert all(item["passed"] for item in [model, integration, guards, sim_guards, runtime, viewer])
+assert ctest["groups_failed"] == 0 and not source["changed_files"]
+rows = "\n".join(f"| {name} | `{c['full_version']}` | `{c['origin_commit'] or 'new implementation / SDK'}` |" for name, c in versions["components"].items())
+report = f"""# FA C++ v1.1：MuJoCo 仿真、模式切换与验证
 
-## 结论及适用范围
+## 结论与运行条件
 
-推荐 `precision_200hz` 配置：200 Hz 控制、1000 Hz 轨迹采样、20 ms 期望轨迹时长、IK 位置/姿态接受门限 0.2 mm / 0.002 rad。
+统一入口支持 `control_backend:=mujoco` 与 `control_backend:=real`。MuJoCo 使用原生 C API，控制、IK、MinSnap、模型与真机模式共用；图形窗口独立运行。原 `/home/likunwei/dataCollection` 的 {source['verified_files']} 个受保护文件复核通过，变化文件数为零。
 
-在下述简化运动学模型和低速可达轨迹条件下，最终构建的左右臂最大位置误差分别为 **{realtime['position_max_m'][0]*1000:.4f} mm / {realtime['position_max_m'][1]*1000:.4f} mm**，最大姿态误差分别为 **{realtime['orientation_max_rad'][0]:.6f} rad / {realtime['orientation_max_rad'][1]:.6f} rad**，满足模型内 1 mm / 0.01 rad 门限。
+推荐继续使用 `precision_200hz`：200 Hz 控制、1000 Hz 采样、20 ms 跟踪轨迹，IK 接受门限 0.2 mm / 0.002 rad，速度上限 0.5 rad/s、加速度上限 3 rad/s²。跟踪规划预留 4 ms；初始化长轨迹独立预留 50 ms，避免初始化的完整约束检查超过跟踪预算。
 
-10 分钟实时基准的全部截止时间判定：**{strict}**。没有进行物理机器人、外部 TCP 测量、PICO 新传感器帧率或 Android APK 的验证。这里的“推荐”指已测试候选中满足模型内精度条件且最大位置误差最小的配置，不代表所有工作空间、速度和负载下的全局最优。
+本次 20 s 低速 MuJoCo 模型测试中，左右臂最大位置误差为 **{model['position_max_m'][0]*1000:.4f} / {model['position_max_m'][1]*1000:.4f} mm**，最大姿态误差为 **{model['orientation_max_rad'][0]:.7f} / {model['orientation_max_rad'][1]:.7f} rad**，满足该条件下的 **1 mm / 0.01 rad** 门限。
 
-## 最终版本
+公开 launch 的 30 s 跟踪段测得控制循环 **{integration['approximate_control_hz']:.3f} Hz**，观察到 MuJoCo 反馈 **{integration['observed_feedback_hz']:.3f} Hz**。测试通过不等于硬实时截止时间或物理 TCP 精度承诺；本次没有启动真机或重跑 v1.0 的 10 分钟基准。
 
-完整 release ID：`{versions['release_id']}`。
+## 架构与切换命令
+
+```text
+PICO → 200 Hz C++ 映射/IK → 带版本 JointTarget
+     → 独立 MinSnap 规划 → 1000 Hz 采样
+         ├─ real → 已有 FA 驱动 → joint_states
+         └─ mujoco → qpos / mj_forward → joint_states
+                                            └→ 独立 30 FPS GLFW 窗口
+```
+
+```bash
+source /opt/ros/humble/setup.bash
+source /home/likunwei/VRTeleoperation-cpp/cpp_ws/install/setup.bash
+
+# MuJoCo，默认 /fa_mujoco 命名空间和可视化窗口
+ros2 launch fa_teleop teleop.launch.py control_backend:=mujoco enable_motion:=true
+
+# 真机，默认根命名空间，使用已有硬件驱动
+ros2 launch fa_teleop teleop.launch.py control_backend:=real enable_motion:=true
+```
+
+切换模式需停止当前 launch 后重新启动。无窗口加 `render:=false`。两种模式均需 PICO 显式 High 使能、初始化和轴标定；默认 `enable_motion:=false`。仿真禁止根命名空间。真机模式仅启动控制与执行器，不会启动硬件驱动。
+
+MuJoCo 执行最终 16 维关节样本，不重复 IK 或插值。与原 Python 相同，这是固定基座运动学镜像：设置 `qpos` 后 `mj_forward`，没有接触动力学；手指仅显示开合命令。C API 渲染流程参考 [MuJoCo 官方可视化文档](https://mujoco.readthedocs.io/en/stable/programming/visualization.html)。
+
+## 严格对应的版本
+
+完整 release ID：`{release}`。
 
 | 组件 | 完整版本 | 来源提交 |
 |---|---|---|
 {rows}
 
-FA 模型组同时包含 URDF、SRDF 和必要网格；文件级 SHA 在安装包 `bundle/release.json` 中。SRDF 来自本机 `humanoid_ws/src/fa_moveit2_config`，其所在仓库来源提交为 `b1560aae2807f992b1e8fa6f1759527ee600e968`。IK 源码增加迭代边界的协作式截止时间；MinSnap 原数学内核保留，执行线程和版本接口在新代码中实现。
+bundle 逐文件锁定源码、启动文件、配置、URDF/SRDF 和网格，编译嵌入 release ID。IK、MinSnap 静态链接；MuJoCo 校验头文件版本、实际加载共享库版本与 SHA，C 运行库随安装包复制。节点身份为 `release SHA:profile SHA:real或mujoco`，阻止组件混用。
 
-构建产物与动态依赖的实际 SHA 见 [BUILD_RECEIPT.json](../validation/BUILD_RECEIPT.json)。组件版本清单见 [COMPONENT_VERSIONS.json](../provenance/COMPONENT_VERSIONS.json)。
+构建产物与动态依赖见 [BUILD_RECEIPT.json](../validation/BUILD_RECEIPT.json)，完整组件清单见 [COMPONENT_VERSIONS.json](../provenance/COMPONENT_VERSIONS.json)。
 
-## 自动化验证
+## 模型内精度测试
 
-- CTest：{ctest['groups_passed']} 组通过，{ctest['groups_failed']} 组失败；核心合约包含 {ctest['core_contract_checks']} 项检查。
-- 原 Python 双手坐标系及 base-frame 位姿映射与 C++ 对照：`1e-12` 容差通过。
-- 安装 bundle 移动到另一目录后仍可验证；独立篡改 IK、MinSnap、模型、配置、release 清单或文件清单均拒绝。
-- ROS 端到端：显式初始化、跟踪、暂停、恢复、VR 断流暂停与算法版本故障锁存通过。
-- 执行器专项：反馈失效锁存、反馈恢复不自动续跑、不同配置拒绝、重复上身命令发布者拒绝均通过。
-- 原目录完整性：{source['verified_files']} 个受保护文件复核，变化文件数 {len(source['changed_files'])}。
+使用锁定 FA URDF，保留 pelvis 与左右 TCP。200 组关节姿态对照 MuJoCo 与 Pinocchio FK，位置最大差 **{model['fk_position_max_m']:.3e} m**，姿态最大差 **{model['fk_orientation_max_rad']:.3e} rad**。16 关节按名称映射，包含颈部；越界与 NaN 输入拒绝并保持上一状态。
 
-本次隔离 ROS 端到端测试共观察到 {integration['commands']} 条上身命令；最大相邻关节输出变化为 {integration['max_step_rad']:.8f} rad。控制线程报告最大计算耗时 {integration['teleop']['max_work_ms']:.4f} ms，最大唤醒延迟 {integration['teleop']['max_wakeup_ms']:.4f} ms，计算超时 {integration['teleop']['compute_overruns']} 次。
+数值测试共 {model['steps']} 个 5 ms 周期，覆盖 20 s 模拟时间；14 个臂关节构造幅度 0.02 rad、频率 0.1 Hz 的可达正弦目标，腰部固定。每周期执行双臂 IK、MinSnap 规划及五次 1 ms MuJoCo 更新，比较该周期目标与周期末实际 TCP；没有通过时间平移消除延迟。
 
-## 单因素配置比较
-
-固定 IK 门限、迭代预算、速度/加速度约束和模型，仅调整轨迹期望时长；每组运行 4000 步，覆盖 20 s 模拟时间。
-
-| 轨迹时长 ms | 左臂最大位置 mm | 右臂最大位置 mm | 最大姿态 rad | 计算 P99 ms | 失败步数 |
-|---|---|---|---|---|---|
-{experiments}
-
-四组都满足该轨迹下的模型内精度门限；20 ms 的同时刻位置误差最低，因此作为推荐配置。不同实验运行时桌面负载不同，微小耗时差异不作为算法优劣结论。
-
-## 10 分钟基准
-
-| 项目 | 测量结果 |
+| 项目 | 结果 |
 |---|---|
-| 周期数 | {realtime['steps']} |
-| 总耗时 | {realtime['elapsed_s']:.3f} s，含短暂预热 |
-| 计算 P99 / 最大值 | {realtime['compute_ms_p99']:.4f} / {realtime['compute_ms_max']:.4f} ms |
-| IK P99 | {realtime['ik_ms_p99']:.4f} ms |
-| 规划 P99 | {realtime['planning_ms_p99']:.4f} ms |
-| 唤醒延迟 P99 / 最大值 | {realtime['wakeup_ms_p99']:.4f} / {realtime['wakeup_ms_max']:.4f} ms |
-| 计算超过 5 ms | {realtime['compute_deadline_misses']} 次 |
-| 唤醒延迟达到 5 ms | {realtime['wakeup_deadline_misses']} 次 |
-| IK/规划失败 | {realtime['failed_steps']} 步 |
-| 输出参考峰值关节速度 | {realtime['velocity_max_rad_s']:.6f} rad/s |
-| 输出参考峰值关节加速度 | {realtime['acceleration_max_rad_s2']:.6f} rad/s² |
-| 双臂位置 RMS | {realtime['position_rms_m']*1000:.4f} mm |
+| 左 / 右最大位置误差 | {model['position_max_m'][0]*1000:.4f} / {model['position_max_m'][1]*1000:.4f} mm |
+| 左 / 右最大姿态误差 | {model['orientation_max_rad'][0]:.7f} / {model['orientation_max_rad'][1]:.7f} rad |
+| IK / 规划失败步数 | {model['failures']} |
+| 单周期最大工作耗时，含 5 次 MuJoCo 更新 | {model['max_work_ms']:.4f} ms |
 
-基准使用固定初始姿态附近的已知可达双臂关节正弦路径，单关节幅度 0.02 rad、频率 0.1 Hz，全部 14 个臂关节参与。每个 5 ms 周期包含双臂 IK、MinSnap 重规划和 5 个 1 ms 仿真采样；简化执行模型每 1 ms 更新 `q_actual += 0.25 × (q_reference - q_actual)`。这是模型假设，不是对真实硬件带宽的测量。位置/姿态误差使用同一时刻原目标与实际模型状态比较，没有通过时间平移消除延迟。
+结果只覆盖上述低速、可达、固定腰部条件。0.5 rad/s 是限制值，不是已验证该速度下达到 1 mm 的证据；没有验证负载、碰撞、接触、力反馈或真实 TCP 标定误差。
 
-配置中的 0.5 rad/s 是安全上限，并不表示已经在该速度下验证 1 mm 精度。200 Hz C++ 周期也不等于 PICO 有 200 Hz 新观测。普通桌面 Linux 的抖动表现见 [ENVIRONMENT.json](../validation/ENVIRONMENT.json)；目标机器人设备必须重新运行基准。
+## 公开启动入口与故障测试
+
+测试使用 localhost、domain 196、隔离命名空间及独立 ZMQ 端口；PICO 输入模拟为 60 Hz。先检查未 High 使能时无命令且模型位于零位，再执行初始化、跟踪、Low 暂停、High 恢复及输入断流暂停。
+
+| 项目 | 结果 |
+|---|---|
+| 持续跟踪时间 | {integration['tracking_seconds']:.3f} s |
+| 控制循环频率 | {integration['approximate_control_hz']:.3f} Hz |
+| 订阅端观察到的反馈频率 | {integration['observed_feedback_hz']:.3f} Hz |
+| 后端计数估算反馈频率 | {integration['approximate_backend_feedback_hz']:.3f} Hz |
+| 全流程关节命令数 | {integration['commands']} |
+| 最大相邻关节输出步长 | {integration['max_joint_step_rad']:.8f} rad |
+| 控制线程最大计算 / 唤醒延迟 | {integration['teleop']['max_work_ms']:.4f} / {integration['teleop']['max_wakeup_ms']:.4f} ms |
+| 控制计算超时 | {integration['teleop']['compute_overruns']} 次 |
+| 根话题反馈 / 命令数量 | {integration['root_feedback']} / {integration['root_commands']} |
+
+控制频率使用诊断计数和对应消息接收时间的相同边界计算；诊断约 1 Hz，结果是区间频率，不代表每周期都准时。端到端测试 `simulation_test` 省略需要真人移动的轴标定步骤；数值精度使用 `precision_200hz`，Python/C++ 映射另有对照测试。
+
+- CTest：{ctest['groups_passed']} 组通过、{ctest['groups_failed']} 组失败；核心合约 {ctest['core_contract_checks']} 项。包含数值回归、Python 坐标映射对照、版本篡改/迁移、MuJoCo 模型和 launch 模式选择。
+- real 接口的隔离执行器测试：反馈丢失锁存、反馈恢复不自动续跑、配置混用拒绝、重复命令发布者拒绝。
+- mujoco 接口测试：上述保护及后端心跳丢失锁存、恢复不自动续跑、后端身份不匹配拒绝。
+- 动态库替换：只篡改临时 MuJoCo 库副本，实际加载 SHA 不符时启动拒绝，原库未修改。
+- GLFW/OpenGL：隐藏窗口渲染 {viewer['frames']} 帧正常退出；[渲染预览](../validation/mujoco_preview.png)。
 
 ## 原始证据与复现
 
-- [10 分钟完整数据](../validation/realtime_600s.json)
-- [全部候选与选择依据](../validation/duration_sweep/selection.json)
-- [ROS 端到端结果](../validation/integration_final/result.json)
-- [执行器故障专项结果](../validation/executor_guards/result.json)
-- [CTest 摘要](../validation/CTEST.json)
-- [原目录完整性结果](../validation/SOURCE_INTEGRITY.json)
+- [MuJoCo 模型与精度](../validation/mujoco_model.json)
+- [公开 launch 闭环](../validation/mujoco_integration/result.json)
+- [real 接口保护](../validation/executor_guards_v1_1/result.json)
+- [mujoco 接口与后端保护](../validation/mujoco_guards/result.json)
+- [运行库锁定](../validation/mujoco_runtime_lock.json)
+- [窗口烟雾测试](../validation/mujoco_viewer.json)
+- [CTest](../validation/CTEST.json)
+- [原目录保护复核](../validation/SOURCE_INTEGRITY.json)
 
-构建、隔离测试、实际运行和故障复位命令见 [DEPLOYMENT_ZH.md](DEPLOYMENT_ZH.md)。本任务没有启动、修改或替换真实机器人上的运行服务。
+v1.0 配置选择与 10 分钟基准见 [历史报告](VALIDATION_V1_0_ZH.md) 和 `validation/v1_0/`，属于旧 release，不能替代当前版本测试。本次沿用该配置并补充实际 MuJoCo 验证，不宣称全工作空间或所有负载下的全局最优。部署、复位与复现命令见 [DEPLOYMENT_ZH.md](DEPLOYMENT_ZH.md)。
 """
 (root / "docs/VALIDATION_ZH.md").write_text(report)
 print("Wrote docs/VALIDATION_ZH.md")

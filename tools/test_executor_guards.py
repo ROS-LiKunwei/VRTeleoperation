@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 """Independent black-box tests for ownership, feedback and configuration guards."""
 import argparse
 import hashlib
@@ -14,6 +14,7 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--prefix", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
+    p.add_argument("--backend", choices=["real", "mujoco"], default="real")
     args = p.parse_args()
     os.environ.update(ROS_LOCALHOST_ONLY="1", ROS_DOMAIN_ID="198")
     import rclpy
@@ -25,12 +26,14 @@ def main():
     root = args.prefix.resolve()
     bundle = root / "share/fa_teleop/bundle"
     identifier = hashlib.sha256((bundle / "release.json").read_bytes()).hexdigest() + ":" + hashlib.sha256((bundle / "config/simulation_test.yaml").read_bytes()).hexdigest()
+    identifier += ":" + args.backend
     args.output.mkdir(parents=True, exist_ok=True)
     rclpy.init()
     node = rclpy.create_node("guard_observer", namespace="/fa_guard_test")
     sensor_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)
     feedback = node.create_publisher(JointState, "joint_states", sensor_qos)
     targets = node.create_publisher(JointTarget, "fa_cpp/target", 1)
+    backend_status = node.create_publisher(String, "fa_cpp/backend_status", 1)
     state = {"status": "", "commands": 0}
     subs = [node.create_subscription(String, "fa_cpp/executor_status", lambda m: state.update(status=m.data), 1),
             node.create_subscription(Float64MultiArray, "upper_position_controller/commands", lambda m: state.update(commands=state["commands"]+1), 1)]
@@ -40,13 +43,17 @@ def main():
     names = [f"{side}_{name}_joint" for side in ["left", "right"] for name in suffixes] + ["neck_yaw_joint", "neck_pitch_joint"]
     sequence = 0
     log = open(args.output / "executor.log", "w")
-    proc = subprocess.Popen([str(root / "lib/fa_teleop/fa_min_snap_node"), "--ros-args", "-r", "__ns:=/fa_guard_test", "-p", "enable_motion:=true", "-p", "profile:=simulation_test", "-p", f"bundle_dir:={bundle}"], stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+    proc = subprocess.Popen([str(root / "lib/fa_teleop/fa_min_snap_node"), "--ros-args", "-r", "__ns:=/fa_guard_test", "-p", "enable_motion:=true", "-p", "profile:=simulation_test", "-p", f"control_backend:={args.backend}", "-p", f"bundle_dir:={bundle}"], stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
 
-    def spin(seconds, send_target=False, send_feedback=True, wrong_profile=False):
+    def spin(seconds, send_target=False, send_feedback=True, wrong_profile=False, send_backend=True, wrong_backend=False):
         nonlocal sequence
         end = time.monotonic() + seconds
         while time.monotonic() < end:
             assert proc.poll() is None, "Executor process failed"
+            if args.backend == "mujoco" and send_backend:
+                m = String()
+                m.data = (identifier if not wrong_backend else "wrong-release:mujoco") + "|READY"
+                backend_status.publish(m)
             if send_feedback:
                 m = JointState()
                 m.header.stamp = node.get_clock().now().to_msg()
@@ -93,6 +100,21 @@ def main():
         report = {"passed": True, "feedback_loss_latches": True, "feedback_recovery_does_not_resume": True,
                   "profile_mismatch_rejected": True, "duplicate_output_publisher_rejected": True,
                   "physical_hardware": False, "release_id": identifier.split(":")[0]}
+        report["control_backend"] = args.backend
+        if args.backend == "mujoco":
+            spin(.5)
+            reset()
+            spin(.3, send_target=True)
+            spin(.8, send_target=True, send_backend=False)
+            assert "|reason=9" in state["status"], state
+            frozen = state["commands"]
+            spin(.3)
+            assert state["commands"] == frozen, "Backend recovery automatically resumed motion"
+            reset()
+            spin(.3, wrong_backend=True)
+            assert "|reason=9" in state["status"], state
+            report.update(backend_loss_latches=True, backend_recovery_does_not_resume=True,
+                          backend_version_mismatch_rejected=True)
         (args.output / "result.json").write_text(json.dumps(report, indent=2)+"\n")
         print(json.dumps(report, indent=2))
     finally:

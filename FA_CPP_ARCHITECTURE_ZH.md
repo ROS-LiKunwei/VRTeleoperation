@@ -326,3 +326,23 @@ VR 若只提供 60～90 Hz 新样本，机器人侧可以按 200 Hz 保持或受
 - 每次构建生成版本锁定 bundle，启动逐文件校验；节点之间还要求所选配置哈希完全一致。
 - 推荐轨迹时长由单因素实验选择，候选与最终结果保存在 `validation/`，不以源码默认值代替测试证据。
 - 端到端测试使用独立 ROS domain、localhost 和隔离命名空间；真实机器人和外部 TCP 精度另行验收。
+
+## 14. v1.1 原生 MuJoCo 与控制模式切换
+
+统一入口为 `ros2 launch fa_teleop teleop.launch.py control_backend:=mujoco或real`。
+
+```text
+PICO → fa_teleop_node（200 Hz IK）→ JointTarget（算法/配置/后端身份）
+     → fa_min_snap_node（独立规划 + 1000 Hz 采样）
+         ├─ real：已有 FA 驱动 → joint_states
+         └─ mujoco：fa_mujoco_node → qpos / mj_forward → joint_states
+                                                └→ fa_mujoco_viewer（30 FPS，只读）
+```
+
+两种后端共用坐标映射、初始化、IK、MinSnap、安全约束与状态机。MuJoCo 后端只执行最终的 16 维关节样本，不接受旧 MinSnap 目标，不增加 IK 或插值；仿真反馈包含双臂与颈部的实际 `qpos/qvel`。这是与原 Python 一致的固定基座运动学镜像，未实现接触动力学。
+
+`mujoco` 自动使用 `/fa_mujoco` 命名空间，并拒绝根命名空间；`real` 默认使用根话题连接已有硬件驱动。切换模式需要重启 launch。渲染可用 `render:=false` 关闭，窗口与控制进程分离。窗口退出会结束本次 launch 创建的进程。
+
+初始化长轨迹使用 50 ms 预留规划时间，跟踪仍使用 4 ms，避免初始化的完整约束检查挤占跟踪截止时间。MuJoCo 3.8.0 的头文件版本、实际加载运行库 SHA、FA 模型及启动文件一同锁定；仿真执行器还检查后端部署身份与心跳。
+
+v1.0 的配置比较和 10 分钟测试已归档至 `validation/v1_0/`；v1.1 独立证据见 [当前验证报告](docs/VALIDATION_ZH.md)。原目录全程只读。

@@ -1,5 +1,5 @@
-cmake_minimum_required(VERSION 3.16)
-project(fa_teleop VERSION 1.0.0 LANGUAGES C CXX)
+cmake_minimum_required(VERSION 3.19)
+project(fa_teleop VERSION 1.1.0 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 if(NOT CMAKE_BUILD_TYPE)
@@ -24,13 +24,17 @@ find_package(yaml-cpp REQUIRED)
 find_package(OpenSSL REQUIRED)
 find_package(Threads REQUIRED)
 find_library(ZMQ_LIBRARY zmq REQUIRED)
+find_package(glfw3 REQUIRED)
+find_package(OpenGL REQUIRED)
+include(cmake/FindFaMujoco.cmake)
 
 # Reconfigure whenever any versioned input changes. No generated files in the source tree.
 file(GLOB_RECURSE BUNDLE_INPUTS CONFIGURE_DEPENDS
-  "include/*" "src/*" "vendor/*" "models/*" "config/*" "msg/*" "tools/*" "tests/*")
+  "include/*" "src/*" "vendor/*" "models/*" "config/*" "msg/*" "tools/*" "tests/*" "cmake/*" "launch/*")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${BUNDLE_INPUTS} ORIGINS.json CMakeLists.txt package.xml)
 execute_process(COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/lock_bundle.py
   --source ${CMAKE_CURRENT_SOURCE_DIR} --output ${CMAKE_CURRENT_BINARY_DIR}/bundle
+  --runtime ${CMAKE_CURRENT_BINARY_DIR}/mujoco_runtime.json
   RESULT_VARIABLE LOCK_RESULT)
 if(NOT LOCK_RESULT EQUAL 0)
   message(FATAL_ERROR "Cannot generate version-locked deployment bundle")
@@ -57,6 +61,18 @@ foreach(node teleop_node min_snap_node mock_robot)
   target_link_libraries(fa_${node} fa_core "${typesupport}")
   ament_target_dependencies(fa_${node} rclcpp ament_index_cpp sensor_msgs std_msgs std_srvs)
 endforeach()
+add_library(fa_mujoco_engine STATIC src/mujoco_engine.cpp)
+target_include_directories(fa_mujoco_engine PUBLIC include)
+target_link_libraries(fa_mujoco_engine PUBLIC fa_core fa_mujoco_runtime ${CMAKE_DL_LIBS})
+foreach(node mujoco_node mujoco_viewer)
+  add_executable(fa_${node} src/${node}.cpp)
+  target_link_libraries(fa_${node} fa_mujoco_engine)
+  ament_target_dependencies(fa_${node} rclcpp ament_index_cpp sensor_msgs std_msgs std_srvs)
+  set_target_properties(fa_${node} PROPERTIES INSTALL_RPATH "$ORIGIN/runtime")
+endforeach()
+target_link_libraries(fa_mujoco_viewer glfw OpenGL::GL)
+add_executable(fa_mujoco_tests tests/mujoco_tests.cpp)
+target_link_libraries(fa_mujoco_tests fa_mujoco_engine)
 add_executable(fa_core_tests tests/core_tests.cpp)
 target_link_libraries(fa_core_tests fa_core)
 add_executable(fa_benchmark tests/benchmark.cpp)
@@ -69,10 +85,16 @@ add_test(NAME numerical_regression COMMAND fa_benchmark --bundle ${CMAKE_CURRENT
 add_test(NAME version_lock COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_version.py $<TARGET_FILE:fa_core_tests> ${CMAKE_CURRENT_BINARY_DIR}/bundle)
 add_test(NAME python_mapping_parity COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_python_parity.py
   ${CMAKE_CURRENT_SOURCE_DIR}/../../../beavr-bot/src/beavr/teleop/components/detector/vr/keypoint_transform.py $<TARGET_FILE:fa_fixture_dump>)
+add_test(NAME mujoco_model_contracts COMMAND fa_mujoco_tests ${CMAKE_CURRENT_BINARY_DIR}/bundle ${CMAKE_CURRENT_BINARY_DIR}/mujoco_model.json)
+add_test(NAME launch_backend_contracts COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_launch.py ${CMAKE_CURRENT_SOURCE_DIR}/launch/teleop.launch.py)
 
 install(TARGETS fa_teleop_node fa_min_snap_node fa_mock_robot fa_benchmark fa_core_tests RUNTIME DESTINATION lib/${PROJECT_NAME})
+install(TARGETS fa_mujoco_node fa_mujoco_viewer RUNTIME DESTINATION lib/${PROJECT_NAME})
+install(FILES "${FA_MUJOCO_LIBRARY}" DESTINATION lib/${PROJECT_NAME}/runtime)
 install(DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/bundle/ DESTINATION share/${PROJECT_NAME}/bundle)
-install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
+# The version-locked bundle owns the sole launch-file copy. ros2 launch searches
+# recursively; an additional share/fa_teleop/launch copy would be ambiguous.
+install(CODE "file(REMOVE_RECURSE \"\${CMAKE_INSTALL_PREFIX}/share/fa_teleop/launch\")")
 install(PROGRAMS tools/run_benchmark.py tools/verify_source.py tools/integration_test.py
   tools/beavr_state_bridge.py tools/create_receipt.py DESTINATION lib/${PROJECT_NAME})
 ament_export_dependencies(rosidl_default_runtime)

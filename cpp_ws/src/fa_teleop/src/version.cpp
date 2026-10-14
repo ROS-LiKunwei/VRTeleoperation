@@ -40,7 +40,8 @@ std::string file_sha256(const std::string &path) {
 }
 const char *release_id() { return kReleaseId; }
 std::string deployment_id(const Config &config) {
-  return std::string(kReleaseId) + ":" + config.profile_sha;
+  return std::string(kReleaseId) + ":" + config.profile_sha + ":" +
+         config.control_backend;
 }
 std::string verify_bundle(const std::string &directory) {
   namespace fs = std::filesystem;

@@ -13,6 +13,17 @@ public:
     const auto bundle = bundle_directory(*this);
     config_ = node_config(*this, bundle);
     enable_ = declare_parameter<bool>("enable_motion", false);
+    if (config_.control_backend == "mujoco") {
+      backend_sub_ = create_subscription<std_msgs::msg::String>(
+          "fa_cpp/backend_status", rclcpp::QoS(1).reliable(),
+          [this](std_msgs::msg::String::ConstSharedPtr m) {
+            if (m->data.rfind(deployment_id(config_) + "|READY", 0) != 0) {
+              trip(9);
+              return;
+            }
+            backend_seen_ = steady_seconds();
+          });
+    }
     output_ = create_publisher<std_msgs::msg::Float64MultiArray>(
         "upper_position_controller/commands", rclcpp::QoS(1).reliable());
     desired_ = create_publisher<sensor_msgs::msg::JointState>(
@@ -103,6 +114,10 @@ public:
   }
 
 private:
+  bool backend_ready() const {
+    return config_.control_backend == "real" ||
+           steady_seconds() - backend_seen_.load() < 0.5;
+  }
   void trip(int reason) {
     fault_reason_ = reason;
     fault_ = true;
@@ -128,7 +143,8 @@ private:
       feedback_.read(fb);
       targets_.read(target);
       const double now_s = steady_seconds();
-      if (!fault_ && enable_ && feedback_fresh(fb, config_)) {
+      if (!fault_ && enable_ && feedback_fresh(fb, config_) &&
+          backend_ready()) {
         const bool stale = target.sequence == 0 ||
                            now_s - target.received > config_.target_timeout;
         if (initialized && stale && !stopping) {
@@ -150,7 +166,11 @@ private:
             initialized && target.mode == last.mode &&
             (target.q - last.q).cwiseAbs().maxCoeff() < 1e-10;
         if (new_target && !same_goal && !(stopping && target.mode == 0)) {
-          const double activation = now_s + config_.plan_lead;
+          // Long initialization is planned once before output starts; tracking
+          // retains the normal 4 ms submission budget.
+          const double activation =
+              now_s + (target.mode == 1 ? config_.initialization_plan_lead
+                                        : config_.plan_lead);
           Reference from =
               current.valid ? current.sample(activation) : stationary(fb.q);
           Plan next;
@@ -198,6 +218,9 @@ private:
     desired.velocity.resize(16);
     while (running_ && rclcpp::ok()) {
       const double now_s = steady_seconds();
+      if (config_.control_backend == "mujoco" && samples_ > 0 &&
+          !backend_ready())
+        trip(9);
       feedback_.read(fb);
       if (plan_.read(incoming)) {
         if (!incoming.valid) {
@@ -214,8 +237,8 @@ private:
       if (enable_ && !fault_ && active.valid && samples_ > 0 &&
           !feedback_fresh(fb, config_))
         trip(8);
-      if (enable_ && ownership_ok_ && !fault_ && feedback_fresh(fb, config_) &&
-          active.valid) {
+      if (enable_ && ownership_ok_ && !fault_ && backend_ready() &&
+          feedback_fresh(fb, config_) && active.valid) {
         const auto reference = active.sample(now_s);
         if (!valid_reference(reference, config_)) {
           trip(5);
@@ -253,12 +276,14 @@ private:
   std::atomic<bool> running_{false}, fault_{false}, reset_requested_{false};
   std::atomic<bool> ownership_ok_{false};
   std::atomic<int> fault_reason_{0};
+  std::atomic<double> backend_seen_{0};
   std::thread planning_, sampling_;
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr output_;
   rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr desired_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_;
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr feedback_sub_;
   rclcpp::Subscription<fa_teleop::msg::JointTarget>::SharedPtr target_sub_;
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr backend_sub_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr reset_;
   rclcpp::TimerBase::SharedPtr report_;
 };

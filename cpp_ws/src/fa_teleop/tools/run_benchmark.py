@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 """One-factor parameter sweeps; preserve every result and choose by declared criteria."""
 import argparse
 import json
