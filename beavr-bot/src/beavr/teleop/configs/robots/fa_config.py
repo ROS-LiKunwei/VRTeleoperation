@@ -78,6 +78,7 @@ class FaRealControlCfg:
 
     host: str = network.HOST_ADDRESS
     control_backend: str = "mujoco"
+    ahawam_intervention_mode: bool = False
     right_target_port: int = ports.XARM_ENDEFF_SUBSCRIBE_PORT + SYSMO32_RIGHT_PORT_OFFSET
     left_target_port: int = ports.XARM_ENDEFF_SUBSCRIBE_PORT + SYSMO32_LEFT_PORT_OFFSET
     right_endeff_publish_port: int = ports.XARM_ENDEFF_PUBLISH_PORT + SYSMO32_RIGHT_PORT_OFFSET
@@ -200,6 +201,8 @@ class FaRealControlCfg:
         self.config.control_backend = self.control_backend
         if self.control_backend == "real_with_mujoco":
             self.config.allow_mujoco_mirror_without_joint_state = False
+        if self.ahawam_intervention_mode:
+            self.config.enable_ahawam_intervention_mode()
 
     def __post_init__(self):
         self._apply_backend_overrides()
@@ -343,6 +346,7 @@ class FaConfig:
     robot_name: str = ROBOT_NAME_FA
     laterality: Laterality = Laterality.BIMANUAL
     control_backend: str = "mujoco"
+    ahawam_intervention_mode: bool = False
     model_root: str = FA_DESCRIPTION_PATH
     urdf_file: str = FA_URDF_PATH
     srdf_file: str = FA_SRDF_PATH
@@ -426,7 +430,13 @@ class FaConfig:
                 )
             ]
 
-        self.robots = [FaRealControlCfg(host=network.HOST_ADDRESS, control_backend=self.control_backend)]
+        self.robots = [
+            FaRealControlCfg(
+                host=network.HOST_ADDRESS,
+                control_backend=self.control_backend,
+                ahawam_intervention_mode=self.ahawam_intervention_mode,
+            )
+        ]
 
         self.operators = []
         if self.laterality in (Laterality.RIGHT, Laterality.BIMANUAL):

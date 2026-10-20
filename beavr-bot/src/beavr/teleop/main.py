@@ -52,6 +52,10 @@ class MainConfig:
     # SYSMO-32 backend mode: real, mujoco, or real_with_mujoco.
     control_backend: str = "mujoco"
 
+    # Route FA VR commands to AHA-WAM's human-candidate topics.  The default
+    # remains the standalone teleoperation path for backward compatibility.
+    ahawam_intervention_mode: bool = False
+
     # 可选的配置文件覆盖项
     config_file: str = "configs/environment/dev.yaml"
 
@@ -83,6 +87,7 @@ class MainConfig:
             self.laterality_enum,
             simulation_mode,
             control_backend=self.control_backend,
+            ahawam_intervention_mode=self.ahawam_intervention_mode,
         )
 
     # TODO: 当完全迁移到新的结构化配置后移除这部分
@@ -201,6 +206,10 @@ def main(cfg: MainConfig):
 
         # Override control parameters
         python -m beavr.teleop.main --robot_name=leap,xarm7 --teleop.control.vr_freq=60
+
+        # Publish FA VR commands as AHA-WAM human candidates (never directly to hardware topics)
+        python -m beavr.teleop.main --robot_name=fa --laterality=bimanual \
+            --control_backend=real --ahawam_intervention_mode=true
 
         # Override multiple port settings
         python -m beavr.teleop.main --robot_name=xarm7 \

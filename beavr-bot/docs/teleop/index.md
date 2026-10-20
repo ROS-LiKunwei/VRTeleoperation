@@ -9,3 +9,6 @@
 使用 `python -m beavr.teleop.main --robot_name=leap,xarm7 --laterality=bimanual` 启动默认的双臂配置。
 
 FA 双臂遥操作的坐标变换细节见 [FA 遥操作坐标变换逻辑](fa_coordinate_transform.md)。
+
+AHA-WAM 的 FA 模型/人工唯一命令网关、连续实机采集与后续实机验收步骤见
+[AHA-WAM：FA 人工接管与实机数据连续采集](ahawam_fa_intervention_recording_zh.md)。

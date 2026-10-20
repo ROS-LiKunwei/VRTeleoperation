@@ -1,4 +1,5 @@
 import json
+import threading
 import time
 from types import SimpleNamespace
 
@@ -22,6 +23,45 @@ def test_reject_stale_and_failed_capture():
     cam._capture_error = 'SDK failed'
     with pytest.raises(CameraFault, match='capture_thread_failed'):
         cam.read_latest_rgbd(2000)
+
+
+def test_rgbd_metadata_exposes_capture_time_and_requires_new_sequence():
+    cam = OrbbecCamera(OrbbecCameraConfig(serial_number='test'))
+    cam._latest_color = np.zeros((2, 2, 3), dtype=np.uint8)
+    cam._latest_depth = np.zeros((2, 2), dtype=np.uint16)
+    cam._latest_timestamp = time.monotonic()
+    cam._sequence = 7
+
+    _rgb, _depth, metadata = cam.read_latest_rgbd_with_metadata(2000)
+    assert metadata['sequence'] == 7
+    assert metadata['captured_at_monotonic_s'] == cam._latest_timestamp
+    assert metadata['age_ms'] >= 0
+
+    with pytest.raises(CameraFault, match='sequence 7 is not newer than 7'):
+        cam.read_latest_rgbd_with_metadata(
+            2000,
+            newer_than_sequence=7,
+            timeout_ms=0,
+        )
+
+
+def test_rgbd_metadata_supports_legacy_config_without_max_age():
+    cam = SimpleNamespace(
+        config=SimpleNamespace(serial_number='test', frame_timeout_ms=20),
+        _condition=threading.Condition(),
+        _capture_error=None,
+        _latest_color=np.zeros((2, 2, 3), dtype=np.uint8),
+        _latest_depth=np.zeros((2, 2), dtype=np.uint16),
+        _latest_timestamp=time.monotonic(),
+        _sequence=1,
+        use_depth=True,
+    )
+
+    _rgb, _depth, metadata = OrbbecCamera.read_latest_rgbd_with_metadata(
+        cam, max_age_ms=300
+    )
+
+    assert metadata['sequence'] == 1
 
 
 @pytest.mark.parametrize('succeed_on', [2, 99])

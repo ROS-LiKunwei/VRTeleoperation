@@ -248,6 +248,7 @@ def load_robot_config(
     laterality: Laterality,
     simulation_mode: bool = False,
     control_backend: str = "mujoco",
+    ahawam_intervention_mode: bool = False,
 ) -> Any:
     """
     根据机器人名称（可多个）和侧别(laterality)加载机器人配置.
@@ -257,6 +258,8 @@ def load_robot_config(
         robot_name: Single robot name or comma-separated list (e.g., "leap,xarm7")
         laterality: Laterality enum for robot configuration
         simulation_mode: Whether to run in simulation mode
+        ahawam_intervention_mode: Route supported robot teleoperation outputs
+            to AHA-WAM human-candidate topics instead of direct control topics.
 
     Returns:
         Single robot config or CompositeRobotConfig for multiple robots
@@ -270,10 +273,22 @@ def load_robot_config(
 
     if len(robot_names) == 1:
         # Single robot - use existing logic
-        return _load_single_robot(robot_names[0], laterality, simulation_mode, control_backend)
+        return _load_single_robot(
+            robot_names[0],
+            laterality,
+            simulation_mode,
+            control_backend,
+            ahawam_intervention_mode,
+        )
     else:
         # Multiple robots - create composite config
-        return _load_multiple_robots(robot_names, laterality, simulation_mode, control_backend)
+        return _load_multiple_robots(
+            robot_names,
+            laterality,
+            simulation_mode,
+            control_backend,
+            ahawam_intervention_mode,
+        )
 
 
 def _load_single_robot(
@@ -281,6 +296,7 @@ def _load_single_robot(
     laterality: Laterality,
     simulation_mode: bool = False,
     control_backend: str = "mujoco",
+    ahawam_intervention_mode: bool = False,
 ) -> Any:
     """Load configuration for a single robot."""
     logger.info(f"📦 Loading single robot config: {robot_name}")
@@ -308,6 +324,8 @@ def _load_single_robot(
         cfg_kwargs["simulation_mode"] = simulation_mode
     if "control_backend" in getattr(cfg_cls, "__dataclass_fields__", {}):
         cfg_kwargs["control_backend"] = control_backend
+    if "ahawam_intervention_mode" in getattr(cfg_cls, "__dataclass_fields__", {}):
+        cfg_kwargs["ahawam_intervention_mode"] = ahawam_intervention_mode
 
     robot_config = cfg_cls(**cfg_kwargs)
 
@@ -320,6 +338,7 @@ def _load_multiple_robots(
     laterality: Laterality,
     simulation_mode: bool = False,
     control_backend: str = "mujoco",
+    ahawam_intervention_mode: bool = False,
 ) -> CompositeRobotConfig:
     """为多个机器人加载并合并配置"""
     logger.info(f"📦 Loading composite robot config: {','.join(robot_names)}")
@@ -328,7 +347,13 @@ def _load_multiple_robots(
 
     for robot_name in robot_names:
         # Load individual robot config
-        robot_config = _load_single_robot(robot_name, laterality, simulation_mode, control_backend)
+        robot_config = _load_single_robot(
+            robot_name,
+            laterality,
+            simulation_mode,
+            control_backend,
+            ahawam_intervention_mode,
+        )
         individual_configs.append(robot_config)
         logger.info(f"  ✅ Loaded {robot_name} config with laterality: {laterality.value}, simulation_mode: {simulation_mode}")
 

@@ -8,11 +8,14 @@ import numpy as np
 import pytest
 
 from beavr.scripts.ahawam_fa_async_client import (
+    CAMERA_KEYS,
     FaRos,
     LEFT_JOINTS,
     RIGHT_JOINTS,
     binarize_gripper,
+    camera_observation_time,
     format_gripper_output_log,
+    image_state_sync_metadata,
 )
 
 
@@ -91,7 +94,7 @@ def _args():
     )
 
 
-def _joint_state(stamp_s):
+def _joint_state(stamp_s, position_offset=0.0):
     seconds = int(stamp_s)
     return SimpleNamespace(
         header=SimpleNamespace(
@@ -101,7 +104,7 @@ def _joint_state(stamp_s):
             )
         ),
         name=list(LEFT_JOINTS + RIGHT_JOINTS),
-        position=list(np.linspace(-0.7, 0.7, 14)),
+        position=list(np.linspace(-0.7, 0.7, 14) + position_offset),
     )
 
 
@@ -161,3 +164,63 @@ def test_fa_ros_continuously_spins_depth_one_and_checks_source_stamp(monkeypatch
 
     assert node.destroyed
     assert not ros._spin_thread.is_alive()
+
+
+def test_fa_ros_matches_historical_joint_state_to_image_time(monkeypatch):
+    node, _ros_state = _install_fake_ros_modules(monkeypatch)
+    ros = FaRos(_args())
+    try:
+        node.subscription_callback(_joint_state(time.time(), position_offset=0.0))
+        first_sample_time = ros._joint_history[-1]["sample_at_monotonic_s"]
+        time.sleep(0.01)
+        node.subscription_callback(_joint_state(time.time(), position_offset=1.0))
+
+        observed, metadata = ros.state_at_observation(
+            first_sample_time,
+            timeout_s=0.1,
+            max_age_s=0.2,
+            max_skew_s=0.005,
+            newer_than_sequence=0,
+        )
+        assert observed[:14] == pytest.approx(np.linspace(-0.7, 0.7, 14))
+        assert metadata["sequence"] == 1
+        assert abs(metadata["joint_observation_skew_ms"]) < 1.0
+    finally:
+        ros.close()
+
+
+def test_camera_and_joint_observation_skew_limits():
+    camera_metadata = {
+        key: {
+            "sequence": index + 1,
+            "captured_at_monotonic_s": 10.0 + index * 0.04,
+            "age_ms": 20.0,
+        }
+        for index, key in enumerate(CAMERA_KEYS)
+    }
+    observation_time, camera_skew_ms = camera_observation_time(
+        camera_metadata,
+        max_camera_skew_ms=90.0,
+    )
+    assert observation_time == pytest.approx(10.04)
+    assert camera_skew_ms == pytest.approx(80.0)
+
+    state_metadata = {"sample_at_monotonic_s": 10.045}
+    sync = image_state_sync_metadata(
+        camera_metadata,
+        state_metadata,
+        observation_time,
+        max_image_state_skew_ms=50.0,
+    )
+    assert sync["joint_observation_skew_ms"] == pytest.approx(5.0)
+    assert sync["max_abs_camera_joint_skew_ms"] == pytest.approx(45.0)
+
+    with pytest.raises(RuntimeError, match="Camera frame skew"):
+        camera_observation_time(camera_metadata, max_camera_skew_ms=50.0)
+    with pytest.raises(RuntimeError, match="Camera/joint skew"):
+        image_state_sync_metadata(
+            camera_metadata,
+            state_metadata,
+            observation_time,
+            max_image_state_skew_ms=40.0,
+        )

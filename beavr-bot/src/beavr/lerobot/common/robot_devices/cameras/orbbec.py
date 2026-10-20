@@ -145,6 +145,7 @@ class OrbbecCamera:
             raise
         self._capture_error = None
         self._latest_color = self._latest_depth = None
+        self._latest_timestamp = 0.0
         self._sequence = self._last_read_sequence = 0
         self._stop_event.clear()
         self._thread = threading.Thread(
@@ -319,18 +320,66 @@ class OrbbecCamera:
             self._last_read_sequence = self._sequence
             return self._latest_color.copy()
 
-    def read_latest_rgbd(self, max_age_ms: int = 2000):
+    def read_latest_rgbd_with_metadata(
+        self,
+        max_age_ms: int = 2000,
+        *,
+        newer_than_sequence: int | None = None,
+        timeout_ms: float | None = None,
+    ):
+        """Return the latest RGB-D pair with a local capture time and sequence.
+
+        The monotonic timestamp is recorded when the SDK frameset has been
+        decoded by the capture thread.  It deliberately uses the host clock so
+        observations from multiple cameras can be compared with locally
+        received ROS joint-state samples without assuming synchronized device
+        clocks.
+        """
+        deadline = time.monotonic() + (
+            self.config.frame_timeout_ms if timeout_ms is None else timeout_ms
+        ) / 1000.0
         with self._condition:
-            if self._capture_error is not None:
-                raise CameraFault(self, "capture_thread_failed", self._capture_error)
-            if self._latest_color is None or (self.use_depth and self._latest_depth is None):
-                raise CameraFault(self, "missing_rgbd", "No complete RGB-D frame")
+            while True:
+                if self._capture_error is not None:
+                    raise CameraFault(self, "capture_thread_failed", self._capture_error)
+                complete = self._latest_color is not None and (
+                    not self.use_depth or self._latest_depth is not None
+                )
+                sequence_is_new = (
+                    newer_than_sequence is None or self._sequence > newer_than_sequence
+                )
+                if complete and sequence_is_new:
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    detail = (
+                        "No complete RGB-D frame"
+                        if not complete
+                        else f"sequence {self._sequence} is not newer than {newer_than_sequence}"
+                    )
+                    raise CameraFault(self, "missing_rgbd", detail)
+                self._condition.wait(remaining)
+
             age_ms = (time.monotonic() - self._latest_timestamp) * 1000
-            if age_ms > min(max_age_ms, self.config.max_frame_age_ms):
+            # Older deployed camera configs predate ``max_frame_age_ms``.
+            # The caller-provided limit remains authoritative in that case.
+            configured_max_age_ms = getattr(
+                self.config, "max_frame_age_ms", max_age_ms
+            )
+            if age_ms > min(max_age_ms, configured_max_age_ms):
                 raise CameraFault(self, "stale_rgbd", f"Latest RGB-D frame is {age_ms:.1f} ms old")
             color = self._latest_color.copy()
             depth = None if self._latest_depth is None else self._latest_depth.copy()
-            return color, depth
+            metadata = {
+                "sequence": self._sequence,
+                "captured_at_monotonic_s": self._latest_timestamp,
+                "age_ms": max(0.0, age_ms),
+            }
+            return color, depth, metadata
+
+    def read_latest_rgbd(self, max_age_ms: int = 2000):
+        color, depth, _metadata = self.read_latest_rgbd_with_metadata(max_age_ms)
+        return color, depth
 
     def read_latest(self, max_age_ms: int = 2000) -> NDArray[Any]:
         return self.read_latest_rgbd(max_age_ms)[0]

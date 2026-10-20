@@ -48,6 +48,16 @@ FA_UPPER_COMMAND_TOPIC = "fa_upper_position_command"
 FA_HAND_OPEN_COMMAND = 1
 FA_HAND_GRASP_COMMAND = 2
 
+# The AHA-WAM intervention arbiter is the only component that may forward a
+# selected command to the normal hardware topics.  FA teleoperation publishes
+# human *candidates* to this isolated namespace when intervention mode is on.
+FA_REAL_MIN_SNAP_TARGET_TOPIC = "/min_snap/target"
+FA_REAL_LEFT_HAND_TOPIC = "/left_topic_to_hand"
+FA_REAL_RIGHT_HAND_TOPIC = "/right_topic_to_hand"
+FA_AHAWAM_HUMAN_MIN_SNAP_TARGET_TOPIC = "/ahawam/fa/human/min_snap_target"
+FA_AHAWAM_HUMAN_LEFT_HAND_TOPIC = "/ahawam/fa/human/left_hand"
+FA_AHAWAM_HUMAN_RIGHT_HAND_TOPIC = "/ahawam/fa/human/right_hand"
+
 
 def _rotation_matrix_to_quaternion_xyzw(rotation: np.ndarray) -> np.ndarray:
     """Convert a 3x3 rotation matrix to a normalized xyzw quaternion."""
@@ -140,10 +150,13 @@ def _default_fa_srdf_path() -> str:
 class FaRos2Topics:
     joint_state_topic: str = "/joint_states"
     upper_position_command_topic: str = "/upper_position_controller/commands"
-    min_snap_target_topic: str = "/min_snap/target"
+    min_snap_target_topic: str = FA_REAL_MIN_SNAP_TARGET_TOPIC
     vision_calibration_topic: str = "/sysmo_vision_calibration"
-    left_hand_topic: str = "/left_topic_to_hand"
-    right_hand_topic: str = "/right_topic_to_hand"
+    left_hand_topic: str = FA_REAL_LEFT_HAND_TOPIC
+    right_hand_topic: str = FA_REAL_RIGHT_HAND_TOPIC
+    ahawam_human_min_snap_target_topic: str = FA_AHAWAM_HUMAN_MIN_SNAP_TARGET_TOPIC
+    ahawam_human_left_hand_topic: str = FA_AHAWAM_HUMAN_LEFT_HAND_TOPIC
+    ahawam_human_right_hand_topic: str = FA_AHAWAM_HUMAN_RIGHT_HAND_TOPIC
     upper_position_command_queue_size: int = 60
     hand_command_queue_size: int = 10
     min_snap_target_queue_size: int = 1
@@ -153,6 +166,7 @@ class FaRos2Topics:
 @dataclass
 class FaRealControlConfig:
     control_backend: str = "mujoco"
+    ahawam_intervention_mode: bool = False
     ros2: FaRos2Topics = field(default_factory=FaRos2Topics)
     upper: FaUpperPositionSafetyConfig = field(default_factory=FaUpperPositionSafetyConfig)
     kinematics: FaKinematicsConfig = field(default_factory=FaKinematicsConfig)
@@ -218,6 +232,8 @@ class FaRealControlConfig:
     initial_hand_ros_action: Optional[int] = 21
 
     def __post_init__(self):
+        if self.ahawam_intervention_mode:
+            self.enable_ahawam_intervention_mode()
         if self.vision_calibration_hand_side not in (robots.LEFT, robots.RIGHT):
             raise ValueError("vision_calibration_hand_side must be left or right")
         self.vision_calibration_publish_hz = max(
@@ -307,6 +323,53 @@ class FaRealControlConfig:
                 "ik_escape_right_arm_positions_rad",
             ))
         )
+
+    def enable_ahawam_intervention_mode(self) -> None:
+        """Route FA human commands to arbiter-only candidate topics.
+
+        This operation is deliberately idempotent because wrapper configs call
+        it both during dataclass construction and immediately before building
+        the runtime component.
+        """
+        candidate_topics = {
+            "ahawam_human_min_snap_target_topic": self.ros2.ahawam_human_min_snap_target_topic,
+            "ahawam_human_left_hand_topic": self.ros2.ahawam_human_left_hand_topic,
+            "ahawam_human_right_hand_topic": self.ros2.ahawam_human_right_hand_topic,
+        }
+        real_topics = {
+            FA_REAL_MIN_SNAP_TARGET_TOPIC,
+            FA_REAL_LEFT_HAND_TOPIC,
+            FA_REAL_RIGHT_HAND_TOPIC,
+        }
+        normalized_candidates: dict[str, str] = {}
+        for label, topic in candidate_topics.items():
+            normalized = str(topic).strip()
+            if not normalized:
+                raise ValueError(f"{label} must be a non-empty ROS topic")
+            if normalized in real_topics:
+                raise ValueError(
+                    f"{label} must not use a direct FA hardware topic: {normalized}"
+                )
+            normalized_candidates[label] = normalized
+        if len(set(normalized_candidates.values())) != len(normalized_candidates):
+            raise ValueError("AHA-WAM FA human candidate topics must be distinct")
+
+        self.ahawam_intervention_mode = True
+        self.ros2.min_snap_target_topic = normalized_candidates[
+            "ahawam_human_min_snap_target_topic"
+        ]
+        self.ros2.left_hand_topic = normalized_candidates[
+            "ahawam_human_left_hand_topic"
+        ]
+        self.ros2.right_hand_topic = normalized_candidates[
+            "ahawam_human_right_hand_topic"
+        ]
+
+        # Candidate production must start from the measured current state.  A
+        # startup pose or startup hand action would otherwise create an
+        # unsolicited intervention candidate before the operator takes over.
+        self.initial_pose_enabled = False
+        self.initial_hand_ros_action = None
 
     @staticmethod
     def _validate_initial_arm_pose(values: Optional[Sequence[float]], label: str) -> np.ndarray:
@@ -499,6 +562,14 @@ class FaRealControl(Component):
         self._validate_backend()
         self.config = config or FaRealControlConfig(control_backend=control_backend)
         self.config.control_backend = control_backend
+        if self.config.ahawam_intervention_mode:
+            self.config.enable_ahawam_intervention_mode()
+            logger.info(
+                "FA AHA-WAM intervention candidate mode: min_snap=%s left_hand=%s right_hand=%s",
+                self.config.ros2.min_snap_target_topic,
+                self.config.ros2.left_hand_topic,
+                self.config.ros2.right_hand_topic,
+            )
         self._publisher_manager = ZMQPublisherManager.get_instance()
         self._right_state_publish_port = right_state_publish_port
         self._left_state_publish_port = left_state_publish_port
@@ -2209,6 +2280,12 @@ class FaRealControl(Component):
 
 
 __all__ = [
+    "FA_AHAWAM_HUMAN_LEFT_HAND_TOPIC",
+    "FA_AHAWAM_HUMAN_MIN_SNAP_TARGET_TOPIC",
+    "FA_AHAWAM_HUMAN_RIGHT_HAND_TOPIC",
+    "FA_REAL_LEFT_HAND_TOPIC",
+    "FA_REAL_MIN_SNAP_TARGET_TOPIC",
+    "FA_REAL_RIGHT_HAND_TOPIC",
     "FA_UPPER_COMMAND_TOPIC",
     "FaRos2Topics",
     "FaRealControl",
