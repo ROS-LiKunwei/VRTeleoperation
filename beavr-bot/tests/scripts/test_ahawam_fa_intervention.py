@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 import beavr.scripts.ahawam_fa_async_client as client
+from beavr.lerobot.common.robot_devices.cameras.recording_fault import CameraFault
 from beavr.scripts.ahawam_fa_async_client import (
     CAMERA_KEYS,
     FaCommandReceipt,
@@ -57,6 +58,8 @@ def test_topology_guard_requires_sole_real_gateway_and_candidate_publishers() ->
         human_arm_input_topic="/candidate/arm",
         human_left_hand_input_topic="/candidate/left",
         human_right_hand_input_topic="/candidate/right",
+        human_rebaseline_request_topic="/candidate/rebaseline_request",
+        human_rebaseline_ack_topic="/candidate/rebaseline_ack",
     )
     ros = object.__new__(FaRos)
     counts = {
@@ -66,15 +69,20 @@ def test_topology_guard_requires_sole_real_gateway_and_candidate_publishers() ->
         args.human_arm_input_topic: 1,
         args.human_left_hand_input_topic: 1,
         args.human_right_hand_input_topic: 1,
+        args.human_rebaseline_ack_topic: 1,
     }
-    ros.node = SimpleNamespace(count_publishers=lambda topic: counts[topic])
+    subscriber_counts = {args.human_rebaseline_request_topic: 1}
+    ros.node = SimpleNamespace(
+        count_publishers=lambda topic: counts[topic],
+        count_subscribers=lambda topic: subscriber_counts[topic],
+    )
 
     with pytest.raises(RuntimeError, match="ownership is not exclusive"):
         ros.validate_command_topology(args, timeout_s=0.0)
 
     counts[args.arm_command_topic] = 1
     counts[args.human_left_hand_input_topic] = 0
-    with pytest.raises(RuntimeError, match="candidate publisher is missing"):
+    with pytest.raises(RuntimeError, match="candidate/rebaseline endpoint is missing"):
         ros.validate_command_topology(args, timeout_s=0.0)
 
     counts[args.human_left_hand_input_topic] = 1
@@ -118,9 +126,25 @@ def test_command_gateway_rejects_model_after_takeover() -> None:
             command=np.ones(16, dtype=np.float32),
             source="model",
         )
-
     assert len(ros.commands) == 1
     assert history.latest().sequence == 1
+
+
+def test_repeated_takeover_key_is_ignored_after_safe_hold() -> None:
+    class RepeatedTakeoverKey:
+        @staticmethod
+        def poll():
+            return ["i"]
+
+    operator = OperatorIntervention(enabled=True)
+    operator.request_takeover("operator_pressed_i")
+
+    client.poll_operator_controls(
+        RepeatedTakeoverKey(), operator, chunk=3, step=4
+    )
+
+    assert operator.mode is ControlMode.SAFE_HOLD
+    assert operator.snapshot().takeover_reason == "operator_pressed_i"
 
 
 def test_sent_command_history_never_binds_a_future_command() -> None:
@@ -256,13 +280,16 @@ def test_human_arm_callback_rejects_misaligned_6_plus_8_payload() -> None:
 
 def test_human_successful_send_is_recorded_before_terminal_label() -> None:
     class HumanRos(_GatewayRos):
+        def rebaseline_human_control(self, _timeout_s):
+            return 7
+
         def begin_human_handoff(self):
             return 0
 
         def wait_human_action(self, **_kwargs):
             target = np.linspace(-0.1, 0.1, 16, dtype=np.float32)
             target[14:] = [1.0, 0.0]
-            return target, {"sequence": 1, "age_ms": 0.0}
+            return target, {"sequence": 1, "arm_sequence": 1, "age_ms": 0.0}
 
         def state(self, _timeout_s, _max_age_s):
             return np.zeros(16, dtype=np.float32)
@@ -297,6 +324,8 @@ def test_human_successful_send_is_recorded_before_terminal_label() -> None:
     operator.request_takeover("test_handoff", automatic=True)
     args = SimpleNamespace(
         human_control_timeout_s=1.0,
+        human_rebaseline_timeout_s=1.0,
+        max_human_rebaseline_error_rad=0.2,
         max_human_command_age_ms=200.0,
         state_timeout_s=0.1,
         max_state_age_ms=200.0,
@@ -318,6 +347,124 @@ def test_human_successful_send_is_recorded_before_terminal_label() -> None:
 
     assert recorder.sources == ["human"]
     assert [source for source, _ in ros.commands] == ["human"]
+
+
+def test_first_human_arm_target_must_match_measured_rebaseline_pose() -> None:
+    class MismatchedHumanRos(_GatewayRos):
+        def rebaseline_human_control(self, _timeout_s):
+            return 9
+
+        def begin_human_handoff(self):
+            return 10
+
+        def wait_human_action(self, **_kwargs):
+            target = np.ones(16, dtype=np.float32)
+            return target, {"sequence": 11, "arm_sequence": 11, "age_ms": 0.0}
+
+        def state(self, _timeout_s, _max_age_s):
+            return np.zeros(16, dtype=np.float32)
+
+    class NoKeys:
+        @staticmethod
+        def poll():
+            return []
+
+    class HealthyObservationStream:
+        @staticmethod
+        def raise_if_failed():
+            return None
+
+    ros = MismatchedHumanRos()
+    operator = OperatorIntervention(enabled=True)
+    operator.request_takeover("test_handoff", automatic=True)
+    args = SimpleNamespace(
+        human_control_timeout_s=1.0,
+        human_rebaseline_timeout_s=1.0,
+        max_human_rebaseline_error_rad=0.08,
+        max_human_command_age_ms=200.0,
+        state_timeout_s=0.1,
+        max_state_age_ms=200.0,
+        max_joint_delta_rad=0.03,
+        enable_motion=True,
+    )
+
+    with pytest.raises(RuntimeError, match="post-rebaseline FA human target drifted"):
+        client.run_human_control(
+            ros=ros,
+            args=args,
+            operator=operator,
+            listener=NoKeys(),
+            observation_stream=HealthyObservationStream(),
+            history=SentCommandHistory(),
+            initial_hold=np.zeros(16, dtype=np.float32),
+        )
+
+    assert ros.commands == []
+
+
+def test_slow_post_rebaseline_ramp_fails_before_human_authority() -> None:
+    class SlowlyDriftingHumanRos(_GatewayRos):
+        def __init__(self):
+            super().__init__()
+            self.sequence = 10
+
+        def rebaseline_human_control(self, _timeout_s):
+            return 19
+
+        def begin_human_handoff(self):
+            return 10
+
+        def wait_human_action(self, **_kwargs):
+            self.sequence += 1
+            target = np.zeros(16, dtype=np.float32)
+            target[:14] = 0.03 * (self.sequence - 10)
+            return target, {
+                "sequence": self.sequence,
+                "arm_sequence": self.sequence,
+                "age_ms": 0.0,
+            }
+
+        def state(self, _timeout_s, _max_age_s):
+            return np.zeros(16, dtype=np.float32)
+
+    class NoKeys:
+        @staticmethod
+        def poll():
+            return []
+
+    class HealthyObservationStream:
+        @staticmethod
+        def raise_if_failed():
+            return None
+
+    ros = SlowlyDriftingHumanRos()
+    operator = OperatorIntervention(enabled=True)
+    operator.request_takeover("test_handoff", automatic=True)
+    args = SimpleNamespace(
+        human_control_timeout_s=1.0,
+        human_rebaseline_timeout_s=1.0,
+        human_rebaseline_verify_s=1.0,
+        max_human_rebaseline_error_rad=0.08,
+        max_human_command_age_ms=200.0,
+        state_timeout_s=0.1,
+        max_state_age_ms=200.0,
+        max_joint_delta_rad=0.03,
+        enable_motion=True,
+    )
+
+    with pytest.raises(RuntimeError, match="post-rebaseline FA human target drifted"):
+        client.run_human_control(
+            ros=ros,
+            args=args,
+            operator=operator,
+            listener=NoKeys(),
+            observation_stream=HealthyObservationStream(),
+            history=SentCommandHistory(),
+            initial_hold=np.zeros(16, dtype=np.float32),
+        )
+
+    assert ros.commands == []
+    assert operator.mode is ControlMode.SAFE_HOLD
 
 
 class _Message:
@@ -507,6 +654,7 @@ def _one_camera_sample(*_args, **_kwargs):
     images = {
         key: np.zeros((2, 3, 3), dtype=np.uint8) for key in CAMERA_KEYS
     }
+    depths = {key: np.zeros((2, 3), dtype=np.uint16) for key in CAMERA_KEYS}
     metadata = {
         key: {
             "sequence": 1,
@@ -515,7 +663,7 @@ def _one_camera_sample(*_args, **_kwargs):
         }
         for key in CAMERA_KEYS
     }
-    return images, metadata
+    return images, depths, metadata
 
 
 @pytest.mark.parametrize("failure_origin", ["camera", "recorder"])
@@ -552,6 +700,140 @@ def test_observation_stream_camera_or_recorder_fault_is_fail_closed(
         assert expected_cause in str(caught.value.__cause__)
         with pytest.raises(ObservationStreamError):
             stream.raise_if_failed()
+    finally:
+        stream.stop()
+
+
+def test_observation_stream_retries_transient_stale_frame(monkeypatch) -> None:
+    attempts = 0
+
+    def transient_camera(*_args, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts <= 2:
+            raise CameraFault("head", "stale_rgbd", "temporary pause")
+        return _one_camera_sample()
+
+    monkeypatch.setattr(client, "read_images", transient_camera)
+    args = _stream_args()
+    args.observation_timeout_s = 0.5
+    stream = FaObservationStream(
+        cameras={},
+        ros=_StreamRos(),
+        args=args,
+        command_history=SentCommandHistory(),
+    )
+    stream.start()
+    try:
+        observation = stream.wait_next(newer_than_sequence=0, timeout_s=0.5)
+        assert observation.sequence >= 1
+        assert attempts >= 3
+        stream.raise_if_failed()
+    finally:
+        stream.stop()
+
+
+def test_observation_stream_retries_unsynchronized_camera_set(monkeypatch) -> None:
+    attempts = 0
+
+    def transient_skew(*_args, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        images, depths, metadata = _one_camera_sample()
+        if attempts == 1:
+            metadata[CAMERA_KEYS[0]]["captured_at_monotonic_s"] -= 0.2
+        return images, depths, metadata
+
+    monkeypatch.setattr(client, "read_images", transient_skew)
+    args = _stream_args()
+    args.observation_timeout_s = 0.5
+    stream = FaObservationStream(
+        cameras={},
+        ros=_StreamRos(),
+        args=args,
+        command_history=SentCommandHistory(),
+    )
+    stream.start()
+    try:
+        observation = stream.wait_next(newer_than_sequence=0, timeout_s=0.5)
+        assert observation.sequence >= 1
+        assert attempts >= 2
+        stream.raise_if_failed()
+    finally:
+        stream.stop()
+
+
+def test_observation_stream_retries_aligned_but_stale_camera_set(monkeypatch) -> None:
+    attempts = 0
+
+    def transient_stale_set(*_args, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        images, depths, metadata = _one_camera_sample()
+        if attempts == 1:
+            for value in metadata.values():
+                value["captured_at_monotonic_s"] -= 1.0
+        return images, depths, metadata
+
+    monkeypatch.setattr(client, "read_images", transient_stale_set)
+    args = _stream_args()
+    args.observation_timeout_s = 0.5
+    stream = FaObservationStream(
+        cameras={},
+        ros=_StreamRos(),
+        args=args,
+        command_history=SentCommandHistory(),
+    )
+    stream.start()
+    try:
+        observation = stream.wait_next(newer_than_sequence=0, timeout_s=0.5)
+        assert observation.sequence >= 1
+        assert attempts >= 2
+        stream.raise_if_failed()
+    finally:
+        stream.stop()
+
+
+def test_observation_stream_retries_camera_set_without_matching_joint_state(
+    monkeypatch,
+) -> None:
+    camera_attempts = 0
+
+    def camera_sample(*_args, **_kwargs):
+        nonlocal camera_attempts
+        camera_attempts += 1
+        images, depths, metadata = _one_camera_sample()
+        for value in metadata.values():
+            value["sequence"] = camera_attempts
+        return images, depths, metadata
+
+    class TransientJointSkewRos(_StreamRos):
+        def __init__(self):
+            self.state_attempts = 0
+
+        def state_at_observation(self, *args, **kwargs):
+            self.state_attempts += 1
+            if self.state_attempts == 1:
+                raise TimeoutError("nearest joint sample skew=222.2 ms")
+            return super().state_at_observation(*args, **kwargs)
+
+    monkeypatch.setattr(client, "read_images", camera_sample)
+    args = _stream_args()
+    args.observation_timeout_s = 0.5
+    ros = TransientJointSkewRos()
+    stream = FaObservationStream(
+        cameras={},
+        ros=ros,
+        args=args,
+        command_history=SentCommandHistory(),
+    )
+    stream.start()
+    try:
+        observation = stream.wait_next(newer_than_sequence=0, timeout_s=0.5)
+        assert observation.sequence >= 1
+        assert ros.state_attempts >= 2
+        assert camera_attempts >= 2
+        stream.raise_if_failed()
     finally:
         stream.stop()
 
@@ -595,6 +877,10 @@ def test_policy_connection_failure_holds_then_allows_human_label(
 
         def begin_human_handoff(self):
             return self.human_command_sequence
+
+        def rebaseline_human_control(self, _timeout_s):
+            events.append("bimanual_rebaseline")
+            return 1
 
         def close(self):
             events.append("ros_closed")
@@ -660,6 +946,7 @@ def test_policy_connection_failure_holds_then_allows_human_label(
         state_timeout_s=0.1,
         max_state_age_ms=200.0,
         human_control_timeout_s=1.0,
+        human_rebaseline_timeout_s=1.0,
         max_human_command_age_ms=200.0,
         max_joint_delta_rad=0.03,
         failure_reason=None,
@@ -691,7 +978,7 @@ def test_policy_connection_failure_holds_then_allows_human_label(
 def test_terminal_or_cleanup_failure_commits_effective_error_reason(
     monkeypatch, tmp_path, failure_point, expected_reason
 ) -> None:
-    import beavr.scripts.ahawam_fa_episode_recorder as recorder_module
+    import beavr.scripts.ahawam_fa_isolated_recorder as recorder_module
 
     finalized = {}
 
@@ -813,7 +1100,9 @@ def test_terminal_or_cleanup_failure_commits_effective_error_reason(
     monkeypatch.setattr(client, "FaObservationStream", FakeStream)
     monkeypatch.setattr(client, "PolicyConnection", FakePolicy)
     monkeypatch.setattr(client, "ThreadPoolExecutor", FakeExecutor)
-    monkeypatch.setattr(recorder_module, "FaEpisodeRecorder", FakeRecorder)
+    monkeypatch.setattr(
+        recorder_module, "IsolatedFaEpisodeRecorder", FakeRecorder
+    )
     monkeypatch.setattr(
         client,
         "open_cameras",

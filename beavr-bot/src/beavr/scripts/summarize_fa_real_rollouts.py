@@ -133,6 +133,36 @@ def _safe_video_path(episode: Path, value: Any, camera: str) -> Path | None:
     return current
 
 
+def _safe_depth_video_path(
+    episode: Path, value: Any, camera: str, expected_filename: str
+) -> Path | None:
+    """Accept only the recorder-owned depth segment path for one camera."""
+
+    if not isinstance(value, str):
+        return None
+    relative = Path(value)
+    if (
+        relative.is_absolute()
+        or ".." in relative.parts
+        or len(relative.parts) != 3
+        or relative.parts[:2] != ("videos", f"{camera}_depth")
+        or relative.name != expected_filename
+    ):
+        return None
+    current = episode
+    if current.is_symlink():
+        return None
+    for component in relative.parts:
+        current = current / component
+        if current.is_symlink():
+            return None
+    try:
+        current.resolve(strict=False).relative_to(episode.resolve(strict=True))
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return current
+
+
 def _validate_identity(
     episode_name: str,
     artifact_name: str,
@@ -260,7 +290,9 @@ def _validate_outcome(
 def _validate_frames(
     episode_name: str,
     frames: list[dict[str, Any]],
-    expected_mapping: list[tuple[int, int, dict[str, str]]],
+    expected_mapping: list[
+        tuple[int, int, dict[str, str], dict[str, str] | None]
+    ],
 ) -> tuple[list[str], Counter[str], float]:
     issues: list[str] = []
     sources: Counter[str] = Counter()
@@ -383,12 +415,24 @@ def _validate_frames(
                         )
 
         if index < len(expected_mapping):
-            segment_index, segment_frame_index, videos = expected_mapping[index]
+            (
+                segment_index,
+                segment_frame_index,
+                videos,
+                depth_videos,
+            ) = expected_mapping[index]
             expected = {
                 "segment_index": segment_index,
                 "segment_frame_index": segment_frame_index,
                 "videos": videos,
             }
+            if depth_videos is not None:
+                expected["depth_videos"] = depth_videos
+                hashes = row.get("depth_sha256")
+                if not isinstance(hashes, dict) or set(hashes) != set(CAMERA_KEYS):
+                    issues.append(
+                        f"{prefix} depth_sha256 must contain all FA cameras"
+                    )
             for key, value in expected.items():
                 if row.get(key) != value:
                     issues.append(
@@ -426,8 +470,13 @@ def _validate_manifest(
     manifest: dict[str, Any],
     frame_count: int,
     issues: list[str],
-) -> list[tuple[int, int, dict[str, str]]]:
-    expected_mapping: list[tuple[int, int, dict[str, str]]] = []
+    *,
+    require_depth: bool,
+    depth_segment_suffix: str,
+) -> list[tuple[int, int, dict[str, str], dict[str, str] | None]]:
+    expected_mapping: list[
+        tuple[int, int, dict[str, str], dict[str, str] | None]
+    ] = []
     segments = manifest.get("segments")
     expected_paths: set[str] = set()
     if not isinstance(segments, list) or not segments:
@@ -444,6 +493,7 @@ def _validate_manifest(
         start_frame = segment.get("start_frame")
         count = segment.get("frame_count")
         videos = segment.get("videos")
+        depth_videos = segment.get("depth_videos")
         if segment_index != expected_index:
             issues.append(f"{prefix} segment_index is not contiguous")
         if start_frame != next_start:
@@ -459,6 +509,7 @@ def _validate_manifest(
             continue
 
         clean_videos: dict[str, str] = {}
+        clean_depth_videos: dict[str, str] = {}
         all_paths_safe = True
         for camera in CAMERA_KEYS:
             expected_value = f"videos/{camera}/segment-{expected_index:06d}.mp4"
@@ -481,9 +532,48 @@ def _validate_manifest(
                 issues.append(f"{prefix} missing or unsafe video {relative}")
             elif path.stat().st_size <= 0:
                 issues.append(f"{prefix} empty video {relative}")
+            if require_depth:
+                depth_filename = (
+                    f"segment-{expected_index:06d}{depth_segment_suffix}"
+                )
+                expected_depth = f"videos/{camera}_depth/{depth_filename}"
+                depth_value = (
+                    depth_videos.get(camera)
+                    if isinstance(depth_videos, dict)
+                    else None
+                )
+                if depth_value != expected_depth:
+                    issues.append(
+                        f"{prefix} {camera} depth path={depth_value!r}, "
+                        f"expected={expected_depth!r}"
+                    )
+                depth_path = _safe_depth_video_path(
+                    episode, depth_value, camera, depth_filename
+                )
+                if depth_path is None:
+                    issues.append(f"{prefix} has unsafe {camera} depth video path")
+                    all_paths_safe = False
+                    continue
+                depth_relative = str(depth_path.relative_to(episode))
+                if depth_relative in expected_paths:
+                    issues.append(f"{prefix} reuses video path {depth_relative}")
+                expected_paths.add(depth_relative)
+                clean_depth_videos[camera] = depth_relative
+                if not depth_path.is_file() or depth_path.is_symlink():
+                    issues.append(
+                        f"{prefix} missing or unsafe depth video {depth_relative}"
+                    )
+                elif depth_path.stat().st_size <= 0:
+                    issues.append(f"{prefix} empty depth video {depth_relative}")
         if all_paths_safe and len(clean_videos) == len(CAMERA_KEYS):
             expected_mapping.extend(
-                (expected_index, offset, dict(clean_videos)) for offset in range(count)
+                (
+                    expected_index,
+                    offset,
+                    dict(clean_videos),
+                    dict(clean_depth_videos) if require_depth else None,
+                )
+                for offset in range(count)
             )
         next_start += count
 
@@ -495,7 +585,11 @@ def _validate_manifest(
     videos_dir = episode / "videos"
     actual_paths: set[str] = set()
     if videos_dir.is_dir() and not videos_dir.is_symlink():
-        for path in videos_dir.rglob("*.mp4"):
+        for path in (
+            *videos_dir.rglob("*.mp4"),
+            *videos_dir.rglob("*.mkv"),
+            *videos_dir.rglob("*.depth.bl2"),
+        ):
             try:
                 actual_paths.add(str(path.relative_to(episode)))
             except ValueError:
@@ -576,11 +670,38 @@ def _inspect_committed_episode(path: Path) -> tuple[dict[str, Any], list[str]]:
             issues.append(f"{path.name}: metadata sent_command_shape must be [16]")
         if metadata.get("camera_keys") != list(CAMERA_KEYS):
             issues.append(f"{path.name}: metadata camera_keys mismatch")
+        depth_keys = metadata.get("depth_camera_keys")
+        if depth_keys is not None:
+            if depth_keys != list(CAMERA_KEYS):
+                issues.append(f"{path.name}: metadata depth_camera_keys mismatch")
+            if metadata.get("depth_dtype") != "uint16":
+                issues.append(f"{path.name}: metadata depth_dtype must be uint16")
+            if metadata.get("depth_unit") != "millimetres":
+                issues.append(
+                    f"{path.name}: metadata depth_unit must be millimetres"
+                )
     if manifest and manifest.get("camera_keys") != list(CAMERA_KEYS):
         issues.append(f"{path.name}: manifest camera_keys mismatch")
     _validate_outcome(path.name, outcome, issues)
 
-    expected_mapping = _validate_manifest(path, manifest, frame_count, issues)
+    require_depth = metadata.get("depth_camera_keys") == list(CAMERA_KEYS)
+    depth_codec = metadata.get("depth_video_codec")
+    depth_segment_suffix = (
+        ".depth.bl2"
+        if isinstance(depth_codec, dict)
+        and depth_codec.get("encoding") == "uint16_mm_blosc_zstd_v1"
+        else ".mkv"
+    )
+    if require_depth and manifest.get("depth_camera_keys") != list(CAMERA_KEYS):
+        issues.append(f"{path.name}: manifest depth_camera_keys mismatch")
+    expected_mapping = _validate_manifest(
+        path,
+        manifest,
+        frame_count,
+        issues,
+        require_depth=require_depth,
+        depth_segment_suffix=depth_segment_suffix,
+    )
     frame_issues, source_counts, duration = _validate_frames(
         path.name, frames, expected_mapping
     )

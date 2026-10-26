@@ -250,6 +250,41 @@ def test_summarize_healthy_fa_rollouts_and_does_not_modify_data(tmp_path):
     assert report["duration_sec"] == pytest.approx(1.0)
 
 
+def test_summarize_accepts_complete_rgbd_manifest(tmp_path):
+    episode_uuid = "rgbd-success"
+    index_row = _add_episode(tmp_path, episode_uuid)
+    episode = tmp_path / "episodes" / episode_uuid
+    depth_paths = {}
+    for camera in summary.CAMERA_KEYS:
+        path = episode / "videos" / f"{camera}_depth" / "segment-000000.mkv"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"ffv1-not-decoded-in-summary")
+        depth_paths[camera] = str(path.relative_to(episode))
+
+    metadata = json.loads((episode / "metadata.json").read_text())
+    metadata.update(
+        depth_camera_keys=list(summary.CAMERA_KEYS),
+        depth_dtype="uint16",
+        depth_unit="millimetres",
+    )
+    _write_json(episode / "metadata.json", metadata)
+    manifest = json.loads((episode / "manifest.json").read_text())
+    manifest["depth_camera_keys"] = list(summary.CAMERA_KEYS)
+    manifest["segments"][0]["depth_videos"] = depth_paths
+    _write_json(episode / "manifest.json", manifest)
+    frames = [json.loads(line) for line in (episode / "frames.jsonl").read_text().splitlines()]
+    for row in frames:
+        row["depth_videos"] = depth_paths
+        row["depth_sha256"] = {camera: "0" * 64 for camera in summary.CAMERA_KEYS}
+    _write_jsonl(episode / "frames.jsonl", frames)
+    _write_jsonl(tmp_path / "episodes.jsonl", [index_row])
+
+    report = summary.summarize(tmp_path)
+
+    assert report["healthy"] is True
+    assert report["committed_count"] == 1
+
+
 def test_strict_rejects_duplicate_index_and_staging_path(tmp_path):
     row = _add_episode(tmp_path, "duplicate")
     staged_row = dict(row, path=".in_progress/duplicate")

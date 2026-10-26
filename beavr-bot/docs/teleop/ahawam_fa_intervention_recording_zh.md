@@ -4,8 +4,9 @@
 episode 的连续保存。SO101 的对应实现与运行参数在
 `HARP-3D-WAM/docs/SO101_REAL_TEST_DATA_AND_INTERVENTION_ZH.md`。
 
-> 当前只完成了静态检查、mock 闭环和编码/解码测试。大脑、小脑和实机未启动，
-> 因而 MinSnap 覆盖、PICO 接管、ROS 发现拓扑及长时间磁盘吞吐仍需后续实机验收。
+> 2026-10-23 已在 FA 实机端完成禁用运动的 RGB-D 严格预检：5 Hz 连续采集 163 帧，
+> 三路 RGB H.264 与三路无损深度均通过完整解码校验，episode 正常提交。该预检不包含
+> MinSnap 运动、PICO 接管或任务成功/失败标注，仍需按下文顺序继续验收。
 
 ## 控制权设计
 
@@ -37,7 +38,10 @@ VR 候选话题固定为：
 - `AUTO`：只允许模型命令。
 - `SAFE_HOLD`：取消剩余模型 chunk，以最新完整 14 关节反馈发布一次保持目标；夹爪
   保持当前命令 latch。
-- `HUMAN`：只转发接管边界之后的新鲜 PICO 候选，接管之前积压的候选会被丢弃。
+- `HUMAN`：保留启动后已经完成的 VR 坐标轴标定，只让左右 Operator 分别把介入时的
+  当前手姿映射到双臂当前实测位姿，完成 `Hand_Init_H` 相对零点重基准；收到双臂完成
+  ACK 后，才转发接管边界之后的新鲜 PICO
+  候选。标定期间以及接管之前积压的候选都会被丢弃。
 - `FINALIZED`：拒绝后续模型/人工命令，只允许退出时保持。
 
 模型 socket/返回格式/NaN/首目标跳变，以及服务端 active recovery 的
@@ -55,6 +59,17 @@ VR 候选话题固定为：
 
 模型自动失败也会进入人工模式。人工修复后按 `s`，保存为
 `outcome=success, assisted=true`；介入与任务结果是两个独立字段。
+
+启动遥操作后先完成一次 VR 坐标轴标定，然后等待人工介入。按 `i` 后终端会先显示
+`SAFE_HOLD`；此时机械臂保持在介入瞬间的实测位置，双手短暂保持稳定即可，不会再次
+要求执行 VR 坐标轴标定，也不需要把手移回模型启动前的位置。只有终端显示
+`HUMAN active ... both arms now use their current poses as origins` 后，双臂运动才会作为
+人工候选通过 AHA 网关下发。若 120 秒内任意一侧未完成重基准，客户端超时退出并继续
+保持，不会使用旧的人手/机器人映射。
+
+重基准会取消边界之前仍在后台计算的 IK，并给 IK 结果绑定代次，旧代次结果即使稍后
+完成也会被丢弃。进入 HUMAN 后第一条新鲜手臂目标还必须与当前实测关节位置相差不超过
+`0.08 rad`；超过阈值会 fail-closed 并保持当前位置，不能靠逐步限幅继续走向旧基准。
 
 ## 后续实机运行命令
 
@@ -88,6 +103,12 @@ PYTHONPATH=src python -m beavr.scripts.ahawam_fa_async_client \
   --host "$AHA_BRAIN_IP" \
   --port 10000 \
   --camera-settings configs/cameras/sysmo32_rgbd_aligned_native.json \
+  --record-fps 5 \
+  --max-camera-age-ms 300 \
+  --max-camera-skew-ms 150 \
+  --max-image-state-skew-ms 150 \
+  --max-state-age-ms 200 \
+  --observation-timeout-s 10 \
   --enable-motion \
   --confirm-motion RUN \
   --enable-operator-intervention \
@@ -95,9 +116,11 @@ PYTHONPATH=src python -m beavr.scripts.ahawam_fa_async_client \
   --record-dir /home/likunwei/real_rollouts/fa
 ```
 
-默认连续录制为 10 Hz，因为两路 FA wrist 相机的原生 profile 是 10 Hz。不要为了得到
-30 Hz 文件而把重复图像伪装成新采样；每路相机的 sequence、采集时间和与关节状态的
-skew 都保存在逐帧记录中。
+两路 FA wrist 相机的原生 profile 是 10 Hz，但当前实机偶发约 0.45 秒的取流停顿，
+严格 10 Hz 数据连续性预检会据实失败。当前实机验收过的连续录制频率是 5 Hz；不要
+为了得到更高帧率而复制图像或放宽同步安全阈值。每路相机的 sequence、采集时间和与
+关节状态的 skew 都保存在逐帧记录中。短暂 stale/missing/skew 会在 10 秒观测期限内
+等待整组三路新鲜帧；整组绝对年龄仍超过 300 ms 时不会进入推理或录制。
 
 ## 数据结构与语义
 
@@ -107,8 +130,14 @@ skew 都保存在逐帧记录中。
 <record-dir>/.in_progress/<uuid>/
 ```
 
-三路 H.264、逐帧 JSONL、事件、metadata 和 manifest 全部关闭并校验后，目录才会原子
+三路 RGB H.264、三路无损深度 Blosc-Zstd/u16 分段流、逐帧 JSONL、事件、metadata 和
+manifest 全部关闭并校验后，目录才会原子
 移动到：
+
+实时观测与编码采用进程隔离：相机/ROS 主进程只把一份同步 RGB-D 快照复制到固定
+共享内存，独立的 `spawn` 子进程负责 RGB 硬编码、深度压缩、哈希、JSONL、分段、
+落盘和最终校验。共享内存槽在子进程确认复制完成前不会复用；编码队列满、子进程
+退出或 IPC 超时都会 fail-closed，不会静默丢帧。
 
 ```text
 <record-dir>/episodes/<uuid>/
@@ -120,7 +149,10 @@ manifest 校验失败时不会提交，staging 会保留用于排障。
 
 逐帧原始记录包含：
 
-- 三路原始 RGB 与每路时间戳/sequence；
+- 三路 RGB，以及与 RGB 对齐的三路 `uint16` 毫米深度；
+- 深度以原始毫米 `uint16` 写入逐帧定界的 Blosc-Zstd 流（level 1 + bitshuffle），解码后逐帧 SHA256 校验，数值完全可逆；
+  提交前会完整解码，并用逐帧 SHA-256 验证能精确恢复原始毫米值；
+- 每路相机的采集时间戳、sequence、图像/关节 skew；
 - 16D state：左臂 7 + 右臂 7 + 左右夹爪命令 latch；
 - 最后一个在该图像采集时刻之前成功 publish 的 `sent_command`、来源和回执；
 - `command_publication`：完整/部分 ROS 写入、来源以及“输出可能已改变”的保守证据；
@@ -154,7 +186,7 @@ PYTHONPATH=src python -m beavr.scripts.summarize_fa_real_rollouts \
 ## 实机验收顺序
 
 1. 只读确认三相机 profile、完整 14 关节 freshness/时钟/skew 和 ROS 发布者拓扑。
-2. 不发模型动作，确认连续录制、三视频解码、JSONL/manifest 和磁盘吞吐。
+2. 不发模型动作，确认三路 RGB、三路深度连续录制、完整解码、JSONL/manifest 和磁盘吞吐。
 3. 低风险姿态下验证一次 measured hold，确认旧 MinSnap 轨迹被覆盖。
 4. 验证 `i` 后只有接管后的 PICO 候选能到实机，并核对夹爪 `20=关、21=开`。
 5. 分别完成 autonomous success、assisted success、failure、abort、故障 staging。

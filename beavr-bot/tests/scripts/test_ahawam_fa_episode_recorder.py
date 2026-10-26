@@ -1,4 +1,5 @@
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -7,9 +8,11 @@ import numpy as np
 import pytest
 
 import beavr.scripts.ahawam_fa_episode_recorder as recorder_module
+from beavr.scripts.ahawam_fa_isolated_recorder import IsolatedFaEpisodeRecorder
 from beavr.scripts.ahawam_fa_episode_recorder import (
     CAMERA_KEYS,
     CAMERA_SHAPES,
+    DEPTH_SHAPES,
     FaEpisodeRecorder,
     RecorderBusyError,
     RecorderFailedError,
@@ -25,7 +28,7 @@ class _FakeEncoder:
         self.closed = False
         assert fps > 0
         assert crf == 30
-        assert gop == 2
+        assert gop == fps
 
     def write(self, frame):
         assert not self.closed
@@ -40,10 +43,38 @@ class _FakeEncoder:
         self.closed = True
 
 
+class _FakeDepthEncoder:
+    def __init__(self, *, path, fps, width, height):
+        self.path = Path(path)
+        self.expected_shape = (height, width)
+        self.frames = 0
+        self.closed = False
+        assert fps > 0
+
+    def write(self, frame):
+        assert not self.closed
+        assert frame.shape == self.expected_shape
+        assert frame.dtype == np.uint16
+        self.frames += 1
+
+    def close(self):
+        if self.closed:
+            return
+        self.path.write_bytes(f"fake-depth-frames={self.frames}".encode())
+        self.closed = True
+
+
 def _images(seed=0):
     return {
         key: np.full(shape, seed + index, dtype=np.uint8)
         for index, (key, shape) in enumerate(CAMERA_SHAPES.items())
+    }
+
+
+def _depths(seed=0):
+    return {
+        key: np.full(shape, min(1000, 100 + seed + index), dtype=np.uint16)
+        for index, (key, shape) in enumerate(DEPTH_SHAPES.items())
     }
 
 
@@ -89,6 +120,7 @@ def _submit(
 ):
     return recorder.submit_observation(
         images=_images(seed),
+        depths=_depths(seed),
         state=np.linspace(-1.0, 1.0, 16, dtype=np.float32) + seed,
         camera_metadata=_camera_metadata(camera_sequence, captured_at),
         state_metadata={
@@ -107,6 +139,83 @@ def _json_rows(path):
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
+def test_default_blosc_depth_round_trip_is_exact_mm(tmp_path):
+    path = tmp_path / "depth.depth.bl2.partial"
+    source = np.resize(np.arange(1001, dtype=np.uint16), (48, 64))
+    encoder = recorder_module._BloscZstdDepthEncoder(
+        path=path,
+        fps=10,
+        width=64,
+        height=48,
+    )
+    encoder.write(source)
+    encoder.write(np.flipud(source).copy())
+    encoder.close()
+    expected = [
+        recorder_module.hashlib.sha256(frame.tobytes()).hexdigest()
+        for frame in (source, np.flipud(source).copy())
+    ]
+    recorder_module._validate_blosc_depth_stream(
+        path,
+        expected_hashes=expected,
+        expected_fps=10,
+        expected_shape=(48, 64),
+    )
+
+
+def test_default_encoders_commit_one_complete_rgbd_frame(tmp_path):
+    recorder = FaEpisodeRecorder(
+        tmp_path,
+        fps=10,
+        min_free_gb=0,
+        config={"enable_motion": False},
+        validate_timing=False,
+    )
+    _submit(
+        recorder,
+        frame_sequence=1,
+        captured_at=10.0,
+        camera_sequence=1,
+    )
+    final_path = recorder.finalize("unlabeled", reason="encoder_contract_test")
+    manifest = json.loads((final_path / "manifest.json").read_text())
+    segment = manifest["segments"][0]
+    assert set(segment["videos"]) == set(CAMERA_KEYS)
+    assert set(segment["depth_videos"]) == set(CAMERA_KEYS)
+    assert all((final_path / path).stat().st_size > 0 for path in segment["videos"].values())
+    assert all(
+        (final_path / path).stat().st_size > 0
+        for path in segment["depth_videos"].values()
+    )
+
+
+def test_isolated_recorder_commits_rgbd_in_spawned_process(tmp_path):
+    recorder = IsolatedFaEpisodeRecorder(
+        tmp_path,
+        fps=10,
+        min_free_gb=0,
+        config={"enable_motion": False},
+        validate_timing=False,
+    )
+    try:
+        assert recorder.process_pid != os.getpid()
+        _submit(
+            recorder,
+            frame_sequence=1,
+            captured_at=10.0,
+            camera_sequence=1,
+        )
+        final_path = recorder.finalize(
+            "unlabeled", reason="isolated_encoder_contract_test"
+        )
+        manifest = json.loads((final_path / "manifest.json").read_text())
+        assert manifest["frame_count"] == 1
+        assert set(manifest["segments"][0]["videos"]) == set(CAMERA_KEYS)
+        assert set(manifest["segments"][0]["depth_videos"]) == set(CAMERA_KEYS)
+    finally:
+        recorder.close()
+
+
 def test_commits_three_camera_episode_without_mislabeling_sent_command_as_action(
     tmp_path,
 ):
@@ -117,6 +226,7 @@ def test_commits_three_camera_episode_without_mislabeling_sent_command_as_action
         min_free_gb=0,
         config={"enable_motion": True, "robot": "FA"},
         encoder_factory=_FakeEncoder,
+        depth_encoder_factory=_FakeDepthEncoder,
     )
 
     _submit(
@@ -177,12 +287,17 @@ def test_commits_three_camera_episode_without_mislabeling_sent_command_as_action
     assert [segment["frame_count"] for segment in manifest["segments"]] == [2, 1]
     for segment in manifest["segments"]:
         assert set(segment["videos"]) == set(CAMERA_KEYS)
+        assert set(segment["depth_videos"]) == set(CAMERA_KEYS)
         for relative_path in segment["videos"].values():
+            assert (final_path / relative_path).stat().st_size > 0
+        for relative_path in segment["depth_videos"].values():
             assert (final_path / relative_path).stat().st_size > 0
 
     metadata = json.loads((final_path / "metadata.json").read_text())
     assert metadata["state_shape"] == [16]
     assert metadata["sent_command_shape"] == [16]
+    assert metadata["depth_dtype"] == "uint16"
+    assert metadata["depth_unit"] == "millimetres"
     assert (
         metadata["training_export_contract"]["last_frame_has_training_transition"]
         is False
@@ -224,6 +339,7 @@ def test_explicit_terminal_outcomes_are_preserved(
         min_free_gb=0,
         validate_timing=False,
         encoder_factory=_FakeEncoder,
+        depth_encoder_factory=_FakeDepthEncoder,
     )
     _submit(
         recorder,
@@ -246,6 +362,7 @@ def test_partial_or_future_sent_command_fails_closed(tmp_path):
         fps=10,
         min_free_gb=0,
         encoder_factory=_FakeEncoder,
+        depth_encoder_factory=_FakeDepthEncoder,
     )
     command = _sent_command(sent_at=10.1)
     command["receipt"]["right_hand_published"] = False
@@ -272,6 +389,7 @@ def test_partial_or_future_sent_command_fails_closed(tmp_path):
         fps=10,
         min_free_gb=0,
         encoder_factory=_FakeEncoder,
+        depth_encoder_factory=_FakeDepthEncoder,
     )
     with pytest.raises(RecorderValidationError, match="newer than the observation"):
         _submit(
@@ -292,6 +410,7 @@ def test_partial_publish_is_unverified_motion_evidence(tmp_path):
         validate_timing=False,
         config={"enable_motion": True},
         encoder_factory=_FakeEncoder,
+        depth_encoder_factory=_FakeDepthEncoder,
     )
     recorder.note_partial_command(
         {
@@ -330,6 +449,7 @@ def test_failed_abort_then_close_preserves_first_failure_evidence(tmp_path):
         fps=10,
         min_free_gb=0,
         encoder_factory=_FakeEncoder,
+        depth_encoder_factory=_FakeDepthEncoder,
     )
     images = _images()
     images["head"] = images["head"][:-1]
@@ -370,6 +490,7 @@ def test_invalid_frame_shape_poison_episode_and_cannot_commit(tmp_path):
         fps=10,
         min_free_gb=0,
         encoder_factory=_FakeEncoder,
+        depth_encoder_factory=_FakeDepthEncoder,
     )
     images = _images()
     images["head"] = images["head"][:-1]
@@ -410,6 +531,7 @@ def test_bounded_queue_overflow_is_fail_closed_and_drops_nothing_silently(tmp_pa
         queue_size=1,
         min_free_gb=0,
         encoder_factory=_BlockingEncoder,
+        depth_encoder_factory=_FakeDepthEncoder,
     )
     _submit(
         recorder,
@@ -450,6 +572,7 @@ def test_background_encoder_failure_is_observable_and_cannot_commit(tmp_path):
         fps=10,
         min_free_gb=0,
         encoder_factory=_FailingEncoder,
+        depth_encoder_factory=_FakeDepthEncoder,
     )
     _submit(
         recorder,
@@ -490,6 +613,7 @@ def test_background_disk_failure_is_observable_and_cannot_commit(tmp_path, monke
         fps=10,
         min_free_gb=0,
         encoder_factory=_FakeEncoder,
+        depth_encoder_factory=_FakeDepthEncoder,
     )
     _submit(
         recorder,
@@ -518,6 +642,7 @@ def test_single_writer_lock_prevents_overlapping_episode_transactions(tmp_path):
         fps=10,
         min_free_gb=0,
         encoder_factory=_FakeEncoder,
+        depth_encoder_factory=_FakeDepthEncoder,
     )
     with pytest.raises(RecorderBusyError):
         FaEpisodeRecorder(
@@ -525,5 +650,6 @@ def test_single_writer_lock_prevents_overlapping_episode_transactions(tmp_path):
             fps=10,
             min_free_gb=0,
             encoder_factory=_FakeEncoder,
+            depth_encoder_factory=_FakeDepthEncoder,
         )
     recorder.abort("test complete")

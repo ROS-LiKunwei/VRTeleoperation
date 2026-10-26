@@ -1,8 +1,9 @@
 """Crash-safe recorder for one FA AHA-WAM real-robot episode.
 
 This module is deliberately independent of ROS and camera drivers.  The FA
-client supplies immutable RGB/state snapshots while this recorder writes three
-H.264 streams and JSONL metadata on a bounded background queue.
+client supplies immutable RGB-D/state snapshots while this recorder writes
+three H.264 RGB streams, three lossless Blosc-Zstd depth streams, and JSONL metadata
+on a bounded background queue.
 
 FA's historical LeRobot contract is important here: a training action is the
 *next measured state*, not the command sent to ``/min_snap/target``.  Raw frame
@@ -28,10 +29,13 @@ import math
 import os
 import queue
 import shutil
+import struct
+import subprocess
 import threading
 import time
 import uuid
 from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -47,6 +51,7 @@ CAMERA_SHAPES = {
     "wrist_CV2756100033": (530, 848, 3),
     "wrist_CV2856D0001C": (530, 848, 3),
 }
+DEPTH_SHAPES = {key: shape[:2] for key, shape in CAMERA_SHAPES.items()}
 LEFT_JOINT_NAMES = (
     "left_shoulder_pitch_joint",
     "left_shoulder_roll_joint",
@@ -114,6 +119,7 @@ class _FramePacket:
     sequence: int
     captured_at: float
     images: dict[str, np.ndarray]
+    depths: dict[str, np.ndarray]
     state: tuple[float, ...]
     command: Optional[SentCommandSnapshot]
     camera_metadata: dict[str, Any]
@@ -151,12 +157,25 @@ class _PyAVH264Encoder:
         self._container = av.open(str(path), mode="w", format="mp4")
         try:
             self._stream = self._container.add_stream(
-                "libx264", rate=fps, options={"crf": str(crf), "g": str(gop)}
+                "libx264",
+                rate=fps,
+                options={
+                    "crf": str(crf),
+                    "g": str(gop),
+                    "preset": "ultrafast",
+                    "tune": "zerolatency",
+                    "bf": "0",
+                },
             )
             self._stream.width = width
             self._stream.height = height
             self._stream.pix_fmt = "yuv420p"
             self._stream.codec_context.gop_size = gop
+            # Three auto-threaded x264 encoders starved the Orbbec capture
+            # threads on the deployed ARM host.  One worker thread per stream
+            # keeps total CPU concurrency bounded; the recorder queue absorbs
+            # short encoding jitter without dropping observations.
+            self._stream.codec_context.thread_count = 1
         except Exception:
             self._container.close()
             raise
@@ -180,12 +199,227 @@ class _PyAVH264Encoder:
             self._closed = True
 
 
-def _default_encoder_factory(**kwargs: Any) -> _PyAVH264Encoder:
+def _default_encoder_factory(**kwargs: Any) -> Any:
+    if _jetson_h264_available():
+        return _GStreamerJetsonH264Encoder(**kwargs)
     return _PyAVH264Encoder(**kwargs)
 
 
+_JETSON_H264_AVAILABLE: Optional[bool] = None
+
+
+def _jetson_h264_available() -> bool:
+    global _JETSON_H264_AVAILABLE
+    if _JETSON_H264_AVAILABLE is not None:
+        return _JETSON_H264_AVAILABLE
+    executable = shutil.which("gst-inspect-1.0")
+    if executable is None:
+        _JETSON_H264_AVAILABLE = False
+        return False
+    try:
+        result = subprocess.run(
+            [executable, "nvv4l2h264enc"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=3.0,
+            check=False,
+        )
+        _JETSON_H264_AVAILABLE = result.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        _JETSON_H264_AVAILABLE = False
+    return _JETSON_H264_AVAILABLE
+
+
+class _GStreamerJetsonH264Encoder:
+    """Jetson NVENC H.264 writer fed with RGB24 frames over stdin."""
+
+    def __init__(
+        self,
+        *,
+        path: Path,
+        fps: int,
+        width: int,
+        height: int,
+        crf: int,
+        gop: int,
+    ) -> None:
+        del crf  # NVENC uses a high fixed bitrate instead of software CRF.
+        self.path = Path(path)
+        self.width = int(width)
+        self.height = int(height)
+        self.expected_shape = (self.height, self.width, 3)
+        self._closed = False
+        gst = shutil.which("gst-launch-1.0")
+        if gst is None:
+            raise RecorderError("gst-launch-1.0 disappeared after encoder probe")
+        command = [
+            gst,
+            "-q",
+            "fdsrc",
+            "fd=0",
+            "!",
+            "rawvideoparse",
+            "format=rgb",
+            f"width={self.width}",
+            f"height={self.height}",
+            f"framerate={int(fps)}/1",
+            "!",
+            "videoconvert",
+            "!",
+            "video/x-raw,format=RGBA",
+            "!",
+            "nvvidconv",
+            "!",
+            "video/x-raw(memory:NVMM),format=NV12",
+            "!",
+            "nvv4l2h264enc",
+            "maxperf-enable=1",
+            "bitrate=8000000",
+            f"iframeinterval={int(gop)}",
+            "insert-sps-pps=1",
+            "!",
+            "h264parse",
+            "!",
+            "qtmux",
+            "!",
+            "filesink",
+            f"location={self.path}",
+        ]
+        nice = shutil.which("nice")
+        if nice is not None:
+            command = [nice, "-n", "5", *command]
+        try:
+            self._process = subprocess.Popen(
+                command,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError as exc:
+            raise RecorderError(f"could not start Jetson H.264 encoder: {exc}") from exc
+
+    def write(self, frame: np.ndarray) -> None:
+        if self._closed:
+            raise RecorderError("cannot write to a closed Jetson encoder")
+        if frame.dtype != np.uint8 or frame.shape != self.expected_shape:
+            raise RecorderValidationError(
+                f"Jetson RGB frame expected {self.expected_shape}/uint8, "
+                f"got {frame.shape}/{frame.dtype}"
+            )
+        if self._process.stdin is None:
+            raise RecorderError("Jetson encoder stdin is unavailable")
+        try:
+            self._process.stdin.write(np.ascontiguousarray(frame).tobytes())
+            self._process.stdin.flush()
+        except (BrokenPipeError, OSError) as exc:
+            raise RecorderError(
+                f"Jetson H.264 encoder stopped with code {self._process.poll()}"
+            ) from exc
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if self._process.stdin is not None:
+            try:
+                self._process.stdin.close()
+            except BrokenPipeError:
+                pass
+        try:
+            return_code = self._process.wait(timeout=30.0)
+        except subprocess.TimeoutExpired as exc:
+            self._process.terminate()
+            try:
+                self._process.wait(timeout=3.0)
+            except subprocess.TimeoutExpired:
+                self._process.kill()
+                self._process.wait(timeout=3.0)
+            raise RecorderError("Jetson H.264 encoder did not stop") from exc
+        if return_code != 0:
+            raise RecorderError(
+                f"Jetson H.264 encoder exited with code {return_code}"
+            )
+
+
+_DEPTH_STREAM_MAGIC = b"AHA-DEPTH-BLOSC-V1\n"
+
+
+class _BloscZstdDepthEncoder:
+    """Framed, lossless uint16-mm depth with fast Blosc-Zstd compression."""
+
+    def __init__(self, *, path: Path, fps: int, width: int, height: int) -> None:
+        try:
+            import blosc  # type: ignore
+        except ImportError as exc:  # pragma: no cover - production dependency
+            raise RecorderError("python-blosc is required for depth recording") from exc
+        # The recorder already has one worker per camera.  Prevent Blosc from
+        # creating another large thread pool that could starve camera capture.
+        blosc.set_nthreads(1)
+        self._blosc = blosc
+        self.path = Path(path)
+        self.width = int(width)
+        self.height = int(height)
+        self.expected_shape = (self.height, self.width)
+        self._file = self.path.open("xb")
+        header = json.dumps(
+            {
+                "dtype": "<u2",
+                "shape": [self.height, self.width],
+                "fps": int(fps),
+                "compressor": "blosc-zstd",
+                "clevel": 1,
+                "shuffle": "bitshuffle",
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("ascii")
+        self._file.write(_DEPTH_STREAM_MAGIC)
+        self._file.write(struct.pack("<I", len(header)))
+        self._file.write(header)
+        self._closed = False
+
+    def write(self, depth: np.ndarray) -> None:
+        if self._closed:
+            raise RecorderError("cannot write to a closed depth encoder")
+        if depth.dtype != np.uint16 or depth.shape != self.expected_shape:
+            raise RecorderValidationError(
+                f"depth frame expected {self.expected_shape}/uint16, "
+                f"got {depth.shape}/{depth.dtype}"
+            )
+        payload = self._blosc.compress(
+            np.ascontiguousarray(depth),
+            typesize=2,
+            clevel=1,
+            cname="zstd",
+            shuffle=self._blosc.BITSHUFFLE,
+        )
+        self._file.write(struct.pack("<I", len(payload)))
+        self._file.write(payload)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._file.close()
+        self._closed = True
+
+
+def _default_depth_encoder_factory(**kwargs: Any) -> _BloscZstdDepthEncoder:
+    return _BloscZstdDepthEncoder(**kwargs)
+
+
+def _lower_encoder_thread_priority() -> None:
+    """Keep camera capture/observation threads ahead of background encoders."""
+
+    try:
+        os.setpriority(os.PRIO_PROCESS, threading.get_native_id(), 5)
+    except (AttributeError, OSError):
+        # Non-Linux test hosts may not expose per-thread setpriority.
+        pass
+
+
 class _MultiCameraSegmentWriter:
-    """Write three synchronized segment files without assuming fresh cameras."""
+    """Write synchronized RGB H.264 and lossless depth Blosc-Zstd segments."""
 
     def __init__(
         self,
@@ -194,12 +428,20 @@ class _MultiCameraSegmentWriter:
         fps: int,
         segment_frames: int,
         encoder_factory: Callable[..., Any],
+        depth_encoder_factory: Callable[..., Any],
     ) -> None:
         self.staging_path = staging_path
         self.fps = fps
         self.segment_frames = segment_frames
         self.encoder_factory = encoder_factory
+        self.depth_encoder_factory = depth_encoder_factory
+        self._encode_executor = ThreadPoolExecutor(
+            max_workers=len(CAMERA_KEYS) * 2,
+            thread_name_prefix="fa-rgbd-encode",
+            initializer=_lower_encoder_thread_priority,
+        )
         self.camera_dirs: dict[str, Path] = {}
+        self.depth_dirs: dict[str, Path] = {}
         videos_dir = staging_path / "videos"
         videos_dir.mkdir(exist_ok=False)
         for key in CAMERA_KEYS:
@@ -207,10 +449,16 @@ class _MultiCameraSegmentWriter:
             path.mkdir(exist_ok=False)
             self.camera_dirs[key] = path
             _fsync_directory(path)
+            depth_path = videos_dir / f"{key}_depth"
+            depth_path.mkdir(exist_ok=False)
+            self.depth_dirs[key] = depth_path
+            _fsync_directory(depth_path)
         _fsync_directory(videos_dir)
         _fsync_directory(staging_path)
         self._encoders: dict[str, Any] = {}
+        self._depth_encoders: dict[str, Any] = {}
         self._partials: dict[str, Path] = {}
+        self._depth_partials: dict[str, Path] = {}
         self._segment_index = -1
         self._segment_frame_count = 0
         self._segment_start_frame = 0
@@ -220,18 +468,18 @@ class _MultiCameraSegmentWriter:
         self._segment_index += 1
         self._segment_frame_count = 0
         self._segment_start_frame = frame_index
-        stem = f"segment-{self._segment_index:06d}.mp4"
+        stem = f"segment-{self._segment_index:06d}"
         try:
             for key in CAMERA_KEYS:
                 shape = CAMERA_SHAPES[key]
-                partial = self.camera_dirs[key] / f"{stem}.partial"
+                partial = self.camera_dirs[key] / f"{stem}.mp4.partial"
                 encoder = self.encoder_factory(
                     path=partial,
                     fps=self.fps,
                     width=shape[1],
                     height=shape[0],
                     crf=30,
-                    gop=2,
+                    gop=self.fps,
                 )
                 if not callable(getattr(encoder, "write", None)) or not callable(
                     getattr(encoder, "close", None)
@@ -241,33 +489,71 @@ class _MultiCameraSegmentWriter:
                     )
                 self._partials[key] = partial
                 self._encoders[key] = encoder
+                depth_shape = DEPTH_SHAPES[key]
+                depth_partial = self.depth_dirs[key] / f"{stem}.depth.bl2.partial"
+                depth_encoder = self.depth_encoder_factory(
+                    path=depth_partial,
+                    fps=self.fps,
+                    width=depth_shape[1],
+                    height=depth_shape[0],
+                )
+                if not callable(getattr(depth_encoder, "write", None)) or not callable(
+                    getattr(depth_encoder, "close", None)
+                ):
+                    raise RecorderValidationError(
+                        f"depth_encoder_factory returned invalid encoder for {key}"
+                    )
+                self._depth_partials[key] = depth_partial
+                self._depth_encoders[key] = depth_encoder
         except Exception:
             self.abort()
             raise
 
-    def write(self, packet: _FramePacket) -> tuple[int, int, dict[str, str]]:
+    def write(
+        self, packet: _FramePacket
+    ) -> tuple[int, int, dict[str, str], dict[str, str]]:
         if not self._encoders:
             self._open_segment(packet.frame_index)
         elif self._segment_frame_count >= self.segment_frames:
             self._finalize_segment()
             self._open_segment(packet.frame_index)
+        futures = []
         for key in CAMERA_KEYS:
-            self._encoders[key].write(packet.images[key])
+            futures.append(
+                self._encode_executor.submit(
+                    self._encoders[key].write, packet.images[key]
+                )
+            )
+            futures.append(
+                self._encode_executor.submit(
+                    self._depth_encoders[key].write, packet.depths[key]
+                )
+            )
+        for future in futures:
+            future.result()
         segment_frame = self._segment_frame_count
         self._segment_frame_count += 1
-        filename = f"segment-{self._segment_index:06d}.mp4"
-        paths = {key: f"videos/{key}/{filename}" for key in CAMERA_KEYS}
-        return self._segment_index, segment_frame, paths
+        rgb_filename = f"segment-{self._segment_index:06d}.mp4"
+        depth_filename = f"segment-{self._segment_index:06d}.depth.bl2"
+        paths = {key: f"videos/{key}/{rgb_filename}" for key in CAMERA_KEYS}
+        depth_paths = {
+            key: f"videos/{key}_depth/{depth_filename}" for key in CAMERA_KEYS
+        }
+        return self._segment_index, segment_frame, paths, depth_paths
 
     def _finalize_segment(self) -> None:
         if not self._encoders:
             return
         encoders, partials = self._encoders, self._partials
+        depth_encoders, depth_partials = self._depth_encoders, self._depth_partials
         self._encoders, self._partials = {}, {}
+        self._depth_encoders, self._depth_partials = {}, {}
         try:
             for key in CAMERA_KEYS:
                 encoders[key].close()
+                depth_encoders[key].close()
             final_paths: dict[str, str] = {}
+            final_depth_paths: dict[str, str] = {}
             for key in CAMERA_KEYS:
                 partial = partials[key]
                 if not partial.is_file() or partial.stat().st_size <= 0:
@@ -277,16 +563,29 @@ class _MultiCameraSegmentWriter:
                 os.replace(partial, final)
                 _fsync_directory(self.camera_dirs[key])
                 final_paths[key] = str(final.relative_to(self.staging_path))
+                depth_partial = depth_partials[key]
+                if not depth_partial.is_file() or depth_partial.stat().st_size <= 0:
+                    raise RecorderError(
+                        f"depth encoder produced no data: {depth_partial}"
+                    )
+                _fsync_file(depth_partial)
+                depth_final = Path(str(depth_partial).removesuffix(".partial"))
+                os.replace(depth_partial, depth_final)
+                _fsync_directory(self.depth_dirs[key])
+                final_depth_paths[key] = str(
+                    depth_final.relative_to(self.staging_path)
+                )
             self.segments.append(
                 {
                     "segment_index": self._segment_index,
                     "start_frame": self._segment_start_frame,
                     "frame_count": self._segment_frame_count,
                     "videos": final_paths,
+                    "depth_videos": final_depth_paths,
                 }
             )
         except Exception:
-            for encoder in encoders.values():
+            for encoder in (*encoders.values(), *depth_encoders.values()):
                 try:
                     encoder.close()
                 except Exception:
@@ -294,25 +593,32 @@ class _MultiCameraSegmentWriter:
             raise
 
     def close(self) -> list[dict[str, Any]]:
-        self._finalize_segment()
-        return copy.deepcopy(self.segments)
+        try:
+            self._finalize_segment()
+            return copy.deepcopy(self.segments)
+        finally:
+            self._encode_executor.shutdown(wait=True, cancel_futures=True)
 
     def abort(self) -> None:
-        for encoder in self._encoders.values():
+        for encoder in (*self._encoders.values(), *self._depth_encoders.values()):
             try:
                 encoder.close()
             except Exception:
                 pass
         self._encoders = {}
+        self._depth_encoders = {}
         self._partials = {}
+        self._depth_partials = {}
+        self._encode_executor.shutdown(wait=True, cancel_futures=True)
 
 
 class FaEpisodeRecorder:
     """Transactionally record one FA AHA-WAM episode.
 
-    ``encoder_factory`` receives ``path``, ``fps``, ``width``, ``height``,
-    ``crf`` and ``gop`` and must return an object with ``write``/``close``.
-    Injection keeps all tests independent from PyAV and real hardware.
+    ``encoder_factory`` writes RGB and receives ``path``, ``fps``, ``width``,
+    ``height``, ``crf`` and ``gop``. ``depth_encoder_factory`` writes HxW
+    uint16-mm depth and receives ``path``, ``fps``, ``width`` and ``height``.
+    Injection keeps tests independent from PyAV and real hardware.
     """
 
     def __init__(
@@ -325,6 +631,7 @@ class FaEpisodeRecorder:
         min_free_gb: float = 5.0,
         config: Optional[Mapping[str, Any]] = None,
         encoder_factory: Optional[Callable[..., Any]] = None,
+        depth_encoder_factory: Optional[Callable[..., Any]] = None,
         validate_timing: bool = True,
         max_relative_fps_error: float = 0.25,
         max_frame_gap_factor: float = 3.0,
@@ -347,7 +654,18 @@ class FaEpisodeRecorder:
         )
         self.config = _json_compatible({} if config is None else config, "config")
         self._uses_default_encoder = encoder_factory is None
+        self._uses_default_depth_encoder = depth_encoder_factory is None
+        self.rgb_encoder_backend = (
+            "gstreamer_nvv4l2h264enc"
+            if encoder_factory is None and _jetson_h264_available()
+            else "pyav_libx264"
+            if encoder_factory is None
+            else "injected"
+        )
         self.encoder_factory = encoder_factory or _default_encoder_factory
+        self.depth_encoder_factory = (
+            depth_encoder_factory or _default_depth_encoder_factory
+        )
 
         self._lock_fd: Optional[int] = None
         self._lifecycle_lock = threading.Lock()
@@ -393,6 +711,11 @@ class FaEpisodeRecorder:
                 "camera_keys": list(CAMERA_KEYS),
                 "camera_shapes": {key: list(CAMERA_SHAPES[key]) for key in CAMERA_KEYS},
                 "camera_dtype": "uint8",
+                "depth_camera_keys": list(CAMERA_KEYS),
+                "depth_shapes": {key: list(DEPTH_SHAPES[key]) for key in CAMERA_KEYS},
+                "depth_dtype": "uint16",
+                "depth_unit": "millimetres",
+                "depth_valid_range_mm": [0, 1000],
                 "state_shape": [STATE_DIM],
                 "state_dtype": "float32",
                 "state_names": list(STATE_NAMES),
@@ -430,13 +753,39 @@ class FaEpisodeRecorder:
                 },
                 "video_codec": {
                     "codec": "h264",
+                    "backend": self.rgb_encoder_backend,
                     "pixel_format": "yuv420p",
-                    "crf": 30,
-                    "gop": 2,
+                    "quality": (
+                        {"bitrate": 8000000}
+                        if self.rgb_encoder_backend == "gstreamer_nvv4l2h264enc"
+                        else {"crf": 30}
+                    ),
+                    "gop": self.fps,
+                    "preset": (
+                        "maxperf"
+                        if self.rgb_encoder_backend == "gstreamer_nvv4l2h264enc"
+                        else "ultrafast"
+                    ),
+                    "tune": (
+                        None
+                        if self.rgb_encoder_backend == "gstreamer_nvv4l2h264enc"
+                        else "zerolatency"
+                    ),
+                    "encoder_threads_per_stream": 1,
+                },
+                "depth_video_codec": {
+                    "container": "aha_framed_depth_v1",
+                    "codec": "blosc-zstd",
+                    "pixel_format": "uint16le",
+                    "encoding": "uint16_mm_blosc_zstd_v1",
+                    "compression_level": 1,
+                    "shuffle": "bitshuffle",
+                    "encoder_threads_per_stream": 1,
                 },
                 "video_validation": (
-                    "pyav_full_decode"
+                    "full_rgb_and_exact_depth_decode"
                     if self._uses_default_encoder
+                    and self._uses_default_depth_encoder
                     else "injected_encoder_contract"
                 ),
                 "motion_enabled": self.config.get("enable_motion"),
@@ -477,6 +826,7 @@ class FaEpisodeRecorder:
         self,
         *,
         images: Mapping[str, np.ndarray],
+        depths: Optional[Mapping[str, np.ndarray]] = None,
         state: np.ndarray,
         camera_metadata: Mapping[str, Any],
         state_metadata: Optional[Mapping[str, Any]],
@@ -491,6 +841,7 @@ class FaEpisodeRecorder:
         return self.submit_frame(
             {
                 "images": images,
+                "depths": depths,
                 "state": state,
                 "camera_metadata": camera_metadata,
                 "state_metadata": state_metadata,
@@ -508,7 +859,7 @@ class FaEpisodeRecorder:
         command_snapshot: Optional[Any],
         intervention_snapshot: Optional[Any] = None,
     ) -> int:
-        """Queue one RGB/state observation and the latest successful command.
+        """Queue one RGB-D/state observation and the latest successful command.
 
         Camera sequences may repeat because FA wrist cameras can run at 10 Hz
         while the recorder runs at 30 Hz.  Only the recorder's own ``sequence``
@@ -518,6 +869,8 @@ class FaEpisodeRecorder:
         try:
             raw_images = _snapshot_field(snapshot, "images")
             images = _validate_images(raw_images)
+            raw_depths = _snapshot_field(snapshot, "depths")
+            depths = _validate_depths(raw_depths)
             state = _validate_vector(_snapshot_field(snapshot, "state"), "state")
             sequence = _validate_nonnegative_int(
                 _snapshot_field(snapshot, "sequence"), "sequence"
@@ -580,6 +933,7 @@ class FaEpisodeRecorder:
                 sequence=sequence,
                 captured_at=captured_at,
                 images={key: images[key].copy() for key in CAMERA_KEYS},
+                depths={key: depths[key].copy() for key in CAMERA_KEYS},
                 state=tuple(float(value) for value in state),
                 command=command,
                 camera_metadata=camera_metadata,
@@ -909,6 +1263,7 @@ class FaEpisodeRecorder:
                 fps=self.fps,
                 segment_frames=self.segment_frames,
                 encoder_factory=self.encoder_factory,
+                depth_encoder_factory=self.depth_encoder_factory,
             )
             self._ready.set()
             while True:
@@ -924,7 +1279,12 @@ class FaEpisodeRecorder:
                 if isinstance(item, _FramePacket):
                     if frame_count % self.fps == 0:
                         _ensure_free_space(self.root, self.min_free_bytes)
-                    segment_index, segment_frame, paths = videos.write(item)
+                    (
+                        segment_index,
+                        segment_frame,
+                        paths,
+                        depth_paths,
+                    ) = videos.write(item)
                     command = item.command
                     row = {
                         "schema_version": SCHEMA_VERSION,
@@ -957,6 +1317,13 @@ class FaEpisodeRecorder:
                         "segment_index": segment_index,
                         "segment_frame_index": segment_frame,
                         "videos": paths,
+                        "depth_videos": depth_paths,
+                        "depth_sha256": {
+                            key: hashlib.sha256(
+                                np.ascontiguousarray(item.depths[key]).tobytes()
+                            ).hexdigest()
+                            for key in CAMERA_KEYS
+                        },
                         "camera_metadata": item.camera_metadata,
                         "state_metadata": item.state_metadata,
                         "sync_metadata": item.sync_metadata,
@@ -1048,6 +1415,11 @@ class FaEpisodeRecorder:
                 )
             if len(row.get("state", [])) != STATE_DIM:
                 raise RecorderError(f"invalid state dimension at row {expected}")
+            depth_hashes = row.get("depth_sha256")
+            if not isinstance(depth_hashes, dict) or set(depth_hashes) != set(
+                CAMERA_KEYS
+            ):
+                raise RecorderError(f"invalid depth hashes at row {expected}")
             sent = row.get("sent_command")
             if sent is not None and len(sent) != STATE_DIM:
                 raise RecorderError(f"invalid sent_command dimension at row {expected}")
@@ -1062,6 +1434,10 @@ class FaEpisodeRecorder:
                 "capture timing violates contract: " + "; ".join(timing["violations"])
             )
         for segment in segments:
+            if not isinstance(segment.get("depth_videos"), dict) or set(
+                segment["depth_videos"]
+            ) != set(CAMERA_KEYS):
+                raise RecorderError("depth video segment must cover all FA cameras")
             for key in CAMERA_KEYS:
                 path = self.staging_path / segment["videos"][key]
                 if not path.is_file() or path.stat().st_size <= 0:
@@ -1073,6 +1449,20 @@ class FaEpisodeRecorder:
                         expected_fps=self.fps,
                         expected_shape=CAMERA_SHAPES[key],
                     )
+                depth_path = self.staging_path / segment["depth_videos"][key]
+                if not depth_path.is_file() or depth_path.stat().st_size <= 0:
+                    raise RecorderError(f"missing or empty depth video: {depth_path}")
+                if self._uses_default_depth_encoder:
+                    start = int(segment["start_frame"])
+                    stop = start + int(segment["frame_count"])
+                    _validate_blosc_depth_stream(
+                        depth_path,
+                        expected_hashes=[
+                            row["depth_sha256"][key] for row in frame_rows[start:stop]
+                        ],
+                        expected_fps=self.fps,
+                        expected_shape=DEPTH_SHAPES[key],
+                    )
         return {
             "schema_version": SCHEMA_VERSION,
             "episode_uuid": self.episode_uuid,
@@ -1082,6 +1472,7 @@ class FaEpisodeRecorder:
             "segments": segments,
             "capture_timing": timing,
             "camera_keys": list(CAMERA_KEYS),
+            "depth_camera_keys": list(CAMERA_KEYS),
             "training_export_contract": {
                 "observation": "frames[t]",
                 "action": "frames[t+1].state",
@@ -1273,6 +1664,31 @@ def _validate_images(value: Any) -> dict[str, np.ndarray]:
                 f"got {image.shape}/{image.dtype}"
             )
         result[key] = image
+    return result
+
+
+def _validate_depths(value: Any) -> dict[str, np.ndarray]:
+    if not isinstance(value, Mapping):
+        raise RecorderValidationError("depths must be a mapping")
+    if set(value) != set(CAMERA_KEYS):
+        raise RecorderValidationError(
+            f"depths keys must be exactly {CAMERA_KEYS}, got {tuple(value)}"
+        )
+    result: dict[str, np.ndarray] = {}
+    for key in CAMERA_KEYS:
+        depth = value[key]
+        if not isinstance(depth, np.ndarray):
+            raise RecorderValidationError(f"depths[{key!r}] must be numpy.ndarray")
+        if depth.dtype != np.uint16 or depth.shape != DEPTH_SHAPES[key]:
+            raise RecorderValidationError(
+                f"depths[{key!r}] expected {DEPTH_SHAPES[key]}/uint16, "
+                f"got {depth.shape}/{depth.dtype}"
+            )
+        if int(depth.max(initial=0)) > 1000:
+            raise RecorderValidationError(
+                f"depths[{key!r}] exceeds 1000 mm configured training range"
+            )
+        result[key] = depth
     return result
 
 
@@ -1741,6 +2157,66 @@ def _validate_h264_video(
         container.close()
 
 
+def _read_exact(stream: Any, count: int, path: Path) -> bytes:
+    value = stream.read(count)
+    if len(value) != count:
+        raise RecorderError(f"truncated depth stream: {path}")
+    return value
+
+
+def _validate_blosc_depth_stream(
+    path: Path,
+    *,
+    expected_hashes: list[str],
+    expected_fps: int,
+    expected_shape: tuple[int, int],
+) -> None:
+    try:
+        import blosc  # type: ignore
+    except ImportError as exc:  # pragma: no cover - default encoder already imports it
+        raise RecorderError("python-blosc disappeared before depth validation") from exc
+    with path.open("rb") as stream:
+        if _read_exact(stream, len(_DEPTH_STREAM_MAGIC), path) != _DEPTH_STREAM_MAGIC:
+            raise RecorderError(f"invalid depth stream magic in {path}")
+        header_length = struct.unpack("<I", _read_exact(stream, 4, path))[0]
+        if header_length <= 0 or header_length > 4096:
+            raise RecorderError(f"invalid depth stream header length in {path}")
+        try:
+            header = json.loads(_read_exact(stream, header_length, path))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RecorderError(f"invalid depth stream header in {path}") from exc
+        expected_header = {
+            "dtype": "<u2",
+            "shape": list(expected_shape),
+            "fps": expected_fps,
+            "compressor": "blosc-zstd",
+            "clevel": 1,
+            "shuffle": "bitshuffle",
+        }
+        if header != expected_header:
+            raise RecorderError(f"depth stream header mismatch in {path}")
+        frame_bytes = int(np.prod(expected_shape)) * np.dtype("<u2").itemsize
+        for index, expected_hash in enumerate(expected_hashes):
+            payload_length = struct.unpack("<I", _read_exact(stream, 4, path))[0]
+            if payload_length <= 0 or payload_length > frame_bytes + 65536:
+                raise RecorderError(f"invalid compressed depth frame in {path}")
+            try:
+                raw = blosc.decompress(_read_exact(stream, payload_length, path))
+            except Exception as exc:
+                raise RecorderError(
+                    f"could not decompress depth frame {index} in {path}"
+                ) from exc
+            if len(raw) != frame_bytes:
+                raise RecorderError(f"depth frame size mismatch in {path}")
+            digest = hashlib.sha256(raw).hexdigest()
+            if digest != expected_hash:
+                raise RecorderError(
+                    f"lossless depth verification failed in {path} at frame {index}"
+                )
+        if stream.read(1):
+            raise RecorderError(f"excess depth frame data in {path}")
+
+
 def _ensure_free_space(path: Path, min_free_bytes: int) -> None:
     free = shutil.disk_usage(path).free
     if free < min_free_bytes:
@@ -1775,6 +2251,7 @@ def _utc_now() -> str:
 __all__ = [
     "CAMERA_KEYS",
     "CAMERA_SHAPES",
+    "DEPTH_SHAPES",
     "FaEpisodeRecorder",
     "RecorderBusyError",
     "RecorderError",

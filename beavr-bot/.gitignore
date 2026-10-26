@@ -95,5 +95,9 @@ env/
 # Outputs
 outputs/
 
+# Local runtime artifacts and real-robot rollout datasets
+# Keep recordings, exported datasets, previews, and client logs off Git.
+/artifacts/
+
 # Data
 data/

@@ -27,7 +27,6 @@ from beavr.teleop.components.interface.robots.fa_arm_ik_client import (
 )
 from beavr.teleop.components.interface.robots.fa_command_builder import (
     FA_ARM_JOINT_COUNT,
-    FA_NECK_JOINT_NAMES,
     FA_UPPER_COMMAND_LENGTH,
     FaCommandLimiter,
     FaJointStateCache,
@@ -40,7 +39,7 @@ from beavr.teleop.components.interface.robots.fa_mujoco_kinematics import (
     FaKinematicsConfig,
 )
 from beavr.teleop.components.operator.operator_types import CartesianTarget
-from beavr.teleop.configs.constants import ports, robots
+from beavr.teleop.configs.constants import robots
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +56,9 @@ FA_REAL_RIGHT_HAND_TOPIC = "/right_topic_to_hand"
 FA_AHAWAM_HUMAN_MIN_SNAP_TARGET_TOPIC = "/ahawam/fa/human/min_snap_target"
 FA_AHAWAM_HUMAN_LEFT_HAND_TOPIC = "/ahawam/fa/human/left_hand"
 FA_AHAWAM_HUMAN_RIGHT_HAND_TOPIC = "/ahawam/fa/human/right_hand"
+FA_AHAWAM_REBASELINE_REQUEST_TOPIC = "/ahawam/fa/human/rebaseline_request"
+FA_AHAWAM_REBASELINE_ACK_TOPIC = "/ahawam/fa/human/rebaseline_ack"
+FA_AHAWAM_REBASELINE_ZMQ_TOPIC = "ahawam_rebaseline"
 
 
 def _rotation_matrix_to_quaternion_xyzw(rotation: np.ndarray) -> np.ndarray:
@@ -157,6 +159,8 @@ class FaRos2Topics:
     ahawam_human_min_snap_target_topic: str = FA_AHAWAM_HUMAN_MIN_SNAP_TARGET_TOPIC
     ahawam_human_left_hand_topic: str = FA_AHAWAM_HUMAN_LEFT_HAND_TOPIC
     ahawam_human_right_hand_topic: str = FA_AHAWAM_HUMAN_RIGHT_HAND_TOPIC
+    ahawam_rebaseline_request_topic: str = FA_AHAWAM_REBASELINE_REQUEST_TOPIC
+    ahawam_rebaseline_ack_topic: str = FA_AHAWAM_REBASELINE_ACK_TOPIC
     upper_position_command_queue_size: int = 60
     hand_command_queue_size: int = 10
     min_snap_target_queue_size: int = 1
@@ -419,6 +423,8 @@ class FaRos2Bridge:
         self._vision_calibration_pub = None
         self._hand_msg_type = None
         self._attitude_msg_type = None
+        self._rebaseline_request_id: Optional[int] = None
+        self._rebaseline_ack_pub = None
         if require_ros:
             self._init_ros2(node_name)
 
@@ -446,6 +452,16 @@ class FaRos2Bridge:
             self._right_hand_pub = self._node.create_publisher(
                 Int32, self.topics.right_hand_topic, self.topics.hand_command_queue_size
             )
+            if self.topics.min_snap_target_topic == self.topics.ahawam_human_min_snap_target_topic:
+                self._node.create_subscription(
+                    Int32,
+                    self.topics.ahawam_rebaseline_request_topic,
+                    self._on_rebaseline_request,
+                    10,
+                )
+                self._rebaseline_ack_pub = self._node.create_publisher(
+                    Int32, self.topics.ahawam_rebaseline_ack_topic, 10
+                )
             if self.vision_calibration_enabled:
                 from attitude_pkg.msg import Attitude
 
@@ -470,6 +486,22 @@ class FaRos2Bridge:
 
     def _on_joint_state(self, msg) -> None:
         self.joint_cache.update_from_joint_state_msg(msg, now_s=time.time())
+
+    def _on_rebaseline_request(self, msg) -> None:
+        self._rebaseline_request_id = int(msg.data)
+
+    def take_rebaseline_request(self) -> Optional[int]:
+        request_id = self._rebaseline_request_id
+        self._rebaseline_request_id = None
+        return request_id
+
+    def publish_rebaseline_ack(self, request_id: int) -> bool:
+        if not self.available or self._rebaseline_ack_pub is None or self._hand_msg_type is None:
+            return False
+        msg = self._hand_msg_type()
+        msg.data = int(request_id)
+        self._rebaseline_ack_pub.publish(msg)
+        return True
 
     def spin_once(self) -> None:
         if self.available and self._rclpy is not None and self._node is not None:
@@ -623,6 +655,8 @@ class FaRealControl(Component):
         )
         self._ik_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="fa_arm_ik")
         self._pending_ik_futures: Dict[str, Future] = {}
+        self._pending_ik_generations: Dict[str, int] = {}
+        self._ik_generation = 0
         self._builder = FaUpperPositionCommandBuilder(self.config.upper)
         self._limiter = FaCommandLimiter(self.config.upper)
 
@@ -666,6 +700,15 @@ class FaRealControl(Component):
         self._teleop_ready_prompt_logged = not self._startup_initial_pose_armed
         self._last_initial_pose_publish_time_s = 0.0
         self._last_safety_log_time: Dict[str, float] = {}
+        self._pending_ahawam_rebaseline_id: Optional[int] = None
+        self._ahawam_rebaseline_target_ready = {
+            robots.LEFT: False,
+            robots.RIGHT: False,
+        }
+        self._ahawam_neutral_candidate_streaming = {
+            robots.LEFT: False,
+            robots.RIGHT: False,
+        }
 
     def _make_default_ik_client(self) -> FaArmIkClientBase:
         return FaPybindIkClient(self.config.ik)
@@ -679,6 +722,7 @@ class FaRealControl(Component):
         while True:
             start = time.time()
             self._ros2.spin_once()
+            self._handle_ahawam_rebaseline_request()
             if self.config.vision_calibration_publish_hz > 0.0:
                 self._publish_vision_calibration_pose_if_due(start)
             self._handle_session_command()
@@ -692,10 +736,68 @@ class FaRealControl(Component):
             self._publish_initial_hand_pose_if_needed()
             self._handle_reset_requests()
             self._receive_cartesian_targets()
+            self._ack_ahawam_rebaseline_if_ready()
             self._publish_lerobot_joint_states()
             self._publish_upper_command_if_safe()
             command_period_s = 1.0 / max(1.0, float(self.config.command_publish_hz))
             time.sleep(max(0.0, command_period_s - (time.time() - start)))
+
+    def _handle_ahawam_rebaseline_request(self) -> None:
+        request_id = self._ros2.take_rebaseline_request()
+        if request_id is None:
+            return
+        if not self.config.ahawam_intervention_mode:
+            return
+        requested_at_s = time.time()
+        self._pending_ahawam_rebaseline_id = int(request_id)
+        self._ahawam_rebaseline_target_ready = {
+            robots.LEFT: False,
+            robots.RIGHT: False,
+        }
+        self._ahawam_neutral_candidate_streaming = {
+            robots.LEFT: False,
+            robots.RIGHT: False,
+        }
+        self._hand_init_ready = {robots.LEFT: False, robots.RIGHT: False}
+        self._latest_targets = {robots.LEFT: None, robots.RIGHT: None}
+        self._latest_target_keys = {robots.LEFT: None, robots.RIGHT: None}
+        self._active_arm_goals = {robots.LEFT: None, robots.RIGHT: None}
+        self._arm_goal_dirty = {robots.LEFT: False, robots.RIGHT: False}
+        self._accept_cartesian_targets_after_s = {
+            robots.LEFT: requested_at_s,
+            robots.RIGHT: requested_at_s,
+        }
+        self._reset_approx_ik_cache()
+        self._reset_ik_recovery_state()
+        command = SessionCommand(timestamp_s=requested_at_s, command=robots.RESUME)
+        for publish_port in (self._left_endeff_publish_port, self._right_endeff_publish_port):
+            self._publisher_manager.publish(
+                self.host,
+                publish_port,
+                FA_AHAWAM_REBASELINE_ZMQ_TOPIC,
+                command,
+            )
+        logger.info(
+            "FA AHA-WAM rebaseline requested id=%d; waiting for both current-pose Hand_Init_H resets",
+            request_id,
+        )
+
+    def _ack_ahawam_rebaseline_if_ready(self) -> None:
+        request_id = self._pending_ahawam_rebaseline_id
+        if (
+            request_id is None
+            or not all(self._hand_init_ready.values())
+            or not all(self._ahawam_rebaseline_target_ready.values())
+        ):
+            return
+        if not self._ros2.publish_rebaseline_ack(request_id):
+            self._warn_safety(
+                "ahawam_rebaseline_ack_unavailable",
+                "FA AHA-WAM rebaseline complete but acknowledgement publisher is unavailable",
+            )
+            return
+        self._pending_ahawam_rebaseline_id = None
+        logger.info("FA AHA-WAM bimanual rebaseline complete id=%d", request_id)
 
     def _publish_vision_calibration_pose_if_due(self, now_s: Optional[float] = None) -> None:
         publish_hz = float(self.config.vision_calibration_publish_hz)
@@ -923,6 +1025,7 @@ class FaRealControl(Component):
         return self._current_joint_snapshot()
 
     def _sync_ik_reference_from_snapshot(self, snapshot: FaJointStateSnapshot, reset_limiter: bool = False) -> None:
+        self._cancel_pending_ik_updates()
         self._last_safe_arm_targets = {
             robots.LEFT: np.asarray(snapshot.left_arm, dtype=np.float64).copy(),
             robots.RIGHT: np.asarray(snapshot.right_arm, dtype=np.float64).copy(),
@@ -932,6 +1035,16 @@ class FaRealControl(Component):
         self._reset_ik_recovery_state()
         if reset_limiter:
             self._limiter.reset(snapshot.upper_joints)
+
+    def _cancel_pending_ik_updates(self) -> None:
+        """Detach every IK job created before the latest control boundary."""
+
+        self._ik_generation = int(getattr(self, "_ik_generation", 0)) + 1
+        pending = getattr(self, "_pending_ik_futures", {})
+        for future in pending.values():
+            future.cancel()
+        self._pending_ik_futures = {}
+        self._pending_ik_generations = {}
 
     def _reset_ik_recovery_state(self, hand_side: Optional[str] = None) -> None:
         if not hasattr(self, "_ik_problem_counts"):
@@ -1060,7 +1173,11 @@ class FaRealControl(Component):
                 continue
             self._publish_current_endeff_homo(hand_side, publish_port)
 
-    def _publish_current_endeff_homo(self, hand_side: str, publish_port: int) -> None:
+    def _publish_current_endeff_homo(
+        self,
+        hand_side: str,
+        publish_port: int,
+    ) -> None:
         if not self._real_joint_state_fresh():
             self._warn_safety("reset_joint_state_stale", f"reset refused for {hand_side}: joint state stale")
             return
@@ -1126,6 +1243,55 @@ class FaRealControl(Component):
                         f"{hand_side} target held until a fresh post-Hand_Init_H frame arrives "
                         f"(target_ts={target_timestamp_s:.6f}, min_ts={min_target_timestamp_s:.6f})"
                     ),
+                )
+                continue
+            if getattr(self, "_pending_ahawam_rebaseline_id", None) is not None:
+                # Do not let one operator start establishing its Cartesian
+                # origin while the other side is still waiting for the fresh
+                # measured-pose reset.  A later reset synchronizes the shared
+                # IK reference and would otherwise erase the first side's
+                # neutral reference.
+                if not all(self._hand_init_ready.values()):
+                    self._warn_safety(
+                        "ahawam_bimanual_hand_init_pending",
+                        "FA candidate held until both Hand_Init_H resets complete",
+                    )
+                    continue
+                if self._ahawam_rebaseline_target_ready.get(hand_side, False):
+                    # Freeze the first neutral sample until both sides have
+                    # reached the acknowledgement boundary.  Motion during
+                    # arming is intentionally discarded.
+                    continue
+                snapshot = self._current_joint_snapshot()
+                if snapshot is None or not self._real_joint_state_fresh():
+                    self._warn_safety(
+                        f"{hand_side}_rebaseline_joint_state_unavailable",
+                        f"{hand_side} neutral target held until fresh /joint_states",
+                    )
+                    continue
+                current_arm = np.asarray(
+                    snapshot.left_arm if hand_side == robots.LEFT else snapshot.right_arm,
+                    dtype=np.float64,
+                ).copy()
+                # The first post-reset target represents zero hand motion.  It
+                # must never be solved through IK: a redundant-arm solver can
+                # choose another joint branch for the same end-effector pose,
+                # and the downstream rate limiter would then hide that large
+                # error as a slow ramp.  Seed the Cartesian deadband with this
+                # neutral target while holding the measured joint pose.
+                self._latest_targets[hand_side] = msg
+                self._latest_target_keys[hand_side] = self._cartesian_target_key(msg)
+                self._last_ik_cartesian_targets[hand_side] = msg
+                self._last_safe_arm_targets[hand_side] = current_arm
+                self._active_arm_goals[hand_side] = current_arm.copy()
+                self._arm_goal_dirty[hand_side] = False
+                self._arm_ik_retry_required[hand_side] = False
+                self._ahawam_rebaseline_target_ready[hand_side] = True
+                self._ahawam_neutral_candidate_streaming[hand_side] = True
+                self._resume_hold_until_target = False
+                logger.info(
+                    "FA AHA-WAM %s neutral target anchored to measured joints",
+                    hand_side,
                 )
                 continue
             # A fresh operator target means the post-resume rebaseline finished;
@@ -1206,6 +1372,12 @@ class FaRealControl(Component):
 
     def _publish_upper_command_if_safe(self) -> None:
         if not self._teleop_active:
+            return
+        if getattr(self, "_pending_ahawam_rebaseline_id", None) is not None:
+            self._warn_safety(
+                "ahawam_rebaseline_pending",
+                "FA candidate held until both current-pose Hand_Init_H resets complete",
+            )
             return
         if not self._real_joint_state_fresh():
             self._warn_safety("joint_state_stale", "FA command rejected: /joint_states stale")
@@ -1303,6 +1475,10 @@ class FaRealControl(Component):
             self._last_ik_cartesian_targets = {robots.LEFT: None, robots.RIGHT: None}
         if not hasattr(self, "_pending_ik_futures"):
             self._pending_ik_futures = {}
+        if not hasattr(self, "_pending_ik_generations"):
+            self._pending_ik_generations = {}
+        if not hasattr(self, "_ik_generation"):
+            self._ik_generation = 0
         if not hasattr(self, "_arm_escape_active"):
             self._arm_escape_active = {robots.LEFT: False, robots.RIGHT: False}
         if not hasattr(self, "_approx_ik_target_cache"):
@@ -1323,6 +1499,7 @@ class FaRealControl(Component):
                     self._arm_escape_active[hand_side] = False
                 else:
                     pending = self._pending_ik_futures.pop(hand_side, None)
+                    self._pending_ik_generations.pop(hand_side, None)
                     if pending is not None:
                         pending.cancel()
                     self._active_arm_goals[hand_side] = escape_target
@@ -1357,9 +1534,19 @@ class FaRealControl(Component):
                 and self._cartesian_target_within_ik_deadband(target, last_ik_target)
             ):
                 self._active_arm_goals[hand_side] = last_safe.copy()
-                self._arm_goal_dirty[hand_side] = False
+                # After AHA rebaseline, keep emitting the measured neutral
+                # candidate while the hands remain steady.  The brain uses
+                # these fresh samples for its sustained arming check, but does
+                # not forward them to hardware until verification completes.
+                self._arm_goal_dirty[hand_side] = bool(
+                    getattr(self, "_ahawam_neutral_candidate_streaming", {}).get(
+                        hand_side, False
+                    )
+                )
                 self._latest_target_keys[hand_side] = target_key
                 continue
+            if hasattr(self, "_ahawam_neutral_candidate_streaming"):
+                self._ahawam_neutral_candidate_streaming[hand_side] = False
             current_arm = snapshot.left_arm if hand_side == robots.LEFT else snapshot.right_arm
             current_arm_array = np.asarray(current_arm, dtype=np.float64)
             ik_seed = last_safe if last_safe is not None else current_arm_array
@@ -1373,6 +1560,7 @@ class FaRealControl(Component):
                 current_arm_array.copy(),
                 None if last_safe is None else np.asarray(last_safe, dtype=np.float64).copy(),
             )
+            self._pending_ik_generations[hand_side] = self._ik_generation
             self._arm_ik_retry_required[hand_side] = False
         self._apply_completed_arm_ik_updates()
 
@@ -1389,6 +1577,10 @@ class FaRealControl(Component):
             if not future.done():
                 continue
             self._pending_ik_futures.pop(hand_side, None)
+            generation = getattr(self, "_pending_ik_generations", {}).pop(
+                hand_side,
+                int(getattr(self, "_ik_generation", 0)),
+            )
             try:
                 update = future.result()
             except Exception as exc:
@@ -1396,6 +1588,16 @@ class FaRealControl(Component):
                 continue
             current_target = self._latest_targets.get(hand_side)
             if current_target is None:
+                continue
+            # Continuous hand motion commonly advances by one sample while an
+            # IK worker is running, so target-key mismatch alone is valid.
+            # Generation mismatch specifically identifies a result created
+            # before pause/resume or AHA rebaseline.
+            if generation != int(getattr(self, "_ik_generation", 0)):
+                logger.info(
+                    "%s stale IK result discarded after rebaseline generation change",
+                    hand_side,
+                )
                 continue
             if update.warn_key is not None and update.warn_message is not None:
                 self._warn_safety(update.warn_key, update.warn_message)

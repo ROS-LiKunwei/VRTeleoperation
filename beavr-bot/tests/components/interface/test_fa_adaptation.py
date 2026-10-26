@@ -1136,6 +1136,78 @@ def test_fa_real_control_retries_incomplete_singularity_filter_output():
     assert controller._arm_ik_retry_required[robots.LEFT] is True
 
 
+def test_fa_real_control_discards_completed_ik_from_an_old_rebaseline_generation():
+    controller = FaRealControl.__new__(FaRealControl)
+    old_target = CartesianTarget(
+        timestamp_s=100.0,
+        hand_side=robots.LEFT,
+        frame_id="base",
+        position_m=(0.4, 0.2, 0.3),
+        orientation_xyzw=(0.0, 0.0, 0.0, 1.0),
+    )
+    new_target = CartesianTarget(
+        timestamp_s=101.0,
+        hand_side=robots.LEFT,
+        frame_id="base",
+        position_m=(0.5, 0.2, 0.3),
+        orientation_xyzw=(0.0, 0.0, 0.0, 1.0),
+    )
+    stale_goal = np.asarray([0.7] * 7)
+    stale_update = fa_real_control_module._ArmIkUpdate(
+        hand_side=robots.LEFT,
+        target_key=("timestamp", 100.0),
+        active_goal=stale_goal,
+        dirty=True,
+        last_safe=stale_goal.copy(),
+        last_ik_target=old_target,
+    )
+    controller._pending_ik_futures = {
+        robots.LEFT: SimpleNamespace(done=lambda: True, result=lambda: stale_update),
+    }
+    controller._pending_ik_generations = {robots.LEFT: 3}
+    controller._ik_generation = 4
+    controller._latest_targets = {robots.LEFT: new_target, robots.RIGHT: None}
+    controller._active_arm_goals = {robots.LEFT: None, robots.RIGHT: None}
+    controller._arm_goal_dirty = {robots.LEFT: False, robots.RIGHT: False}
+
+    controller._apply_completed_arm_ik_updates()
+
+    assert controller._active_arm_goals[robots.LEFT] is None
+    assert not controller._arm_goal_dirty[robots.LEFT]
+
+
+def test_fa_real_control_snapshot_sync_cancels_pre_boundary_ik_jobs():
+    class Pending:
+        def __init__(self):
+            self.cancelled = False
+
+        def cancel(self):
+            self.cancelled = True
+
+    controller = FaRealControl.__new__(FaRealControl)
+    pending = Pending()
+    controller._pending_ik_futures = {robots.LEFT: pending}
+    controller._last_ik_cartesian_targets = {robots.LEFT: object(), robots.RIGHT: object()}
+    controller._approx_ik_target_cache = {robots.LEFT: None, robots.RIGHT: None}
+    controller._ik_problem_counts = {robots.LEFT: 0, robots.RIGHT: 0}
+    controller._arm_escape_active = {robots.LEFT: False, robots.RIGHT: False}
+    controller._ik_output_filter_active = {robots.LEFT: False, robots.RIGHT: False}
+    controller._ik_output_filter_goals = {robots.LEFT: None, robots.RIGHT: None}
+    controller._arm_ik_retry_required = {robots.LEFT: False, robots.RIGHT: False}
+    snapshot = FaJointStateSnapshot(
+        timestamp_s=1.0,
+        left_arm=tuple([0.1] * 7),
+        right_arm=tuple([0.2] * 7),
+        neck=(0.0, 0.0),
+    )
+
+    controller._sync_ik_reference_from_snapshot(snapshot)
+
+    assert pending.cancelled
+    assert controller._pending_ik_futures == {}
+    assert controller._last_safe_arm_targets[robots.LEFT] == pytest.approx([0.1] * 7)
+
+
 def test_fa_real_control_uses_last_safe_as_ik_seed_for_recovery():
     controller = FaRealControl.__new__(FaRealControl)
     controller.config = FaRealControlConfig(max_ik_solution_jump_rad=1.0)

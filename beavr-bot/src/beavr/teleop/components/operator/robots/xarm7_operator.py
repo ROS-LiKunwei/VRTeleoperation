@@ -149,10 +149,18 @@ class XArmOperator(Operator):
             context=self._context,
             message_type=CartesianState,
         )
+        self._ahawam_rebaseline_subscriber = ZMQSubscriber(
+            host=host,
+            port=endeff_subscribe_port,
+            topic="ahawam_rebaseline",
+            context=self._context,
+            message_type=SessionCommand,
+        )
 
         # 订阅者字典，便于在程序结束或对象销毁时，通过循环自动关闭所有网络连接，释放系统资源
         self._subscribers = {
             "endeff_homo": self.endeff_homo_subscriber,
+            "ahawam_rebaseline": self._ahawam_rebaseline_subscriber,
             "teleop_state": self._arm_teleop_state_subscriber,
             "resolution_scale": self._arm_resolution_subscriber,
         }
@@ -210,6 +218,8 @@ class XArmOperator(Operator):
         self._post_resume_stable_position_epsilon_m = float(post_resume_stable_position_epsilon_m)
         self._post_resume_stable_orientation_epsilon_rad = float(post_resume_stable_orientation_epsilon_rad)
         self._post_resume_stable_dwell_s = max(0.0, float(post_resume_stable_dwell_s))
+        self._ahawam_rebaseline_quarantine_s = 2.0
+        self._post_reset_hand_rebaseline_dwell_override_s: Optional[float] = None
         self._post_resume_zero_deadband_active = False
         self._post_resume_zero_deadband_log_time = 0.0
 
@@ -391,7 +401,7 @@ class XArmOperator(Operator):
         self._arm_transformed_keypoint_subscriber.recv_keypoints()
 
     def _rebaseline_hand_after_reset_if_needed(self) -> bool:
-        """Use the first fresh post-reset hand frame as the new hand baseline."""
+        """Quarantine reset input, then use the latest stable hand pose."""
         min_timestamp_s = getattr(self, "_post_reset_hand_rebaseline_after_s", None)
         if min_timestamp_s is None:
             return False
@@ -400,7 +410,47 @@ class XArmOperator(Operator):
             self._log_reset_hand_wait()
             return True
 
-        baseline_frame = np.asarray(moving_hand_frame, dtype=np.float64).copy()
+        now_s = time.time()
+        frames = getattr(self, "_post_reset_hand_rebaseline_frames", None)
+        if frames is None:
+            frames = []
+            self._post_reset_hand_rebaseline_frames = frames
+        frames.append(np.asarray(moving_hand_frame, dtype=np.float64).copy())
+        if getattr(self, "_post_reset_hand_rebaseline_first_frame_time_s", None) is None:
+            self._post_reset_hand_rebaseline_first_frame_time_s = now_s
+
+        settle_frames = max(1, int(getattr(self, "_reset_hand_settle_frames", 1)))
+        dwell_s = max(
+            0.0,
+            float(getattr(self, "_post_resume_stable_dwell_s", 0.0)),
+            float(
+                getattr(
+                    self,
+                    "_post_reset_hand_rebaseline_dwell_override_s",
+                    0.0,
+                )
+                or 0.0
+            ),
+        )
+        ahawam_quarantine = (
+            getattr(
+                self,
+                "_post_reset_hand_rebaseline_dwell_override_s",
+                None,
+            )
+            is not None
+        )
+        if not ahawam_quarantine and not self._post_resume_hand_frames_are_stable(frames):
+            self._post_reset_hand_rebaseline_frames = [frames[-1]]
+            self._post_reset_hand_rebaseline_first_frame_time_s = now_s
+            return True
+        first_frame_time_s = float(self._post_reset_hand_rebaseline_first_frame_time_s)
+        if len(frames) < settle_frames or now_s - first_frame_time_s < dwell_s:
+            return True
+
+        # The latest sample becomes zero, so motion during quarantine cannot be
+        # replayed when control is released.
+        baseline_frame = frames[-1]
         try:
             self.hand_init_h = self._turn_frame_to_homo_mat(baseline_frame)
             self.hand_init_t = copy(self.hand_init_h[:3, 3])
@@ -408,12 +458,18 @@ class XArmOperator(Operator):
         except ValueError as e:
             logger.error(f"ERROR ({self.operator_name}): Failed to rebaseline hand frame after reset: {e}")
             return True
+        if not self._refresh_robot_init_pose_after_hand_baseline():
+            self.hand_init_h = None
+            self.hand_init_t = None
+            self.hand_moving_h = None
+            return True
         self.comp_filter = None
         self._post_resume_zero_deadband_active = True
         self._post_resume_zero_deadband_log_time = 0.0
         self._post_reset_hand_rebaseline_after_s = None
         self._post_reset_hand_rebaseline_frames = []
         self._post_reset_hand_rebaseline_first_frame_time_s = None
+        self._post_reset_hand_rebaseline_dwell_override_s = None
         logger.info(
             f"{self.operator_name} post-reset Hand init H:\n{self.hand_init_h}"
         )
@@ -685,6 +741,28 @@ class XArmOperator(Operator):
         """Hook for subclasses to gate retargeting before reset/publish logic runs."""
         return True
 
+    def _consume_ahawam_rebaseline(self) -> bool:
+        """Request a hand/robot origin reset without repeating VR axis calibration."""
+
+        rebaseline = self._ahawam_rebaseline_subscriber.recv_keypoints()
+        if rebaseline is None:
+            return False
+        rebaseline_at_s = max(float(rebaseline.timestamp_s), time.time())
+        self.is_first_frame = True
+        self._ignore_hand_frames_before_s = rebaseline_at_s
+        self._clear_hand_tracking_cache()
+        self._post_reset_hand_rebaseline_dwell_override_s = float(
+            getattr(self, "_ahawam_rebaseline_quarantine_s", 2.0)
+        )
+        logger.info(
+            "%s: AHA-WAM takeover requested; preserving VR axis calibration and "
+            "quarantining VR input for %.1fs before rebasing the latest hand "
+            "pose onto the then-current robot pose",
+            self.operator_name,
+            self._post_reset_hand_rebaseline_dwell_override_s,
+        )
+        return True
+
     def project_to_rotation_matrix(self, r_mat: np.ndarray) -> np.ndarray:
         """
         使用奇异值分解(SVD)将一个近似旋转的3x3矩阵调整为一个有效的SO(3)旋转矩阵,确保行列式为+1(去除反射)
@@ -944,6 +1022,11 @@ class XArmOperator(Operator):
         逻辑包括：处理状态变化（重置/暂停）、应用坐标变换、滤波平滑以及发布指令
         """
 
+        # AHA-WAM takeover is a separate process and therefore cannot reuse the
+        # PICO pause socket.  Consume its explicit reset edge before reading the
+        # normal session state so both arms rebuild their hand/robot baseline.
+        external_rebaseline = self._consume_ahawam_rebaseline()
+
         # 1. 检查系统状态变化 (Pause/Resume, Resolution)
         new_arm_teleop_state = self._get_arm_teleop_state()  # 从订阅者获取当前遥操作开关状态
         self.resolution_scale = self._get_resolution_scale_mode()  # Update resolution scale
@@ -977,17 +1060,23 @@ class XArmOperator(Operator):
             self.arm_teleop_state = new_arm_teleop_state
             return
 
-        needs_reset = self.is_first_frame or resume_edge or fresh_resume_command  # 检查是否需要重置
+        needs_reset = (
+            self.is_first_frame
+            or resume_edge
+            or fresh_resume_command
+            or external_rebaseline
+        )  # 检查是否需要重置
 
         if needs_reset:
-            if resume_edge or fresh_resume_command:
-                self._last_processed_resume_command_timestamp_s = self._last_teleop_command_timestamp_s
+            if resume_edge or fresh_resume_command or external_rebaseline:
+                if resume_edge or fresh_resume_command:
+                    self._last_processed_resume_command_timestamp_s = self._last_teleop_command_timestamp_s
                 self._ignore_hand_frames_before_s = max(
                     time.time(),
-                    self._last_teleop_command_timestamp_s,
+                    self._ignore_hand_frames_before_s,
                 )
                 logger.info(
-                    f"{self.operator_name}: resume command detected, rebaseline hand/robot "
+                    f"{self.operator_name}: fresh baseline requested, rebaseline hand/robot "
                     f"with frames newer than {self._ignore_hand_frames_before_s:.6f}"
                 )
             elif self.is_first_frame:

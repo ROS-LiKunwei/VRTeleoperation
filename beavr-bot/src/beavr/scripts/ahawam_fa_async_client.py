@@ -32,6 +32,8 @@ from beavr.scripts.ahawam_intervention import (
     OperatorIntervention,
     TerminalKeyListener,
 )
+from beavr.scripts.ahawam_fa_arrival import wait_for_robot_arrival
+from beavr.lerobot.common.robot_devices.cameras.recording_fault import CameraFault
 
 CAMERA_KEYS = ("head", "wrist_CV2756100033", "wrist_CV2856D0001C")
 LEFT_JOINTS = (
@@ -57,6 +59,10 @@ class EpisodeTerminated(RuntimeError):
 
 class ObservationStreamError(RuntimeError):
     """Camera/state/recording faults for which human motion is unsafe."""
+
+
+class CameraSynchronizationError(RuntimeError):
+    """A complete camera set exists, but its capture times are too far apart."""
 
 
 class ModelFailure(RuntimeError):
@@ -187,6 +193,7 @@ class FaObservation:
     state_metadata: dict[str, object]
     sync_metadata: dict[str, object]
     command: Optional[SentCommand]
+    depths: Optional[dict[str, np.ndarray]] = None
 
 
 def binarize_gripper(value: float) -> float:
@@ -337,6 +344,12 @@ class FaRos:
         self._human_arm_sequence = 0
         self._human_received_at = 0.0
         self._human_error: Optional[BaseException] = None
+        self._human_rebaseline_condition = threading.Condition()
+        self._human_rebaseline_ack_id = 0
+        # Avoid accepting a delayed acknowledgement from an earlier client
+        # process that happened to use the same small sequence number.
+        self._next_human_rebaseline_id = int(time.time_ns() % 2_000_000_000) + 1
+        self._human_rebaseline_pub = None
         # The ROS queue retains only the newest pending message. A dedicated
         # spin thread consumes feedback continuously, while a bounded local
         # history supports timestamp matching to camera observations.
@@ -377,6 +390,15 @@ class FaRos:
                 Int32,
                 human_right_topic,
                 lambda msg: self._human_hand_callback("right", msg),
+                10,
+            )
+            self._human_rebaseline_pub = self.node.create_publisher(
+                Int32, args.human_rebaseline_request_topic, 10
+            )
+            self.node.create_subscription(
+                Int32,
+                args.human_rebaseline_ack_topic,
+                self._human_rebaseline_ack_callback,
                 10,
             )
         self._spin_thread = threading.Thread(
@@ -431,6 +453,32 @@ class FaRos:
             with self._human_condition:
                 self._human_error = exc
                 self._human_condition.notify_all()
+
+    def _human_rebaseline_ack_callback(self, msg) -> None:
+        with self._human_rebaseline_condition:
+            self._human_rebaseline_ack_id = int(msg.data)
+            self._human_rebaseline_condition.notify_all()
+
+    def rebaseline_human_control(self, timeout_s: float) -> int:
+        """Wait until both operators use current FA poses as their new origins."""
+
+        if self._human_rebaseline_pub is None:
+            raise RuntimeError("FA human rebaseline publisher is unavailable")
+        with self._human_rebaseline_condition:
+            request_id = self._next_human_rebaseline_id
+            self._next_human_rebaseline_id = request_id % 2_000_000_000 + 1
+            msg = self.Int32()
+            msg.data = request_id
+            self._human_rebaseline_pub.publish(msg)
+            deadline = time.monotonic() + float(timeout_s)
+            while self._human_rebaseline_ack_id != request_id:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    raise TimeoutError(
+                        "FA bimanual rebaseline timed out; remaining in SAFE_HOLD"
+                    )
+                self._human_rebaseline_condition.wait(timeout=min(0.05, remaining))
+            return request_id
 
     @property
     def human_command_sequence(self) -> int:
@@ -525,17 +573,30 @@ class FaRos:
                 topic: int(self.node.count_publishers(topic))
                 for topic in human_topics
             }
+            rebaseline_counts = {
+                "ack_publishers": int(
+                    self.node.count_publishers(args.human_rebaseline_ack_topic)
+                ),
+                "request_subscribers": int(
+                    self.node.count_subscribers(args.human_rebaseline_request_topic)
+                ),
+            }
             real_is_exclusive = all(count == 1 for count in real_counts.values())
             human_ready = (
                 not args.enable_operator_intervention
                 or all(count == 1 for count in human_counts.values())
             )
-            if real_is_exclusive and human_ready:
+            rebaseline_ready = (
+                not args.enable_operator_intervention
+                or all(count == 1 for count in rebaseline_counts.values())
+            )
+            if real_is_exclusive and human_ready and rebaseline_ready:
                 return
             if time.monotonic() >= deadline:
                 details = {
                     "real_publishers_including_this_client": real_counts,
                     "human_candidate_publishers": human_counts,
+                    "human_rebaseline_endpoints": rebaseline_counts,
                 }
                 if not real_is_exclusive:
                     raise RuntimeError(
@@ -545,7 +606,7 @@ class FaRos:
                         f"topology={details}"
                     )
                 raise RuntimeError(
-                    "FA human candidate publisher is missing; start VR teleop "
+                    "FA human candidate/rebaseline endpoint is missing; start updated VR teleop "
                     "with --ahawam_intervention_mode=true before the AHA client. "
                     f"topology={details}"
                 )
@@ -593,6 +654,19 @@ class FaRos:
                 "FA human candidate ownership changed after startup; expected "
                 "exactly one PICO/VR candidate publisher per topic. "
                 f"publishers={counts}"
+            )
+        rebaseline_counts = {
+            "ack_publishers": int(
+                self.node.count_publishers(args.human_rebaseline_ack_topic)
+            ),
+            "request_subscribers": int(
+                self.node.count_subscribers(args.human_rebaseline_request_topic)
+            ),
+        }
+        if any(count != 1 for count in rebaseline_counts.values()):
+            raise RuntimeError(
+                "FA human rebaseline topology changed; refusing intervention "
+                f"without one request consumer and one ack source. endpoints={rebaseline_counts}"
             )
 
     def _spin_feedback(self):
@@ -772,6 +846,22 @@ class FaRos:
                             "joint_observation_skew_ms": signed_skew_s * 1000.0,
                         }
 
+                    # Time cannot make an already stale sample fresh. Also,
+                    # once the newest eligible feedback has passed the upper
+                    # edge of the image matching window, later samples can
+                    # only increase the skew. Return promptly so the caller
+                    # can discard this camera set and acquire a newer one.
+                    newest_sample_at = max(
+                        float(sample["sample_at_monotonic_s"])
+                        for sample in candidates
+                    )
+                    if (
+                        sample_age_s > max_age_s
+                        or newest_sample_at
+                        >= observation_monotonic_s + max_skew_s
+                    ):
+                        break
+
                     # A future feedback sample can only improve the match when
                     # every available sample still precedes the image time.
                     if sample_at >= observation_monotonic_s:
@@ -930,22 +1020,35 @@ def open_cameras(
 
 def read_images(cameras, max_age_ms: int, newer_than_sequences=None):
     result = {}
+    depths = {}
     metadata = {}
     newer_than_sequences = newer_than_sequences or {}
     for key in CAMERA_KEYS:
-        rgb, _depth, frame_metadata = cameras[key].read_latest_rgbd_with_metadata(
+        rgb, depth, frame_metadata = cameras[key].read_latest_rgbd_with_metadata(
             max_age_ms,
             newer_than_sequence=newer_than_sequences.get(key),
         )
         expected = (720, 1280, 3) if key == "head" else (530, 848, 3)
         if rgb.shape != expected or rgb.dtype != np.uint8:
             raise ValueError(f"{key} produced {rgb.shape}/{rgb.dtype}; expected {expected}/uint8")
+        expected_depth = expected[:2]
+        if depth is None or depth.shape != expected_depth or depth.dtype != np.uint16:
+            actual = None if depth is None else f"{depth.shape}/{depth.dtype}"
+            raise ValueError(
+                f"{key} depth produced {actual}; expected {expected_depth}/uint16"
+            )
         result[key] = np.ascontiguousarray(rgb)
+        depths[key] = np.ascontiguousarray(depth)
         metadata[key] = frame_metadata
-    return result, metadata
+    return result, depths, metadata
 
 
-def camera_observation_time(camera_metadata, max_camera_skew_ms: float):
+def camera_observation_time(
+    camera_metadata,
+    max_camera_skew_ms: float,
+    max_camera_age_ms: Optional[float] = None,
+    now_monotonic_s: Optional[float] = None,
+):
     captured_at = {
         key: float(camera_metadata[key]["captured_at_monotonic_s"])
         for key in CAMERA_KEYS
@@ -953,10 +1056,28 @@ def camera_observation_time(camera_metadata, max_camera_skew_ms: float):
     observation_time = float(np.median(list(captured_at.values())))
     camera_skew_ms = (max(captured_at.values()) - min(captured_at.values())) * 1000.0
     if camera_skew_ms > max_camera_skew_ms:
-        raise RuntimeError(
+        raise CameraSynchronizationError(
             f"Camera frame skew is {camera_skew_ms:.1f} ms; "
             f"limit is {max_camera_skew_ms:.1f} ms"
         )
+    if max_camera_age_ms is not None:
+        now_monotonic_s = (
+            time.monotonic()
+            if now_monotonic_s is None
+            else float(now_monotonic_s)
+        )
+        ages_ms = {
+            key: (now_monotonic_s - captured_at[key]) * 1000.0
+            for key in CAMERA_KEYS
+        }
+        oldest_key = max(ages_ms, key=ages_ms.get)
+        oldest_age_ms = ages_ms[oldest_key]
+        if oldest_age_ms > float(max_camera_age_ms):
+            raise CameraSynchronizationError(
+                f"Camera set is stale: {oldest_key} frame is "
+                f"{oldest_age_ms:.1f} ms old; limit is "
+                f"{float(max_camera_age_ms):.1f} ms"
+            )
     return observation_time, camera_skew_ms
 
 
@@ -974,7 +1095,7 @@ def image_state_sync_metadata(
     }
     max_abs_skew_ms = max(abs(value) for value in signed_skews_ms.values())
     if max_abs_skew_ms > max_image_state_skew_ms:
-        raise RuntimeError(
+        raise CameraSynchronizationError(
             f"Camera/joint skew is {max_abs_skew_ms:.1f} ms; "
             f"limit is {max_image_state_skew_ms:.1f} ms"
         )
@@ -1033,39 +1154,102 @@ class FaObservationStream:
             while not self._stop_event.is_set():
                 started = time.monotonic()
                 self.ros.assert_runtime_command_topology(self.args)
-                images, camera_metadata = read_images(
-                    self.cameras,
-                    self.args.max_camera_age_ms,
-                    newer_than_sequences=last_camera_sequences,
+                retry_deadline = started + float(
+                    getattr(self.args, "observation_timeout_s", 10.0)
                 )
-                observation_time, camera_skew_ms = camera_observation_time(
-                    camera_metadata,
-                    self.args.max_camera_skew_ms,
-                )
-                state, state_metadata = self.ros.state_at_observation(
-                    observation_time,
-                    self.args.state_timeout_s,
-                    self.args.max_state_age_ms / 1000.0,
-                    self.args.max_image_state_skew_ms / 1000.0,
-                    newer_than_sequence=last_joint_sequence,
-                )
-                sync_metadata = image_state_sync_metadata(
-                    camera_metadata,
-                    state_metadata,
-                    observation_time,
-                    self.args.max_image_state_skew_ms,
-                )
-                sync_metadata["camera_skew_ms"] = camera_skew_ms
+                transient_fault: Optional[BaseException] = None
+                retry_count = 0
+                retry_sequences = dict(last_camera_sequences)
+                while True:
+                    try:
+                        images, depths, camera_metadata = read_images(
+                            self.cameras,
+                            self.args.max_camera_age_ms,
+                            newer_than_sequences=retry_sequences,
+                        )
+                        observation_time, camera_skew_ms = camera_observation_time(
+                            camera_metadata,
+                            self.args.max_camera_skew_ms,
+                            self.args.max_camera_age_ms,
+                        )
+                        state, state_metadata = self.ros.state_at_observation(
+                            observation_time,
+                            self.args.state_timeout_s,
+                            self.args.max_state_age_ms / 1000.0,
+                            self.args.max_image_state_skew_ms / 1000.0,
+                            newer_than_sequence=last_joint_sequence,
+                        )
+                        sync_metadata = image_state_sync_metadata(
+                            camera_metadata,
+                            state_metadata,
+                            observation_time,
+                            self.args.max_image_state_skew_ms,
+                        )
+                        sync_metadata["camera_skew_ms"] = camera_skew_ms
+                        break
+                    except CameraFault as exc:
+                        if exc.reason not in {"stale_rgbd", "missing_rgbd"}:
+                            raise
+                        transient_fault = exc
+                        retry_count += 1
+                    except CameraSynchronizationError as exc:
+                        transient_fault = exc
+                        retry_count += 1
+                        retry_sequences = {
+                            key: int(camera_metadata[key]["sequence"])
+                            for key in CAMERA_KEYS
+                        }
+                    except TimeoutError as exc:
+                        # A fresh camera set can still fall between eligible
+                        # joint-history samples, especially after a short
+                        # camera pause. Discard the complete set and wait for
+                        # three newer frames instead of weakening the image /
+                        # state skew limit or terminating the stream.
+                        transient_fault = exc
+                        retry_count += 1
+                        retry_sequences = {
+                            key: int(camera_metadata[key]["sequence"])
+                            for key in CAMERA_KEYS
+                        }
+                    if transient_fault is not None:
+                        remaining = retry_deadline - time.monotonic()
+                        if remaining <= 0.0:
+                            raise ObservationStreamError(
+                                f"no fresh synchronized frame within "
+                                f"{getattr(self.args, 'observation_timeout_s', 10.0):.1f}s; "
+                                f"last fault: {transient_fault}"
+                            ) from transient_fault
+                        if self._stop_event.wait(min(0.02, remaining)):
+                            return
+                if transient_fault is not None:
+                    print(
+                        "observation_recovered="
+                        + json.dumps(
+                            {
+                                "retries": retry_count,
+                                "pause_ms": round(
+                                    (time.monotonic() - started) * 1000.0, 3
+                                ),
+                                "last_fault": str(transient_fault),
+                            },
+                            separators=(",", ":"),
+                        ),
+                        flush=True,
+                    )
                 last_joint_sequence = int(state_metadata["sequence"])
                 last_camera_sequences = {
                     key: int(camera_metadata[key]["sequence"])
                     for key in CAMERA_KEYS
                 }
                 frozen_images: dict[str, np.ndarray] = {}
+                frozen_depths: dict[str, np.ndarray] = {}
                 for key, value in images.items():
                     image = np.ascontiguousarray(value)
                     image.setflags(write=False)
                     frozen_images[key] = image
+                    depth = np.ascontiguousarray(depths[key], dtype=np.uint16)
+                    depth.setflags(write=False)
+                    frozen_depths[key] = depth
                 frozen_state = np.ascontiguousarray(state, dtype=np.float32)
                 frozen_state.setflags(write=False)
                 self._sequence += 1
@@ -1079,6 +1263,7 @@ class FaObservationStream:
                     state_metadata=state_metadata,
                     sync_metadata=sync_metadata,
                     command=self.command_history.snapshot_at(observation_time),
+                    depths=frozen_depths,
                 )
                 if self.on_observation is not None:
                     self.on_observation(observation)
@@ -1095,7 +1280,10 @@ class FaObservationStream:
                     self._condition.notify_all()
 
     def wait_next(
-        self, newer_than_sequence: int, timeout_s: float
+        self,
+        newer_than_sequence: int,
+        timeout_s: float,
+        captured_after_monotonic_s: Optional[float] = None,
     ) -> FaObservation:
         deadline = time.monotonic() + float(timeout_s)
         with self._condition:
@@ -1107,6 +1295,11 @@ class FaObservationStream:
                 if (
                     self._latest is not None
                     and self._latest.sequence > int(newer_than_sequence)
+                    and (
+                        captured_after_monotonic_s is None
+                        or self._latest.captured_at_monotonic_s
+                        > float(captured_after_monotonic_s)
+                    )
                 ):
                     return self._latest
                 remaining = deadline - time.monotonic()
@@ -1171,6 +1364,95 @@ def validate_action(chunk) -> np.ndarray:
     if chunk.ndim != 2 or chunk.shape[1] != 16 or not np.isfinite(chunk).all():
         raise ValueError(f"Invalid FA action chunk: {chunk.shape}")
     return chunk
+
+
+def validate_synchronous_reply(
+    reply: dict,
+    *,
+    frame_sequence: int,
+    observation_id: int,
+    state: np.ndarray,
+) -> dict:
+    """Validate available provenance and return the server-selected stage."""
+
+    if reply.get("type") != "action_chunk":
+        raise RuntimeError(
+            f"Expected action_chunk reply, got {reply.get('type')!r}"
+        )
+    for key in ("frame_sequence", "model_input_frame_sequence"):
+        if key in reply and reply[key] != frame_sequence:
+            raise RuntimeError(
+                f"Synchronous result mismatch: {key}={reply[key]!r}, "
+                f"expected {frame_sequence}"
+            )
+    if "observation_id" in reply and reply["observation_id"] != observation_id:
+        raise RuntimeError(
+            "Synchronous result used a different observation: "
+            f"{reply['observation_id']!r} != {observation_id!r}"
+        )
+    if (
+        "video_observation_request_id" in reply
+        and "request_id" in reply
+        and reply["video_observation_request_id"] != reply["request_id"]
+    ):
+        raise RuntimeError(
+            "Synchronous result did not consume this request's RGB observation"
+        )
+    if "input_state" in reply:
+        input_state = np.asarray(reply["input_state"], dtype=np.float32)
+        expected_state = np.asarray(state, dtype=np.float32)
+        if input_state.shape != expected_state.shape or not np.allclose(
+            input_state, expected_state, rtol=0.0, atol=1e-7
+        ):
+            raise RuntimeError(
+                "Synchronous result used a different proprioceptive state"
+            )
+
+    language = reply.get("stage_language")
+    if not isinstance(language, dict):
+        raise RuntimeError(
+            "Server result is missing stage_language; "
+            "no local fallback is allowed"
+        )
+    if not isinstance(language.get("stage_id"), int):
+        raise RuntimeError("Server stage_language.stage_id must be an integer")
+    if not isinstance(language.get("stage"), str) or not language["stage"].strip():
+        raise RuntimeError(
+            "Server stage_language.stage must be a non-empty string"
+        )
+    if (
+        not isinstance(language.get("instruction"), str)
+        or not language["instruction"].strip()
+    ):
+        raise RuntimeError(
+            "Server stage_language.instruction must be a non-empty string"
+        )
+    return language
+
+
+def format_server_stage_log(language: dict) -> str:
+    """Expose the exact subtask stage selected by the server."""
+
+    controller = language.get("controller")
+    if not isinstance(controller, dict):
+        controller = {}
+    return "server_stage=" + json.dumps(
+        {
+            "stage_id": language["stage_id"],
+            "stage": language["stage"],
+            "instruction": language["instruction"],
+            "instruction_source": language.get(
+                "instruction_source", "predicted"
+            ),
+            "desired_quality": language.get("desired_quality"),
+            "controller_enabled": bool(
+                language.get("controller_enabled", True)
+            ),
+            "controller_action": controller.get("action"),
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
 
 
 def format_gripper_output_log(chunk: np.ndarray, execute: int, chunk_index: int) -> str:
@@ -1252,6 +1534,12 @@ def poll_operator_controls(
     for key in listener.poll():
         normalized = key.lower()
         if normalized == "i":
+            # Key-repeat or buffered terminal input can deliver another `i`
+            # after the first event has already transferred ownership into
+            # SAFE_HOLD.  Takeover is an AUTO-only transition; repeated `i`
+            # during rebaseline/arming/human control is idempotently ignored.
+            if operator.mode is not ControlMode.AUTO:
+                continue
             operator.request_takeover(
                 "operator_pressed_i",
                 automatic=False,
@@ -1356,7 +1644,7 @@ def _policy_exchange(
         if args.image_transport == "raw_cameras"
         else {"front": compose_training_mosaic(images)}
     )
-    policy.request(
+    image_ack = policy.request(
         {
             "type": "image",
             "images": wire_images,
@@ -1367,13 +1655,25 @@ def _policy_exchange(
             "expect_reply": True,
         }
     )
-    return policy.request(
+    if image_ack.get("type") != "image_ack":
+        raise RuntimeError(
+            f"Expected image_ack, got {image_ack.get('type')!r}"
+        )
+    reply = policy.request(
         {
             "type": "action_request",
+            "state": np.asarray(observation.state).copy(),
             "after_frame_sequence": chunk_index - 1,
             "require_paired_observation": True,
         }
     )
+    validate_synchronous_reply(
+        reply,
+        frame_sequence=chunk_index,
+        observation_id=observation.sequence,
+        state=np.asarray(observation.state),
+    )
+    return reply
 
 
 def _print_observation_feedback(
@@ -1463,16 +1763,33 @@ def run_human_control(
 ) -> np.ndarray:
     """Forward only post-handoff VR proposals through the sole real gateway."""
 
-    proposal_sequence = ros.begin_human_handoff()
-    operator.enter_human()
     print(
-        "[INTERVENTION] HUMAN active; move PICO/VR to send a fresh candidate. "
-        "Press s=success, f=failure, q/Esc=abort.",
+        "[INTERVENTION] SAFE_HOLD; keep both hands steady. Preserving the "
+        "completed VR calibration and rebasing both hands onto the current "
+        "measured robot poses...",
+        flush=True,
+    )
+    rebaseline_id = ros.rebaseline_human_control(args.human_rebaseline_timeout_s)
+    # Establish the candidate boundary only after the complete bimanual reset:
+    # calibration/reset traffic must never become the first authorized command.
+    handoff_sequence = ros.begin_human_handoff()
+    proposal_sequence = handoff_sequence
+    print(
+        f"[INTERVENTION] HUMAN_ARMING rebaseline_id={rebaseline_id}; keep both "
+        "hands steady while fresh arm targets are continuously checked against "
+        "the measured robot pose.",
         flush=True,
     )
     previous = np.asarray(initial_hold, dtype=np.float32).copy()
     started = time.monotonic()
     step = 0
+    verification_started_at: Optional[float] = None
+    verification_samples = 0
+    verification_max_error_rad = 0.0
+    human_active = False
+    verification_duration_s = float(
+        getattr(args, "human_rebaseline_verify_s", 0.0)
+    )
     while True:
         poll_operator_controls(
             listener, operator, chunk=None, step=step
@@ -1505,6 +1822,57 @@ def run_human_control(
         measured = ros.state(
             args.state_timeout_s, args.max_state_age_ms / 1000.0
         )
+        arm_sequence = int(metadata["arm_sequence"])
+        if not human_active:
+            # A gripper-only edge cannot prove that the arm mapping was reset.
+            # Do not publish any human topic until fresh arm proposals remain
+            # near the measured pose throughout the arming window.  Checking a
+            # single rate-limited proposal cannot detect a slow ramp toward an
+            # old IK branch.
+            if arm_sequence <= handoff_sequence:
+                continue
+            error_rad = float(
+                np.max(np.abs(np.asarray(proposal[:14]) - np.asarray(measured[:14])))
+            )
+            verification_samples += 1
+            verification_max_error_rad = max(
+                verification_max_error_rad, error_rad
+            )
+            if error_rad > args.max_human_rebaseline_error_rad:
+                raise RuntimeError(
+                    "post-rebaseline FA human target drifted from the "
+                    f"measured arm pose: max_error_rad={error_rad:.6f}, "
+                    f"limit={args.max_human_rebaseline_error_rad:.6f}; "
+                    "remaining in SAFE_HOLD"
+                )
+            now = time.monotonic()
+            if verification_started_at is None:
+                verification_started_at = now
+            if now - verification_started_at < verification_duration_s:
+                continue
+            human_active = True
+            operator.enter_human()
+            print(
+                "human_rebaseline_verified="
+                + json.dumps(
+                    {
+                        "max_error_rad": verification_max_error_rad,
+                        "limit_rad": args.max_human_rebaseline_error_rad,
+                        "arm_sequence": arm_sequence,
+                        "samples": verification_samples,
+                        "duration_s": verification_duration_s,
+                    },
+                    separators=(",", ":"),
+                ),
+                flush=True,
+            )
+            print(
+                f"[INTERVENTION] HUMAN active rebaseline_id={rebaseline_id}; "
+                "both arms now use their measured takeover poses as origins. "
+                "Move PICO/VR to control. Press s=success, f=failure, "
+                "q/Esc=abort.",
+                flush=True,
+            )
         limited = limit_fa_target(
             proposal,
             measured,
@@ -1659,14 +2027,20 @@ def run(args):
         )
 
         if args.record_dir is not None:
-            from beavr.scripts.ahawam_fa_episode_recorder import FaEpisodeRecorder
+            from beavr.scripts.ahawam_fa_isolated_recorder import (
+                IsolatedFaEpisodeRecorder,
+            )
 
-            recorder = FaEpisodeRecorder(
+            record_max_frame_gap_factor = float(
+                getattr(args, "record_max_frame_gap_factor", 3.0)
+            )
+            recorder = IsolatedFaEpisodeRecorder(
                 args.record_dir,
                 fps=args.record_fps,
                 segment_sec=args.record_segment_sec,
                 queue_size=args.record_queue_size,
                 min_free_gb=args.record_min_free_gb,
+                max_frame_gap_factor=record_max_frame_gap_factor,
                 config={
                     "platform": "FA",
                     "prompt": args.prompt,
@@ -1679,6 +2053,9 @@ def run(args):
                     "human_right_hand_input_topic": args.human_right_hand_input_topic,
                     "camera_settings": str(args.camera_settings),
                     "record_fps": args.record_fps,
+                    "record_max_frame_gap_factor": (
+                        record_max_frame_gap_factor
+                    ),
                     "state_units": "radians_plus_binary_gripper_latches",
                 },
             )
@@ -1688,6 +2065,7 @@ def run(args):
                 return
             recorder.submit_observation(
                 images=observation.images,
+                depths=observation.depths,
                 state=np.asarray(observation.state),
                 camera_metadata=observation.camera_metadata,
                 state_metadata=observation.state_metadata,
@@ -1713,6 +2091,40 @@ def run(args):
         executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="ahawam-fa-policy"
         )
+
+        def wait_for_arrival_barrier(
+            target: Optional[np.ndarray], after_chunk: int
+        ) -> dict[str, object]:
+            assert ros is not None and observation_stream is not None
+            observation_stream.raise_if_failed()
+            try:
+                report = wait_for_robot_arrival(
+                    ros,
+                    target,
+                    tolerance_rad=args.arrival_tolerance_rad,
+                    stability_rad=args.arrival_stability_rad,
+                    stable_seconds=args.arrival_stable_seconds,
+                    timeout_s=args.arrival_timeout_s,
+                    state_timeout_s=args.state_timeout_s,
+                    max_state_age_s=args.max_state_age_ms / 1000.0,
+                )
+            except Exception as exc:
+                raise ObservationStreamError(
+                    "FA robot did not satisfy the arrival barrier"
+                ) from exc
+            observation_stream.raise_if_failed()
+            payload = {"after_chunk": after_chunk, **report}
+            print(
+                "arrival_wait="
+                + json.dumps(payload, separators=(",", ":")),
+                flush=True,
+            )
+            record_event("arrival_wait", **payload)
+            return report
+
+        arrival_report: Optional[dict[str, object]] = None
+        if getattr(args, "wait_until_reached", False):
+            arrival_report = wait_for_arrival_barrier(None, -1)
 
         # Start recording before connecting to the brain.  A connection/startup
         # failure is a model-side failure: after a measured hold the operator
@@ -1750,8 +2162,15 @@ def run(args):
         last_observation_sequence = 0
         for chunk_index in range(args.max_chunks):
             observation = observation_stream.wait_next(
-                last_observation_sequence, args.observation_timeout_s
+                last_observation_sequence,
+                args.observation_timeout_s,
+                captured_after_monotonic_s=(
+                    None
+                    if arrival_report is None
+                    else float(arrival_report["ready_at_monotonic_s"])
+                ),
             )
+            arrival_report = None
             last_observation_sequence = observation.sequence
             _print_observation_feedback(
                 observation, last_command, chunk_index
@@ -1816,6 +2235,10 @@ def run(args):
                 format_gripper_output_log(chunk, execute, chunk_index),
                 flush=True,
             )
+            print(
+                format_server_stage_log(reply["stage_language"]),
+                flush=True,
+            )
             for step, target in enumerate(chunk[:execute]):
                 poll_operator_controls(
                     listener,
@@ -1862,6 +2285,11 @@ def run(args):
                     chunk=chunk_index,
                     step=step,
                     recorder=recorder,
+                )
+            if getattr(args, "wait_until_reached", False):
+                arrival_report = wait_for_arrival_barrier(
+                    last_command if args.enable_motion else None,
+                    chunk_index,
                 )
 
         episode_reason = "max_chunks_completed"
@@ -2129,6 +2557,19 @@ def parse_args(argv: Optional[list[str]] = None):
     p.add_argument("--state-timeout-s", type=float, default=5.0)
     p.add_argument("--observation-timeout-s", type=float, default=10.0)
     p.add_argument(
+        "--wait-until-reached",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "wait for stable measured arm arrival and a post-arrival camera "
+            "frame before each inference"
+        ),
+    )
+    p.add_argument("--arrival-tolerance-rad", type=float, default=0.02)
+    p.add_argument("--arrival-stability-rad", type=float, default=0.005)
+    p.add_argument("--arrival-stable-seconds", type=float, default=0.2)
+    p.add_argument("--arrival-timeout-s", type=float, default=15.0)
+    p.add_argument(
         "--command-topology-timeout-s",
         type=float,
         default=2.0,
@@ -2186,6 +2627,38 @@ def parse_args(argv: Optional[list[str]] = None):
         "--human-right-hand-input-topic",
         default="/ahawam/fa/human/right_hand",
     )
+    p.add_argument(
+        "--human-rebaseline-request-topic",
+        default="/ahawam/fa/human/rebaseline_request",
+    )
+    p.add_argument(
+        "--human-rebaseline-ack-topic",
+        default="/ahawam/fa/human/rebaseline_ack",
+    )
+    p.add_argument(
+        "--human-rebaseline-timeout-s",
+        type=float,
+        default=120.0,
+        help="maximum time for bimanual calibration/current-pose rebaseline",
+    )
+    p.add_argument(
+        "--max-human-rebaseline-error-rad",
+        type=float,
+        default=0.08,
+        help=(
+            "maximum post-rebaseline human arm target error versus measured "
+            "joints during arming; larger targets fail closed instead of ramping"
+        ),
+    )
+    p.add_argument(
+        "--human-rebaseline-verify-s",
+        type=float,
+        default=0.0,
+        help=(
+            "optional extra stationary verification after the operator's "
+            "2-second VR quarantine; 0 releases on the first safe candidate"
+        ),
+    )
     p.add_argument("--max-human-command-age-ms", type=float, default=200.0)
     p.add_argument(
         "--human-control-timeout-s",
@@ -2209,9 +2682,18 @@ def parse_args(argv: Optional[list[str]] = None):
         "--record-queue-size",
         type=int,
         default=32,
-        help="bounded raw-frame queue (~176 MiB at the default FA geometry)",
+        help="bounded raw RGB-D queue (~278 MiB at the default FA geometry)",
     )
     p.add_argument("--record-min-free-gb", type=float, default=5.0)
+    p.add_argument(
+        "--record-max-frame-gap-factor",
+        type=float,
+        default=3.0,
+        help=(
+            "maximum accepted frame gap as a multiple of the recording period; "
+            "keep 3 for datasets, raise only for no-motion logic diagnostics"
+        ),
+    )
     p.add_argument(
         "--require-outcome-label",
         action="store_true",
@@ -2241,6 +2723,10 @@ def parse_args(argv: Optional[list[str]] = None):
         args.connect_timeout_s,
         args.state_timeout_s,
         args.observation_timeout_s,
+        args.arrival_tolerance_rad,
+        args.arrival_stability_rad,
+        args.arrival_stable_seconds,
+        args.arrival_timeout_s,
         args.command_topology_timeout_s,
         args.max_state_age_ms,
         args.max_camera_age_ms,
@@ -2251,16 +2737,22 @@ def parse_args(argv: Optional[list[str]] = None):
         args.max_first_target_delta_rad,
         args.max_velocity_rad_s,
         args.max_acceleration_rad_s2,
+        args.human_rebaseline_timeout_s,
+        args.max_human_rebaseline_error_rad,
         args.max_human_command_age_ms,
         args.record_fps,
         args.record_segment_sec,
         args.record_queue_size,
+        args.record_max_frame_gap_factor,
     )
     if any(not np.isfinite(value) or value <= 0 for value in positive):
         p.error("timeouts, rates, limits, counts, and ages must be positive")
+    if args.arrival_stable_seconds >= args.arrival_timeout_s:
+        p.error("arrival timeout must exceed the stability window")
     nonnegative = (
         args.record_min_free_gb,
         args.human_control_timeout_s,
+        args.human_rebaseline_verify_s,
         args.outcome_label_timeout_s,
     )
     if any(not np.isfinite(value) or value < 0 for value in nonnegative):
